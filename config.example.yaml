@@ -1,0 +1,33 @@
+# Riggs configuration. Copy to ~/.config/riggs/config.yaml and edit.
+#
+# Tokens are ${ENV} references, never literals: the secrets stay in the
+# environment (Murtaugh's .env already exports these names).
+#
+# The ledger database is derived from this file's path and base name —
+# ~/.config/riggs/config.yaml -> ~/.config/riggs/config.db.
+version: 1
+
+# The single human Riggs acts for. Used as the reviewer handle to watch, the
+# Jira account tickets are assigned to, and the DM target when a tool is given
+# no --slack-channel.
+admin:
+  slack-user-id: U0B20G0ET9T
+  jira-email: miere@nurturecloud.com
+  github-login: miere
+
+# The Slack accounts Riggs may deliver through. A tool picks one with
+# --slack-profile; with none given, the profile named "default" is used, and a
+# missing "default" is an error rather than a silent no-op.
+slack:
+  profiles:
+    default:
+      bot-token: ${SLACK_BOT_TOKEN}
+      # Optional. Only needed by tools that must post as Miere rather than as
+      # the app.
+      user-token: ${SLACK_USER_TOKEN}
+      # Accepted but unused: Riggs never opens a Socket Mode connection.
+      # app-token: ${SLACK_APP_TOKEN}
+
+    # A second workspace, selected with --slack-profile nc.
+    # nc:
+    #   bot-token: ${SLACK_NC_BOT_TOKEN}

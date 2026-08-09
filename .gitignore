@@ -1,0 +1,9 @@
+# Build output
+/riggs
+/dist/
+
+# Local config and state — never commit these; they reference real channels
+# and sit next to the ledger.
+config.yaml
+config.db
+config.db-*
