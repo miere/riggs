@@ -234,6 +234,16 @@ Rules:
 - `app-token` is accepted on a profile but unused: Riggs never opens a Socket
   Mode connection (§1). The field exists so a profile can be described in full
   without the loader rejecting the key.
+- The client speaks **HTTP directly**, not through `slack-go` (which Murtaugh
+  uses). Riggs needs three endpoints — `chat.postMessage`, `chat.update`,
+  `conversations.open` — and the cards are `container` blocks, a type the
+  typed SDK does not model, so the payload would be hand-built JSON either
+  way. Owning the request also means owning 429 handling, which matters for a
+  per-minute job.
+- Slack reports application errors with **HTTP 200 and `"ok": false`**, so the
+  status code alone never tells you whether a post succeeded. Every response is
+  checked on `ok`. `message_not_found` is translated into a typed error,
+  because to the ledger it means "re-post", not "fail".
 
 ## 8. GitHub access
 
@@ -288,8 +298,6 @@ Rules:
 
 ## 9. The notification ledger
 
-*(Designed; implemented in phase 2.)*
-
 Every notification is stateful. A nudge can only be threaded onto a message
 that was already posted, so "post" and "update" and "thread" are one mechanism,
 not three programs.
@@ -318,9 +326,15 @@ Rules:
 - Deriving the desired card is a **pure function** of the upstream data, with
   no I/O mixed in. That is what makes "update only when it actually changed"
   correct, and what makes running a tick twice a no-op.
+- A threaded reply goes to the **card's own channel**, read from the ledger,
+  not to the caller's current default — otherwise moving a default would
+  strand replies away from the card they belong to.
 - The existing Python state (`github_review_queue.json`, ~231 KB of live cards,
   and `tickets.json`) is imported at cutover. Losing it re-posts a hundred
   cards into `#nc-code-reviews`, so the import is a hard requirement.
+
+Tables: `cards` (key → profile, channel, ts, fingerprint), `latches`
+(key, name → fired_at) and `http_cache` (url → etag, body) for §8.
 
 ## 10. Configuration file
 
@@ -368,14 +382,19 @@ Rules:
 | Phase | Contents | Status |
 | --- | --- | --- |
 | 0 | Skeleton, both frontends, config + profiles, `ping`, `capabilities` | done |
-| 1 | Slack domain (live client), Block Kit cards, `notify` ledger | next |
-| 2 | GitHub REST client + ETag cache (§8), PR state derivation, `git.pr.fetch-reviews` + parity gate | |
+| 1 | Slack domain (live client), Block Kit cards, `notify` ledger, `slack.send-msg` | done |
+| 2 | GitHub REST client + ETag cache (§8), PR state derivation, `git.pr.fetch-reviews` + parity gate | next |
 | 3 | `git.pr.approve` / `--approve-merge` | |
 | 4 | Jira domain, `jira.tickets` poll/nudge/action | |
 | 5 | State import, repoint Murtaugh jobs and rules, retire the Python | |
 
 ## 13. Change log
 
+- **unreleased** — Phase 1. The live Slack client (plain HTTP, §7), the
+  `blockkit` card renderer shared by both automations, and the `notify` ledger
+  (SQLite: cards, latches, HTTP cache). Adds `slack.send-msg`, registered only
+  when a Slack profile exists, and `capabilities` now reports the ledger
+  without creating it.
 - **unreleased** — GitHub access moves to REST + ETag conditional requests
   (§8), replacing the blueprint's "delegate everything to `gh`". Driven by
   measurement: the shipped review-queue loop costs 164 GraphQL points/tick,

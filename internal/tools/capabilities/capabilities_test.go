@@ -3,10 +3,14 @@ package capabilities
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/miere/riggs-mcp/internal/config"
+	"github.com/miere/riggs-mcp/internal/notify"
 )
 
 // probes builds a Tool whose external checks are fully determined by the test.
@@ -19,7 +23,7 @@ func probes(cfg *config.Config, present map[string]string, env map[string]string
 			return "", errors.New("not found")
 		},
 		func(k string) string { return env[k] },
-	)
+	).WithLedgerProbe(func(path string) Ledger { return Ledger{Path: path} })
 }
 
 func invoke(t *testing.T, tool *Tool) Report {
@@ -104,5 +108,46 @@ func TestRendersEmptyProfileSet(t *testing.T) {
 	r := invoke(t, probes(&config.Config{Path: "<no config file>"}, nil, nil))
 	if !strings.Contains(r.String(), "none configured") {
 		t.Errorf("report does not explain an empty profile set:\n%s", r.String())
+	}
+}
+
+// The ledger is reported without being provisioned: running a diagnostic must
+// not create the state it is diagnosing.
+func TestLedgerProbeDoesNotCreateTheFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.db")
+
+	got := readLedger(path)
+	if got.Exists || got.Cards != 0 || got.Problem != "" {
+		t.Errorf("ledger = %+v, want it reported absent", got)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Error("readLedger created the ledger file as a side effect")
+	}
+	if !strings.Contains(Report{Ledger: got}.String(), "not created yet") {
+		t.Error("an absent ledger is not explained in the rendered report")
+	}
+}
+
+// An existing ledger is read and counted.
+func TestLedgerProbeCountsCards(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.db")
+	store, err := notify.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := store.SaveCard(context.Background(), "o/r#1", notify.Entry{
+		Profile: "default", Channel: "C1", TS: "1700.1", Fingerprint: "abc", UpdatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("SaveCard: %v", err)
+	}
+	store.Close()
+
+	got := readLedger(path)
+	if !got.Exists || got.Cards != 1 || got.Problem != "" {
+		t.Errorf("ledger = %+v, want one tracked card", got)
+	}
+	if !strings.Contains(Report{Ledger: got}.String(), "1 cards tracked") {
+		t.Errorf("card count missing from the report:\n%s", Report{Ledger: got}.String())
 	}
 }

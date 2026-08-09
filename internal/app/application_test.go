@@ -69,3 +69,37 @@ func TestUsageLineSpellsVerbFlags(t *testing.T) {
 		}
 	}
 }
+
+// A Slack-backed tool is registered only when there is an account to post
+// through; `capabilities` explains the absence.
+func TestSlackToolsGatedOnProfiles(t *testing.T) {
+	dir := t.TempDir()
+	withProfile := filepath.Join(dir, "with.yaml")
+	if err := os.WriteFile(withProfile, []byte(
+		"slack:\n  profiles:\n    default:\n      bot-token: xoxb-x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bare := filepath.Join(dir, "bare.yaml")
+	if err := os.WriteFile(bare, []byte("version: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	a, err := New(ModeCLI, nil, withProfile)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, ok := a.registry.Get("slack.send-msg"); !ok {
+		t.Error("slack.send-msg absent despite a configured profile")
+	}
+
+	b, err := New(ModeCLI, nil, bare)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, ok := b.registry.Get("slack.send-msg"); ok {
+		t.Error("slack.send-msg registered with no Slack profile configured")
+	}
+	if _, ok := b.registry.Get("capabilities"); !ok {
+		t.Error("capabilities must remain available to explain the absence")
+	}
+}

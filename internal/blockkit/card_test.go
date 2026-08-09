@@ -1,0 +1,173 @@
+package blockkit
+
+import (
+	"encoding/json"
+	"reflect"
+	"strings"
+	"testing"
+)
+
+// semantic compares two JSON documents by structure, ignoring key order —
+// which is what Slack cares about.
+func semantic(t *testing.T, got []any, want string) {
+	t.Helper()
+	gotBytes, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var g, w any
+	if err := json.Unmarshal(gotBytes, &g); err != nil {
+		t.Fatalf("unmarshal got: %v", err)
+	}
+	if err := json.Unmarshal([]byte(want), &w); err != nil {
+		t.Fatalf("unmarshal want: %v", err)
+	}
+	if !reflect.DeepEqual(g, w) {
+		t.Errorf("card mismatch\n got: %s\nwant: %s", gotBytes, want)
+	}
+}
+
+// The live PR card, as the Python renders it today. This is the shape the
+// cutover must reproduce: same block types, same block_ids, same action_ids.
+func TestReviewablePullRequestCard(t *testing.T) {
+	card := Card{
+		Title:          "Fix the resolver",
+		Subtitle:       "UpsideRealty/upside#20069",
+		IconURL:        "https://example.test/gh.png",
+		IconAlt:        "GitHub",
+		Body:           "Repoints the owner link.",
+		BodyBlockID:    "pr_summary",
+		ActionsBlockID: "UpsideRealty/upside#20069",
+		Actions: []Element{
+			Button{ActionID: "approve_only", Text: "Approve", Value: "UpsideRealty/upside#20069", Primary: true},
+			LinkButton{Text: "Open in Browser", URL: "https://github.com/x/y/pull/1"},
+			Overflow{ActionID: "pr_overflow", Options: []Option{
+				{Text: "Approve & Merge", Value: "approve_merge"},
+				{Text: "Run Local Review", Value: "run_local_review"},
+			}},
+		},
+	}
+
+	semantic(t, card.Blocks(), `[{
+      "type":"container","width":"wide",
+      "title":{"type":"plain_text","text":"Fix the resolver"},
+      "subtitle":{"type":"plain_text","text":"UpsideRealty/upside#20069"},
+      "icon":{"type":"image","image_url":"https://example.test/gh.png","alt_text":"GitHub"},
+      "is_collapsible":true,"default_collapsed":false,
+      "child_blocks":[
+        {"type":"section","block_id":"pr_summary","text":{"type":"mrkdwn","text":"Repoints the owner link."}},
+        {"type":"divider"},
+        {"type":"actions","block_id":"UpsideRealty/upside#20069","elements":[
+          {"type":"button","action_id":"approve_only","style":"primary","value":"UpsideRealty/upside#20069",
+           "text":{"type":"plain_text","text":"Approve","emoji":true}},
+          {"type":"button","url":"https://github.com/x/y/pull/1",
+           "text":{"type":"plain_text","text":"Open in Browser","emoji":true}},
+          {"type":"overflow","action_id":"pr_overflow","options":[
+            {"text":{"type":"plain_text","text":"Approve & Merge","emoji":true},"value":"approve_merge"},
+            {"text":{"type":"plain_text","text":"Run Local Review","emoji":true},"value":"run_local_review"}
+          ]}
+        ]}
+      ]}]`)
+}
+
+// A not-reviewable PR keeps its summary and swaps the actions row for a single
+// context line.
+func TestCollapsedPullRequestCardKeepsSummary(t *testing.T) {
+	card := Card{
+		Title: "T", Subtitle: "o/r#2", Body: "S", BodyBlockID: "pr_summary",
+		Collapsed: true, Context: "Merged at: May 14, 2026 at 3:42 PM",
+	}
+	semantic(t, card.Blocks(), `[{
+      "type":"container","width":"wide",
+      "title":{"type":"plain_text","text":"T"},
+      "subtitle":{"type":"plain_text","text":"o/r#2"},
+      "is_collapsible":true,"default_collapsed":true,
+      "child_blocks":[
+        {"type":"section","block_id":"pr_summary","text":{"type":"mrkdwn","text":"S"}},
+        {"type":"divider"},
+        {"type":"context","elements":[{"type":"mrkdwn","text":"Merged at: May 14, 2026 at 3:42 PM"}]}
+      ]}]`)
+}
+
+// A resolved ticket card drops the description entirely — the QCT renderer
+// emits no section block once the task is claimed. An empty Body must
+// therefore render no section, not an empty one.
+func TestResolvedTicketCardHasNoSection(t *testing.T) {
+	card := Card{
+		Title: "Add a health probe", Subtitle: "NYX-1234",
+		Collapsed: true, Context: "Assigned to: Miere - Last updated: May 14, 2026 at 3:42 PM",
+	}
+	semantic(t, card.Blocks(), `[{
+      "type":"container","width":"wide",
+      "title":{"type":"plain_text","text":"Add a health probe"},
+      "subtitle":{"type":"plain_text","text":"NYX-1234"},
+      "is_collapsible":true,"default_collapsed":true,
+      "child_blocks":[
+        {"type":"divider"},
+        {"type":"context","elements":[{"type":"mrkdwn","text":"Assigned to: Miere - Last updated: May 14, 2026 at 3:42 PM"}]}
+      ]}]`)
+}
+
+// The fingerprint is the ledger's "did this change?" test, so an unchanged
+// card must hash identically every time. Go maps would not guarantee this;
+// the ordered structs are what make it hold.
+func TestFingerprintIsStable(t *testing.T) {
+	card := Card{
+		Title: "T", Subtitle: "S", Body: "B", ActionsBlockID: "id",
+		Actions: []Element{
+			Button{ActionID: "a", Text: "A", Value: "v", Primary: true},
+			Overflow{ActionID: "o", Options: []Option{{Text: "x", Value: "1"}, {Text: "y", Value: "2"}}},
+		},
+	}
+	first := card.Fingerprint()
+	if first == "" {
+		t.Fatal("Fingerprint returned empty")
+	}
+	for i := 0; i < 50; i++ {
+		if got := card.Fingerprint(); got != first {
+			t.Fatalf("Fingerprint is unstable: %s != %s (iteration %d)", got, first, i)
+		}
+	}
+}
+
+func TestFingerprintTracksEveryVisibleChange(t *testing.T) {
+	base := Card{Title: "T", Subtitle: "S", Body: "B", Context: "C", Collapsed: false}
+	for _, tc := range []struct {
+		name string
+		card Card
+	}{
+		{"body", func() Card { c := base; c.Body = "different"; return c }()},
+		{"title", func() Card { c := base; c.Title = "different"; return c }()},
+		{"context", func() Card { c := base; c.Context = "different"; return c }()},
+		{"collapsed", func() Card { c := base; c.Collapsed = true; return c }()},
+		{"actions appear", func() Card {
+			c := base
+			c.Actions = []Element{Button{ActionID: "a", Text: "A", Value: "v"}}
+			return c
+		}()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.card.Fingerprint() == base.Fingerprint() {
+				t.Errorf("changing %s did not change the fingerprint", tc.name)
+			}
+		})
+	}
+}
+
+// An actions row wins over a context line: a live card shows buttons, not a
+// status label, even if both are set.
+func TestActionsSupersedeContext(t *testing.T) {
+	card := Card{Title: "T", Subtitle: "S", Context: "should not appear",
+		Actions: []Element{Button{ActionID: "a", Text: "A", Value: "v"}}}
+	encoded, _ := json.Marshal(card.Blocks())
+	if got := string(encoded); strings.Contains(got, "should not appear") {
+		t.Errorf("context rendered alongside actions: %s", got)
+	}
+}
+
+func TestTextAndContextBlocks(t *testing.T) {
+	semantic(t, TextBlocks("<@U1> ready for review"),
+		`[{"type":"section","text":{"type":"mrkdwn","text":"<@U1> ready for review"}}]`)
+	semantic(t, ContextBlocks("✓ Approved o/r#1."),
+		`[{"type":"context","elements":[{"type":"plain_text","text":"✓ Approved o/r#1.","emoji":false}]}]`)
+}

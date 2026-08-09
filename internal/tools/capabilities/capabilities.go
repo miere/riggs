@@ -18,6 +18,7 @@ import (
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/miere/riggs-mcp/internal/config"
+	"github.com/miere/riggs-mcp/internal/notify"
 )
 
 // Tool reports the configured capabilities.
@@ -28,11 +29,42 @@ type Tool struct {
 	lookPath func(string) (string, error)
 	// getenv is the environment probe, injected for the same reason.
 	getenv func(string) string
+	// ledger reads the notification store without creating it.
+	ledger func(path string) Ledger
 }
 
 // New constructs the capabilities tool over the loaded configuration.
 func New(cfg *config.Config) *Tool {
-	return &Tool{cfg: cfg, lookPath: exec.LookPath, getenv: os.Getenv}
+	return &Tool{cfg: cfg, lookPath: exec.LookPath, getenv: os.Getenv, ledger: readLedger}
+}
+
+// readLedger inspects the ledger without provisioning it: an absent file is
+// reported as absent, not created.
+func readLedger(path string) Ledger {
+	l := Ledger{Path: path}
+	if _, err := os.Stat(path); err != nil {
+		return l
+	}
+	l.Exists = true
+	store, err := notify.Open(path)
+	if err != nil {
+		l.Problem = err.Error()
+		return l
+	}
+	defer store.Close()
+	n, err := store.CountCards(context.Background())
+	if err != nil {
+		l.Problem = err.Error()
+		return l
+	}
+	l.Cards = n
+	return l
+}
+
+// WithLedgerProbe overrides the ledger reader; for tests.
+func (t *Tool) WithLedgerProbe(f func(string) Ledger) *Tool {
+	t.ledger = f
+	return t
 }
 
 // WithProbes overrides the executable and environment probes; for tests.
@@ -56,10 +88,22 @@ func (t *Tool) InputSchema() *jsonschema.Schema { return nil }
 // frontend marshals it as JSON.
 type Report struct {
 	ConfigPath string    `json:"config_path"`
-	LedgerPath string    `json:"ledger_path"`
+	Ledger     Ledger    `json:"ledger"`
 	Admin      Admin     `json:"admin"`
 	Slack      []Profile `json:"slack_profiles"`
 	Backends   []Backend `json:"backends"`
+}
+
+// Ledger reports the notification store: where it is, and what it holds.
+//
+// It is read without creating anything. A diagnostic that provisions state as
+// a side effect of being run is a diagnostic you cannot trust.
+type Ledger struct {
+	Path   string `json:"path"`
+	Exists bool   `json:"exists"`
+	Cards  int    `json:"cards"`
+	// Problem is set when the file is there but could not be read.
+	Problem string `json:"problem,omitempty"`
 }
 
 // Admin mirrors the configured admin identity, reporting only whether each
@@ -92,7 +136,7 @@ type Backend struct {
 func (t *Tool) Invoke(context.Context, map[string]any) (any, error) {
 	r := Report{
 		ConfigPath: t.cfg.Path,
-		LedgerPath: t.cfg.DBPath(),
+		Ledger:     t.ledger(t.cfg.DBPath()),
 		Admin: Admin{
 			SlackUserID: set(t.cfg.Admin.SlackUserID),
 			JiraEmail:   set(t.cfg.Admin.JiraEmail),
@@ -125,11 +169,11 @@ func (t *Tool) slackProfiles() []Profile {
 	return out
 }
 
-// backends probes the external dependencies. GitHub is delegated entirely to
-// an authenticated `gh`, and the card summaries to `claude -p`, so neither
-// holds a credential of its own here.
+// backends probes the external dependencies. `gh` is the GitHub *credential*
+// provider — Riggs makes the HTTP calls itself — and card summaries shell out
+// to `claude -p`. Neither holds a credential of Riggs' own here.
 func (t *Tool) backends() []Backend {
-	out := []Backend{t.binary("gh", "GitHub access is delegated to the authenticated gh CLI"),
+	out := []Backend{t.binary("gh", "the GitHub token comes from the authenticated gh CLI"),
 		t.binary("claude", "card summaries shell out to `claude -p`")}
 
 	email := t.getenv("ATLASSIAN_JIRA_EMAIL")
@@ -168,7 +212,15 @@ func set(v string) string {
 // String renders the report for a human reading the CLI.
 func (r Report) String() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "config: %s\nledger: %s\n", r.ConfigPath, r.LedgerPath)
+	fmt.Fprintf(&b, "config: %s\n", r.ConfigPath)
+	switch {
+	case r.Ledger.Problem != "":
+		fmt.Fprintf(&b, "ledger: %s — unreadable: %s\n", r.Ledger.Path, r.Ledger.Problem)
+	case r.Ledger.Exists:
+		fmt.Fprintf(&b, "ledger: %s (%d cards tracked)\n", r.Ledger.Path, r.Ledger.Cards)
+	default:
+		fmt.Fprintf(&b, "ledger: %s (not created yet)\n", r.Ledger.Path)
+	}
 	fmt.Fprintf(&b, "\nadmin:\n  slack-user-id: %s\n  jira-email:    %s\n  github-login:  %s\n",
 		r.Admin.SlackUserID, r.Admin.JiraEmail, r.Admin.GitHubLogin)
 
