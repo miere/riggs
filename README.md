@@ -19,16 +19,32 @@ go build -o ~/.local/bin/riggs ./cmd/riggs
 
 ## Configure
 
-Riggs reads `~/.config/riggs/config.yaml` by default. Copy the example and edit
-it:
+The quickest route is the installer:
+
+```sh
+riggs install
+```
+
+It asks where the config should live, collects the credentials without echoing
+them, sends a **real** test card for a **real** pull request to your Slack DM —
+failing the install if that does not work — and then, if Murtaugh is installed,
+registers the scheduled jobs through `murtaugh cfg job set`. Jobs whose tool
+this build does not yet expose are skipped and reported rather than installed
+to fail on a schedule.
+
+It needs a terminal, and will refuse to run without one rather than echo a
+pasted token into your scrollback.
+
+To configure by hand instead, copy the example and edit it:
 
 ```sh
 mkdir -p ~/.config/riggs
 cp config.example.yaml ~/.config/riggs/config.yaml
 ```
 
-Tokens are written as `${ENV}` references, so the file itself holds no secrets.
-The ledger database lives beside the config file under the same base name
+Tokens may be literal values or `${ENV}` references; the file is written mode
+0600 either way, and the installer prefers a reference whenever the variable is
+already set. The ledger database lives beside the config file under the same base name
 (`config.yaml` → `config.db`), so `--config-file` moves both.
 
 Check what's live:

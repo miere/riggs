@@ -47,6 +47,7 @@ type Config struct {
 	Version int   `yaml:"version"`
 	Admin   Admin `yaml:"admin"`
 	Slack   Slack `yaml:"slack"`
+	Jira    Jira  `yaml:"jira"`
 
 	// Path records where this config came from, for diagnostics. It is
 	// NoFilePath when no file was read.
@@ -69,6 +70,28 @@ type Admin struct {
 	JiraEmail string `yaml:"jira-email"`
 	// GitHubLogin is the reviewer handle the PR mirror watches by default.
 	GitHubLogin string `yaml:"github-login"`
+}
+
+// Jira holds the Atlassian credentials. Both may be ${ENV} references, and
+// both fall back to the ATLASSIAN_JIRA_* variables Murtaugh's .env already
+// exports — so an existing machine needs nothing re-provisioned, and a fresh
+// one can be configured entirely by the installer.
+type Jira struct {
+	Email string `yaml:"email"`
+	Token string `yaml:"token"`
+}
+
+// JiraCredentials returns the effective email and token, preferring the config
+// file and falling back to the environment.
+func (c *Config) JiraCredentials() (email, token string) {
+	email, token = c.Jira.Email, c.Jira.Token
+	if email == "" {
+		email = os.Getenv("ATLASSIAN_JIRA_EMAIL")
+	}
+	if token == "" {
+		token = os.Getenv("ATLASSIAN_JIRA_TOKEN")
+	}
+	return email, token
 }
 
 // Slack holds the named accounts Riggs can deliver through.
@@ -184,6 +207,8 @@ func (c *Config) DBPath() string { return c.dbPath }
 // expand resolves ${VAR} references in every token, so the config file holds
 // references and the environment holds secrets.
 func (c *Config) expand() {
+	c.Jira.Email = os.ExpandEnv(c.Jira.Email)
+	c.Jira.Token = os.ExpandEnv(c.Jira.Token)
 	for name, p := range c.Slack.Profiles {
 		p.BotToken = os.ExpandEnv(p.BotToken)
 		p.UserToken = os.ExpandEnv(p.UserToken)

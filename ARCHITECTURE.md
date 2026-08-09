@@ -166,8 +166,15 @@ Rules:
 
 ## 6. Credentials and capability gating
 
-Credentials are read from the environment; the config file holds `${ENV}`
-references, never secrets.
+Credentials come from the config file, which may hold either a literal token
+or a `${ENV}` reference. The file is written mode 0600.
+
+An earlier rule here said the config never holds secrets. `riggs install`
+changed that: an installer that asks for a token has to be able to persist it,
+and a machine with no pre-existing `.env` had nowhere to put one. The
+`${ENV}` form remains, and the installer prefers it whenever the corresponding
+variable is already populated — so an existing machine keeps its secrets in the
+environment, and a fresh one is provisioned in one pass.
 
 | Variable | Used by |
 | --- | --- |
@@ -377,7 +384,43 @@ Rules:
   differently from the Python, that test fails loudly instead of spamming the
   channel.
 
-## 12. Roadmap
+## 12. Installation
+
+`riggs install` (in `internal/installer`) provisions a working setup. It is
+interactive, so it lives outside the tool registry and is never exposed over
+MCP — the same treatment the blueprint gives its `auth` command.
+
+The flow: config location, admin identity, credentials, a live smoke test, then
+Murtaugh's jobs.
+
+Rules:
+
+- It **refuses to run without a terminal**, rather than echoing a pasted token
+  into the scrollback of a piped session.
+- The GitHub login is discovered, not asked for: `gh auth status --show-token`
+  reports it alongside the token. Note that gh writes both to **stderr**, and
+  exits non-zero when any configured host is unhealthy — so both streams are
+  parsed and the exit code is not what decides success.
+- The smoke test posts a **real card for a real PR** to the admin's DM. A
+  stand-in message would prove less than it appears to. Any failure aborts the
+  install, because the alternative is a setup that looks finished and fails
+  later, unattended.
+- Zero PRs awaiting review is not a failure: a confirmation card is sent
+  instead, and the console says which happened.
+- Murtaugh is configured **only** through `murtaugh cfg job set`. Riggs never
+  writes Murtaugh's database: that command re-validates the whole assembled
+  config and rolls back a change that would leave it invalid, which a
+  hand-written row would bypass.
+- Job cadences are carried over unchanged from the existing definitions
+  (1m, 3m, and the weekday cron). A migration that also changes the schedule
+  makes it impossible to attribute a behaviour difference.
+- A job whose tool this build does not expose is **skipped and reported**, not
+  installed. Registering `jira.tickets` before phase 4 would mean a scheduled
+  failure every three minutes.
+- The job passes `--config-file` only when the config is not where Riggs would
+  look anyway, so the common case stays readable.
+
+## 13. Roadmap
 
 | Phase | Contents | Status |
 | --- | --- | --- |
@@ -388,8 +431,12 @@ Rules:
 | 4 | Jira domain, `jira.tickets` poll/nudge/action | |
 | 5 | State import, repoint Murtaugh jobs and rules, retire the Python | |
 
-## 13. Change log
+## 14. Change log
 
+- **unreleased** — `riggs install` (§12), plus the first slice of
+  `internal/github`: the token/login from `gh`, and the review-requested
+  search the smoke test posts a card for. Adds a `jira` config section so the
+  installer can persist the Atlassian credentials it asks for.
 - **unreleased** — Phase 1. The live Slack client (plain HTTP, §7), the
   `blockkit` card renderer shared by both automations, and the `notify` ledger
   (SQLite: cards, latches, HTTP cache). Adds `slack.send-msg`, registered only

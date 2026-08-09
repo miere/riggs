@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/miere/riggs-mcp/internal/app"
+	"github.com/miere/riggs-mcp/internal/installer"
 	"github.com/miere/riggs-mcp/internal/version"
 )
 
@@ -39,6 +40,12 @@ func run(args []string) error {
 		return nil
 	}
 
+	// `riggs install` is interactive, so it lives outside the tool registry
+	// and is never exposed over MCP.
+	if len(args) > 0 && args[0] == "install" {
+		return runInstall(context.Background())
+	}
+
 	mode := app.ModeCLI
 	rest := args
 	if len(args) > 0 && args[0] == "mcp" {
@@ -54,6 +61,22 @@ func run(args []string) error {
 		return fmt.Errorf("%s", a.UsageLine())
 	}
 	return a.Run(context.Background())
+}
+
+// runInstall drives the interactive installer.
+func runInstall(ctx context.Context) error {
+	console := installer.NewConsole()
+	if !console.IsTerminal() {
+		return fmt.Errorf("install needs a terminal: it reads credentials without echoing them")
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("locating this binary (needed as the job command): %w", err)
+	}
+	return installer.New(console, installer.Options{
+		RiggsPath: self,
+		ToolsFor:  app.ToolNames,
+	}).Run(ctx)
 }
 
 // configFlag selects the configuration file, overriding $RIGGS_CONFIG and the
