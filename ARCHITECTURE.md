@@ -23,9 +23,9 @@ The automations being replaced:
 | `pull_request/main.py review-queue` | job, every 1m | `git.pr.fetch-reviews` |
 | `pull_request/main.py approve` | rule `pr-approve` | `git.pr.approve` |
 | `pull_request/main.py approve --action-id approve_merge` | rule `pr-approve-merge` | `git.pr.approve-merge` |
-| `quick_coding_tasks/main.py poll` | job, every 3m | `jira.tickets` |
-| `quick_coding_tasks/main.py nudge` | job, weekdays 09/12/14/17 | `jira.tickets` (nudge latch) |
-| `quick_coding_tasks/main.py action` | rules `quick-coding-tasks-*` | `jira.tickets` action verbs |
+| `quick_coding_tasks/main.py poll` | job, every 3m | `jira.tickets.poll` |
+| `quick_coding_tasks/main.py nudge` | job, weekdays 09/12/14/17 | `jira.tickets.nudge` |
+| `quick_coding_tasks/main.py action` | rules `quick-coding-tasks-*` | `jira.tickets.assign` / `.dismiss` |
 | `repository_manager/main.py` | — | to be scoped |
 
 ## 2. High-level architecture
@@ -347,6 +347,33 @@ Rules:
   is one `reviewDecision` query per candidate; batching them into a single
   aliased query is the obvious next reduction.
 
+## 8b. The ticket queue
+
+`internal/ticket` advertises a Jira query as claimable cards. The JQL is a
+parameter, not a constant, so one tool serves any queue rather than only the
+`ai-able` board the Python was pinned to.
+
+Rules:
+
+- **The query is the source of truth for "still up for grabs".** A tracked card
+  whose ticket no longer matches has been handled elsewhere and collapses. A
+  ticket that cannot be *read*, though, is left alone: collapsing on a
+  transient failure would claim it was handled when it may not have been.
+- **Claiming means assign *and* transition.** A ticket assigned but left in
+  Ready is re-advertised by the next poll, so a failed transition is reported
+  rather than printed and ignored — which is what the Python did.
+- **Dismissing does not touch Jira.** It means "not for me", not "handled"; the
+  ticket stays exactly as it is for anyone else.
+- **Only the configured admin may act.** A card is visible to a whole channel,
+  and a button anyone could press would assign work to someone who never asked
+  for it. An unattributed click is refused too.
+- The nudge re-checks Jira before pinging, so a quietly claimed ticket gets its
+  card collapsed instead of a bogus reminder. Age is measured from when the
+  card was advertised, not from any Jira date.
+- **Dry runs never summarise.** Shelling `claude -p` per ticket turned a
+  preview into minutes of work for a value nobody acts on; the title stands in.
+  The same applies to the pull-request loop.
+
 ## 9. The notification ledger
 
 Every notification is stateful. A nudge can only be threaded onto a message
@@ -472,11 +499,16 @@ Rules:
 | 1 | Slack domain (live client), Block Kit cards, `notify` ledger, `slack.send-msg` | done |
 | 2 | GitHub REST client + ETag cache (§8), PR state derivation, `git.pr.fetch-reviews` + parity gate | done |
 | 3 | `git.pr.approve` / `--approve-merge` | done |
-| 4 | Jira domain, `jira.tickets` poll/nudge/action | next |
-| 5 | State import, repoint Murtaugh jobs and rules, retire the Python | |
+| 4 | Jira domain, `jira.tickets.*` poll/nudge/assign/dismiss/import | done |
+| 5 | Repoint Murtaugh jobs and rules, retire the Python | next |
 
 ## 14. Change log
 
+- **unreleased** — Phase 4. `internal/jira` (REST v3, ADF flattening) and
+  `internal/ticket`. Adds `jira.tickets.poll`, `.nudge`, `.assign`,
+  `.dismiss` and `.import-state`. Verified against live Jira: 16 tickets
+  matched, and after importing the Python's 106 entries the poll recognises
+  all of them as already advertised.
 - **unreleased** — Phase 3. `git.pr.approve` and `git.pr.approve-merge`, with
   the approval guard (a standing approval is not resubmitted; a dismissed one
   is), verification with retries through GitHub's replication lag, and honest

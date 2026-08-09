@@ -117,7 +117,7 @@ func TestSkipsJobsWhoseToolIsNotBuilt(t *testing.T) {
 		t.Error("registered a job whose tool does not exist")
 	}
 	transcript := r.prompt.transcript()
-	for _, want := range []string{"quick-coding-tasks-poll", "jira.tickets", "not built yet"} {
+	for _, want := range []string{"quick-coding-tasks-poll", "jira.tickets.poll", "not built yet"} {
 		if !strings.Contains(transcript, want) {
 			t.Errorf("the skip was not explained (%q missing):\n%s", want, transcript)
 		}
@@ -128,7 +128,8 @@ func TestSkipsJobsWhoseToolIsNotBuilt(t *testing.T) {
 // unchanged so a migration does not also change behaviour.
 func TestPreservesExistingCadences(t *testing.T) {
 	s := happyScript("", "", "")
-	r := newRig(t, s, map[string]bool{"git.pr.fetch-reviews": true, "jira.tickets": true})
+	r := newRig(t, s, map[string]bool{
+		"git.pr.fetch-reviews": true, "jira.tickets.poll": true, "jira.tickets.nudge": true})
 
 	if err := r.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)

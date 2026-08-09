@@ -79,6 +79,8 @@ type Admin struct {
 type Jira struct {
 	Email string `yaml:"email"`
 	Token string `yaml:"token"`
+	// BaseURL overrides the Atlassian tenant. Empty uses the default.
+	BaseURL string `yaml:"base-url"`
 }
 
 // JiraCredentials returns the effective email and token, preferring the config

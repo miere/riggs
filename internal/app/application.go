@@ -60,6 +60,7 @@ func New(mode Mode, args []string, configPath string) (*Application, error) {
 		resolver := slack.NewResolver(cfg)
 		reg.Register(sendmsg.New(resolver, slack.NewAPI()))
 		registerGitHubTools(reg, cfg, resolver)
+		registerJiraTools(reg, cfg, resolver)
 	}
 
 	return &Application{mode: mode, args: args, registry: reg}, nil

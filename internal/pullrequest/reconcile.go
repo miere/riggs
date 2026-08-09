@@ -362,10 +362,13 @@ func (e *Engine) summaryFor(ctx context.Context, key string, r Resolved, dryRun 
 	if ok || !r.State.Reviewable {
 		return cached, nil
 	}
-	summary, sErr := e.summariser.Summarise(ctx, r.Detail.Title, r.Detail.Body)
+	// A dry run must be cheap as well as harmless: summarising shells out to
+	// `claude -p` per pull request, which turns a preview into minutes of work
+	// for a value nobody acts on. The title stands in.
 	if dryRun {
-		return summary, nil
+		return r.Detail.Title, nil
 	}
+	summary, sErr := e.summariser.Summarise(ctx, r.Detail.Title, r.Detail.Body)
 	// A summary failure has already degraded to the title; cache that too, so
 	// a broken claude does not re-invoke on every tick.
 	if err := e.store.SaveSummary(ctx, key, summary, timeNow()); err != nil {
