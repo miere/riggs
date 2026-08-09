@@ -14,6 +14,7 @@ import (
 	"github.com/miere/riggs-mcp/internal/pullrequest"
 	"github.com/miere/riggs-mcp/internal/slack"
 	"github.com/miere/riggs-mcp/internal/tools"
+	"github.com/miere/riggs-mcp/internal/tools/approve"
 	"github.com/miere/riggs-mcp/internal/tools/fetchreviews"
 	"github.com/miere/riggs-mcp/internal/tools/importstate"
 	"github.com/miere/riggs-mcp/internal/tools/parity"
@@ -63,6 +64,20 @@ func engineFor(cfg *config.Config, login string) (*pullrequest.Engine, io.Closer
 	return engine, store, nil
 }
 
+// approverFor assembles the approver for one invocation.
+func approverFor(cfg *config.Config) (*pullrequest.Approver, io.Closer, error) {
+	store, err := ledger(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	gh, err := githubClient(context.Background(), store)
+	if err != nil {
+		store.Close()
+		return nil, nil, err
+	}
+	return pullrequest.NewApprover(gh, store, slack.NewAPI()), store, nil
+}
+
 // registerGitHubTools wires the pull-request tools, when the prerequisites
 // exist. Slack is required because every one of them delivers or is about to;
 // `riggs capabilities` explains an absence.
@@ -78,6 +93,12 @@ func registerGitHubTools(reg *tools.Registry, cfg *config.Config, resolver *slac
 		func(_ context.Context, login string) (parity.Resolver, io.Closer, error) {
 			return engineFor(cfg, login)
 		}))
+
+	approveFactory := func(context.Context) (approve.Approver, io.Closer, error) {
+		return approverFor(cfg)
+	}
+	reg.Register(approve.New(resolver, approveFactory))
+	reg.Register(approve.NewMerge(resolver, approveFactory))
 
 	reg.Register(importstate.New(func(context.Context) (importstate.Store, func() error, error) {
 		store, err := ledger(cfg)

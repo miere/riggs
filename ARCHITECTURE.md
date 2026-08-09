@@ -326,6 +326,15 @@ Rules:
 - Concurrency is bounded. GitHub's secondary rate limits trigger on burst
   concurrency independently of the quota, so the fan-out over tracked PRs is
   deliberately modest.
+- **Writes are a separate path.** Mutations never go through the conditional
+  GET helper: they are not cached, not conditional, and **never retried**. A
+  retried approval could approve twice; a retried merge could act on something
+  already merged. One attempt, and the error carries GitHub's own words so a
+  merge conflict reaches Slack as "Base branch was modified", not "HTTP 405".
+- **Merging is rebase, always.** Our repositories do not allow squash and have
+  no auto-merge. The method is not a parameter — making it one would invite a
+  caller to pass "squash", and a merge that fails *after* an approval has
+  landed is the worst outcome of this flow.
 - **Reads are ordered cheapest-first.** Discovery matches team-based review
   requests too, so a tick sees far more pull requests than it acts on — 48
   against 8 on the live queue. Resolving all of them fully cost *more* GraphQL
@@ -462,12 +471,17 @@ Rules:
 | 0 | Skeleton, both frontends, config + profiles, `ping`, `capabilities` | done |
 | 1 | Slack domain (live client), Block Kit cards, `notify` ledger, `slack.send-msg` | done |
 | 2 | GitHub REST client + ETag cache (§8), PR state derivation, `git.pr.fetch-reviews` + parity gate | done |
-| 3 | `git.pr.approve` / `--approve-merge` | next |
-| 4 | Jira domain, `jira.tickets` poll/nudge/action | |
+| 3 | `git.pr.approve` / `--approve-merge` | done |
+| 4 | Jira domain, `jira.tickets` poll/nudge/action | next |
 | 5 | State import, repoint Murtaugh jobs and rules, retire the Python | |
 
 ## 14. Change log
 
+- **unreleased** — Phase 3. `git.pr.approve` and `git.pr.approve-merge`, with
+  the approval guard (a standing approval is not resubmitted; a dismissed one
+  is), verification with retries through GitHub's replication lag, and honest
+  outcome messages — the Python posted "Approved" unconditionally. Adds a dry
+  run the Python had and the first cut here did not.
 - **unreleased** — Phase 2. `internal/github` gains conditional requests and
   the pull-request reads; `internal/pullrequest` ports the state derivation;
   `internal/ai` produces the card summaries. Adds `git.pr.fetch-reviews`,
