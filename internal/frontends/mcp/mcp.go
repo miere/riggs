@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -43,7 +44,18 @@ func (f *Frontend) Server() *mcpsdk.Server {
 		Name:    ServerName,
 		Version: ServerVersion,
 	}, nil)
+	// Normalisation collapses two characters into one, so distinct registry
+	// names could in principle collide (`a.b-c` and `a-b.c` both become
+	// `a_b_c`). A collision would silently shadow one tool, so it is refused
+	// here — the same treatment Registry gives a duplicate registration, and
+	// for the same reason: callers control the input set.
+	seen := make(map[string]string, len(f.registry.All()))
 	for _, t := range f.registry.All() {
+		name := ToolName(t.Name())
+		if prior, dup := seen[name]; dup {
+			panic(fmt.Sprintf("mcp: %q and %q both normalise to %q", prior, t.Name(), name))
+		}
+		seen[name] = t.Name()
 		registerTool(s, t)
 	}
 	return s
@@ -53,6 +65,21 @@ func (f *Frontend) Server() *mcpsdk.Server {
 // connected client disconnects or ctx is cancelled.
 func (f *Frontend) Serve(ctx context.Context) error {
 	return f.Server().Run(ctx, &mcpsdk.StdioTransport{})
+}
+
+// nameReplacer normalises a registry name for the MCP boundary.
+var nameReplacer = strings.NewReplacer(".", "_", "-", "_")
+
+// ToolName renders a registry name as MCP spells it: every dot and hyphen
+// becomes an underscore, so `slack.send-msg` is published as `slack_send_msg`.
+//
+// This is a boundary translation only. The registry key keeps its dots
+// (`slack.send-msg`), and the CLI keeps spelling the same tool with spaces and
+// hyphens (`riggs slack send-msg`) — so a rename here never moves a command.
+// The convention matches Murtaugh's, and exists because some providers reject
+// a `.` in a function name.
+func ToolName(registryName string) string {
+	return nameReplacer.Replace(registryName)
 }
 
 // registerTool wires a single tools.Tool into the MCP server using the
@@ -81,7 +108,7 @@ func registerTool(s *mcpsdk.Server, t tools.Tool) {
 		}, nil
 	}
 	s.AddTool(&mcpsdk.Tool{
-		Name:        t.Name(),
+		Name:        ToolName(t.Name()),
 		Description: t.Description(),
 		InputSchema: schema,
 	}, handler)

@@ -133,6 +133,17 @@ Rules:
 ### MCP (`internal/frontends/mcp`)
 
 - **stdout** is reserved for MCP protocol traffic. No logs, no raw text.
+- Tool names are **normalised at this boundary**: every `.` and `-` in the
+  registry name becomes `_`, so `slack.send-msg` is published as
+  `slack_send_msg` and `git.pr.fetch-reviews` as `git_pr_fetch_reviews`. The
+  convention matches Murtaugh's, and exists because some providers reject a
+  `.` in a function name. It is a translation, not a rename: the registry key
+  keeps its dots and the CLI keeps its spaces and hyphens, so this can never
+  move a command.
+- Normalisation collapses two characters into one, so distinct registry names
+  could in principle collide (`a.b-c` and `a-b.c` both become `a_b_c`). That is
+  refused at server construction rather than allowed to shadow a tool silently
+  — the same treatment `Registry` gives a duplicate registration.
 - Every registered tool is exposed; its `InputSchema()` is published verbatim
   (an empty `{"type":"object"}` schema is substituted when it returns `nil`).
 - Tool results are JSON-marshalled into a single `TextContent` block. A plain
@@ -433,6 +444,8 @@ Rules:
 
 ## 14. Change log
 
+- **unreleased** — MCP tool names are normalised: `.` and `-` become `_` at
+  the MCP boundary only (§4). Registry keys and CLI spellings are unchanged.
 - **unreleased** — `riggs install` (§12), plus the first slice of
   `internal/github`: the token/login from `gh`, and the review-requested
   search the smoke test posts a card for. Adds a `jira` config section so the

@@ -3,6 +3,8 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -110,11 +112,81 @@ func TestServerRegistersEveryTool(t *testing.T) {
 	for _, tool := range res.Tools {
 		names[tool.Name] = true
 	}
-	for _, want := range []string{"ping", "git.pr.approve"} {
+	// Published under the MCP spelling, not the registry key.
+	for _, want := range []string{"ping", "git_pr_approve"} {
 		if !names[want] {
 			t.Errorf("tool %q not published; got %v", want, names)
 		}
 	}
+	if names["git.pr.approve"] {
+		t.Error("the dotted registry name leaked to the MCP boundary")
+	}
+}
+
+// Every dot and hyphen becomes an underscore, matching Murtaugh's convention.
+// Registry keys and CLI spellings are untouched by this.
+func TestToolName(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"ping", "ping"},
+		{"jira.tickets", "jira_tickets"},
+		{"slack.send-msg", "slack_send_msg"},
+		{"git.pr.fetch-reviews", "git_pr_fetch_reviews"},
+		{"git.pr.approve-merge", "git_pr_approve_merge"},
+	} {
+		if got := ToolName(tc.in); got != tc.want {
+			t.Errorf("ToolName(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// A normalised name must actually dispatch — publishing it is not enough.
+func TestCallByNormalisedName(t *testing.T) {
+	fake := &fakeTool{name: "slack.send-msg", schema: &jsonschema.Schema{Type: "object"}, result: "sent"}
+	reg := tools.NewRegistry()
+	reg.Register(fake)
+
+	ctx := context.Background()
+	clientT, serverT := mcpsdk.NewInMemoryTransports()
+	if _, err := New(reg).Server().Connect(ctx, serverT, nil); err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	session, err := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "test", Version: "0"}, nil).
+		Connect(ctx, clientT, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	defer session.Close()
+
+	res, err := session.CallTool(ctx, &mcpsdk.CallToolParams{Name: "slack_send_msg"})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("calling by the normalised name failed: %+v", res.Content)
+	}
+	text, ok := res.Content[0].(*mcpsdk.TextContent)
+	if !ok || text.Text != "sent" {
+		t.Errorf("content = %+v, want the tool's own result", res.Content[0])
+	}
+}
+
+// Normalisation collapses two characters into one, so a collision is possible
+// in principle. It must be refused, not left to silently shadow a tool.
+func TestCollidingNamesPanic(t *testing.T) {
+	reg := tools.NewRegistry()
+	reg.Register(&fakeTool{name: "a.b-c"})
+	reg.Register(&fakeTool{name: "a-b.c"})
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("Server() did not panic on colliding MCP names")
+		}
+		if !strings.Contains(fmt.Sprint(r), "a_b_c") {
+			t.Errorf("panic = %v, want it to name the collision", r)
+		}
+	}()
+	New(reg).Server()
 }
 
 // Tool failures surface as IsError results, not transport errors, per the MCP
