@@ -36,7 +36,7 @@ func TestUpsertPostsWhenNew(t *testing.T) {
 	n, fake, store := harness(t)
 	ctx := context.Background()
 
-	outcome, err := n.Upsert(ctx, "o/r#1", target, card("first"), "fallback")
+	outcome, err := n.Upsert(ctx, "o/r#1", target, card("first"), "fallback", "")
 	if err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
@@ -61,13 +61,13 @@ func TestUpsertUnchangedMakesNoSlackCall(t *testing.T) {
 	n, fake, _ := harness(t)
 	ctx := context.Background()
 
-	if _, err := n.Upsert(ctx, "k", target, card("same"), "f"); err != nil {
+	if _, err := n.Upsert(ctx, "k", target, card("same"), "f", ""); err != nil {
 		t.Fatalf("first Upsert: %v", err)
 	}
 	fake.Reset()
 
 	for i := 0; i < 5; i++ {
-		outcome, err := n.Upsert(ctx, "k", target, card("same"), "f")
+		outcome, err := n.Upsert(ctx, "k", target, card("same"), "f", "")
 		if err != nil {
 			t.Fatalf("Upsert: %v", err)
 		}
@@ -84,11 +84,11 @@ func TestUpsertUpdatesInPlace(t *testing.T) {
 	n, fake, store := harness(t)
 	ctx := context.Background()
 
-	_, _ = n.Upsert(ctx, "k", target, card("before"), "f")
+	_, _ = n.Upsert(ctx, "k", target, card("before"), "f", "")
 	before, _, _ := store.Card(ctx, "k")
 	fake.Reset()
 
-	outcome, err := n.Upsert(ctx, "k", target, card("after"), "f")
+	outcome, err := n.Upsert(ctx, "k", target, card("after"), "f", "")
 	if err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestUpsertRepostsWhenMessageIsGone(t *testing.T) {
 	n, fake, store := harness(t)
 	ctx := context.Background()
 
-	_, _ = n.Upsert(ctx, "k", target, card("v1"), "f")
+	_, _ = n.Upsert(ctx, "k", target, card("v1"), "f", "")
 	old, _, _ := store.Card(ctx, "k")
 	if _, err := n.Thread(ctx, "k", target, "tagged once", Once("tagged")); err != nil {
 		t.Fatalf("Thread: %v", err)
@@ -125,7 +125,7 @@ func TestUpsertRepostsWhenMessageIsGone(t *testing.T) {
 	fake.Reset()
 	fake.UpdateErr = slack.ErrMessageNotFound
 
-	outcome, err := n.Upsert(ctx, "k", target, card("v2"), "f")
+	outcome, err := n.Upsert(ctx, "k", target, card("v2"), "f", "")
 	if err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
@@ -166,7 +166,7 @@ func TestThreadRepliesOnTheCard(t *testing.T) {
 	n, fake, store := harness(t)
 	ctx := context.Background()
 
-	_, _ = n.Upsert(ctx, "k", target, card("v1"), "f")
+	_, _ = n.Upsert(ctx, "k", target, card("v1"), "f", "")
 	entry, _, _ := store.Card(ctx, "k")
 	fake.Reset()
 
@@ -188,7 +188,7 @@ func TestThreadUsesTheCardsChannel(t *testing.T) {
 	n, fake, _ := harness(t)
 	ctx := context.Background()
 
-	_, _ = n.Upsert(ctx, "k", target, card("v1"), "f")
+	_, _ = n.Upsert(ctx, "k", target, card("v1"), "f", "")
 	fake.Reset()
 
 	moved := target
@@ -205,7 +205,7 @@ func TestThreadUsesTheCardsChannel(t *testing.T) {
 func TestOnceLatchFiresOnce(t *testing.T) {
 	n, fake, _ := harness(t)
 	ctx := context.Background()
-	_, _ = n.Upsert(ctx, "k", target, card("v1"), "f")
+	_, _ = n.Upsert(ctx, "k", target, card("v1"), "f", "")
 	fake.Reset()
 
 	sent, _ := n.Thread(ctx, "k", target, "tag", Once("tagged"))
@@ -227,7 +227,7 @@ func TestOnceLatchFiresOnce(t *testing.T) {
 func TestClearLatchAllowsRefiring(t *testing.T) {
 	n, _, _ := harness(t)
 	ctx := context.Background()
-	_, _ = n.Upsert(ctx, "k", target, card("v1"), "f")
+	_, _ = n.Upsert(ctx, "k", target, card("v1"), "f", "")
 
 	_, _ = n.Thread(ctx, "k", target, "tag", Once("tagged"))
 	if err := n.ClearLatch(ctx, "k", "tagged"); err != nil {
@@ -254,7 +254,7 @@ func TestMinGapLatch(t *testing.T) {
 	fake := slacktest.New()
 	n := New(store, fake).WithClock(func() time.Time { return clock })
 	ctx := context.Background()
-	_, _ = n.Upsert(ctx, "k", target, card("v1"), "f")
+	_, _ = n.Upsert(ctx, "k", target, card("v1"), "f", "")
 
 	latch := MinGap("nudge", time.Hour)
 	if sent, _ := n.Thread(ctx, "k", target, "nudge", latch); !sent {
@@ -285,7 +285,7 @@ func TestStateSurvivesReopen(t *testing.T) {
 	}
 	fake1 := slacktest.New()
 	n1 := New(store1, fake1)
-	if _, err := n1.Upsert(ctx, "k", target, card("v1"), "f"); err != nil {
+	if _, err := n1.Upsert(ctx, "k", target, card("v1"), "f", ""); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
 	_, _ = n1.Thread(ctx, "k", target, "tag", Once("tagged"))
@@ -300,7 +300,7 @@ func TestStateSurvivesReopen(t *testing.T) {
 	fake2 := slacktest.New()
 	n2 := New(store2, fake2)
 
-	outcome, err := n2.Upsert(ctx, "k", target, card("v1"), "f")
+	outcome, err := n2.Upsert(ctx, "k", target, card("v1"), "f", "")
 	if err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
@@ -336,10 +336,10 @@ func TestTwoProcessesShareTheLedger(t *testing.T) {
 	fakeB := slacktest.New()
 	nB := New(storeB, fakeB)
 
-	if _, err := nA.Upsert(ctx, "k", target, card("v1"), "f"); err != nil {
+	if _, err := nA.Upsert(ctx, "k", target, card("v1"), "f", ""); err != nil {
 		t.Fatalf("A Upsert: %v", err)
 	}
-	outcome, err := nB.Upsert(ctx, "k", target, card("v1"), "f")
+	outcome, err := nB.Upsert(ctx, "k", target, card("v1"), "f", "")
 	if err != nil {
 		t.Fatalf("B Upsert: %v", err)
 	}

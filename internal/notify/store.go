@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go driver: no cgo, so the binary stays portable
@@ -31,7 +32,18 @@ type Entry struct {
 	// Fingerprint is the digest of the card as last rendered. An update is
 	// skipped when it has not changed.
 	Fingerprint string
-	UpdatedAt   time.Time
+	// State is an opaque domain label for what the card last showed (for the
+	// review queue, the derived reason). The ledger never interprets it; it
+	// exists so a caller can decide whether a card is worth re-fetching at all
+	// without re-deriving it from the upstream API.
+	State     string
+	UpdatedAt time.Time
+}
+
+// KeyedEntry is an Entry with its key, for enumeration.
+type KeyedEntry struct {
+	Key string
+	Entry
 }
 
 // Store is the SQLite-backed ledger.
@@ -87,6 +99,12 @@ CREATE TABLE IF NOT EXISTS latches (
 	PRIMARY KEY (key, name)
 );
 
+CREATE TABLE IF NOT EXISTS summaries (
+	key        TEXT PRIMARY KEY,
+	text       TEXT NOT NULL,
+	updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS http_cache (
 	url        TEXT PRIMARY KEY,
 	etag       TEXT NOT NULL,
@@ -99,6 +117,16 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("notify: applying schema: %w", err)
 	}
+	// Columns added after the first release. CREATE TABLE IF NOT EXISTS will
+	// not add them to an existing table, and a duplicate-column error just
+	// means this ledger already has it.
+	for _, alter := range []string{
+		`ALTER TABLE cards ADD COLUMN state TEXT NOT NULL DEFAULT ''`,
+	} {
+		if _, err := s.db.ExecContext(ctx, alter); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return fmt.Errorf("notify: %s: %w", alter, err)
+		}
+	}
 	return nil
 }
 
@@ -107,8 +135,8 @@ func (s *Store) Card(ctx context.Context, key string) (Entry, bool, error) {
 	var e Entry
 	var updated string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT profile, channel, ts, fingerprint, updated_at FROM cards WHERE key = ?`, key,
-	).Scan(&e.Profile, &e.Channel, &e.TS, &e.Fingerprint, &updated)
+		`SELECT profile, channel, ts, fingerprint, state, updated_at FROM cards WHERE key = ?`, key,
+	).Scan(&e.Profile, &e.Channel, &e.TS, &e.Fingerprint, &e.State, &updated)
 	if err == sql.ErrNoRows {
 		return Entry{}, false, nil
 	}
@@ -122,12 +150,13 @@ func (s *Store) Card(ctx context.Context, key string) (Entry, bool, error) {
 // SaveCard inserts or replaces the tracked card for key.
 func (s *Store) SaveCard(ctx context.Context, key string, e Entry) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO cards (key, profile, channel, ts, fingerprint, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?)
+		`INSERT INTO cards (key, profile, channel, ts, fingerprint, state, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(key) DO UPDATE SET
 		   profile = excluded.profile, channel = excluded.channel, ts = excluded.ts,
-		   fingerprint = excluded.fingerprint, updated_at = excluded.updated_at`,
-		key, e.Profile, e.Channel, e.TS, e.Fingerprint, e.UpdatedAt.UTC().Format(time.RFC3339))
+		   fingerprint = excluded.fingerprint, state = excluded.state,
+		   updated_at = excluded.updated_at`,
+		key, e.Profile, e.Channel, e.TS, e.Fingerprint, e.State, e.UpdatedAt.UTC().Format(time.RFC3339))
 	if err != nil {
 		return fmt.Errorf("notify: saving card %s: %w", key, err)
 	}
@@ -227,4 +256,59 @@ func (s *Store) CountCards(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("notify: counting cards: %w", err)
 	}
 	return n, nil
+}
+
+// Summary returns the cached AI summary for key.
+//
+// Summaries are cached because they cost a `claude -p` invocation each and the
+// text does not change while the pull request description does not — paying
+// for one every minute would be absurd.
+func (s *Store) Summary(ctx context.Context, key string) (string, bool, error) {
+	var text string
+	err := s.db.QueryRowContext(ctx, `SELECT text FROM summaries WHERE key = ?`, key).Scan(&text)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("notify: reading summary %s: %w", key, err)
+	}
+	return text, true, nil
+}
+
+// SaveSummary caches an AI summary for key.
+func (s *Store) SaveSummary(ctx context.Context, key, text string, at time.Time) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO summaries (key, text, updated_at) VALUES (?, ?, ?)
+		 ON CONFLICT(key) DO UPDATE SET text = excluded.text, updated_at = excluded.updated_at`,
+		key, text, at.UTC().Format(time.RFC3339))
+	if err != nil {
+		return fmt.Errorf("notify: saving summary %s: %w", key, err)
+	}
+	return nil
+}
+
+// CardsWithPrefix returns every tracked card whose key starts with prefix, in
+// key order. The review queue uses it to re-include cards it is still
+// responsible for finalising, without re-deriving each one first.
+func (s *Store) CardsWithPrefix(ctx context.Context, prefix string) ([]KeyedEntry, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT key, profile, channel, ts, fingerprint, state, updated_at
+		 FROM cards WHERE key LIKE ? ORDER BY key`, prefix+"%")
+	if err != nil {
+		return nil, fmt.Errorf("notify: listing cards under %q: %w", prefix, err)
+	}
+	defer rows.Close()
+
+	var out []KeyedEntry
+	for rows.Next() {
+		var ke KeyedEntry
+		var updated string
+		if err := rows.Scan(&ke.Key, &ke.Profile, &ke.Channel, &ke.TS,
+			&ke.Fingerprint, &ke.State, &updated); err != nil {
+			return nil, fmt.Errorf("notify: scanning cards: %w", err)
+		}
+		ke.UpdatedAt, _ = time.Parse(time.RFC3339, updated)
+		out = append(out, ke)
+	}
+	return out, rows.Err()
 }

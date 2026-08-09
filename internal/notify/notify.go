@@ -85,7 +85,7 @@ func (n *Notifier) WithClock(now func() time.Time) *Notifier {
 //
 // text is the notification/fallback text: what Slack shows in the sidebar, and
 // what an agent reading the thread sees.
-func (n *Notifier) Upsert(ctx context.Context, key string, target slack.Target, card blockkit.Card, text string) (Outcome, error) {
+func (n *Notifier) Upsert(ctx context.Context, key string, target slack.Target, card blockkit.Card, text string, state string) (Outcome, error) {
 	entry, found, err := n.store.Card(ctx, key)
 	if err != nil {
 		return "", err
@@ -98,10 +98,10 @@ func (n *Notifier) Upsert(ctx context.Context, key string, target slack.Target, 
 		if err != nil {
 			return "", fmt.Errorf("posting card %s: %w", key, err)
 		}
-		return Posted, n.save(ctx, key, target, ref, fingerprint)
+		return Posted, n.save(ctx, key, target, ref, fingerprint, state)
 	}
 
-	if entry.Fingerprint == fingerprint {
+	if entry.Fingerprint == fingerprint && entry.State == state {
 		return Unchanged, nil
 	}
 
@@ -109,7 +109,7 @@ func (n *Notifier) Upsert(ctx context.Context, key string, target slack.Target, 
 	err = n.poster.Update(ctx, target, ref, msg)
 	switch {
 	case err == nil:
-		return Updated, n.save(ctx, key, target, ref, fingerprint)
+		return Updated, n.save(ctx, key, target, ref, fingerprint, state)
 	case errors.Is(err, slack.ErrMessageNotFound):
 		newRef, postErr := n.poster.Post(ctx, target, msg)
 		if postErr != nil {
@@ -118,19 +118,20 @@ func (n *Notifier) Upsert(ctx context.Context, key string, target slack.Target, 
 		if err := n.store.ClearLatches(ctx, key); err != nil {
 			return "", err
 		}
-		return Reposted, n.save(ctx, key, target, newRef, fingerprint)
+		return Reposted, n.save(ctx, key, target, newRef, fingerprint, state)
 	default:
 		return "", fmt.Errorf("updating card %s: %w", key, err)
 	}
 }
 
 // save records where the card is and what it looked like.
-func (n *Notifier) save(ctx context.Context, key string, target slack.Target, ref slack.Ref, fingerprint string) error {
+func (n *Notifier) save(ctx context.Context, key string, target slack.Target, ref slack.Ref, fingerprint, state string) error {
 	return n.store.SaveCard(ctx, key, Entry{
 		Profile:     target.Profile,
 		Channel:     ref.Channel,
 		TS:          ref.TS,
 		Fingerprint: fingerprint,
+		State:       state,
 		UpdatedAt:   n.now(),
 	})
 }

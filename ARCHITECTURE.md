@@ -266,8 +266,21 @@ Rules:
 ## 8. GitHub access
 
 Riggs talks to GitHub's **REST** API over its own HTTP client, with ETag
-conditional requests. It does not shell `gh` for data, and it does not use
-GraphQL.
+conditional requests. It does not shell `gh` for data.
+
+It uses GraphQL for exactly **one field**: `reviewDecision`. REST does not
+expose it, and it cannot be reconstructed from the review list — two attempts
+to derive it were wrong in opposite directions, and the parity check (§11)
+caught both against live data:
+
+| Pull request | Shape | GitHub says |
+| --- | --- | --- |
+| `gcp-jsm-bridge#80` | one approval from another reviewer, branch unprotected, we are still requested | `APPROVED` |
+| `nct-intelligence-beholder#1315` | the same, plus an older dismissed review | `null` |
+
+Whatever separates those is undocumented, so it is asked rather than guessed.
+One query per candidate pull request, against 164 points per tick for the
+`gh pr list` this replaces.
 
 This is a departure from the blueprint, which delegates GitHub entirely to
 `gh`. The reason is measured, not assumed. The review-queue loop runs every
@@ -313,6 +326,17 @@ Rules:
 - Concurrency is bounded. GitHub's secondary rate limits trigger on burst
   concurrency independently of the quota, so the fan-out over tracked PRs is
   deliberately modest.
+- **Reads are ordered cheapest-first.** Discovery matches team-based review
+  requests too, so a tick sees far more pull requests than it acts on — 48
+  against 8 on the live queue. Resolving all of them fully cost *more* GraphQL
+  than the path being replaced. So the detail read (cached, conditional) comes
+  first and settles both cheap exclusions; checks come before the decision;
+  and an untracked pull request that is not green is answered without asking
+  for a decision at all.
+- Measured steady state, live queue: **73 requests per tick of which 64 are
+  304s, no measurable REST quota, ~30–41 GraphQL points**. The remaining cost
+  is one `reviewDecision` query per candidate; batching them into a single
+  aliased query is the obvious next reduction.
 
 ## 9. The notification ledger
 
@@ -437,13 +461,19 @@ Rules:
 | --- | --- | --- |
 | 0 | Skeleton, both frontends, config + profiles, `ping`, `capabilities` | done |
 | 1 | Slack domain (live client), Block Kit cards, `notify` ledger, `slack.send-msg` | done |
-| 2 | GitHub REST client + ETag cache (§8), PR state derivation, `git.pr.fetch-reviews` + parity gate | next |
-| 3 | `git.pr.approve` / `--approve-merge` | |
+| 2 | GitHub REST client + ETag cache (§8), PR state derivation, `git.pr.fetch-reviews` + parity gate | done |
+| 3 | `git.pr.approve` / `--approve-merge` | next |
 | 4 | Jira domain, `jira.tickets` poll/nudge/action | |
 | 5 | State import, repoint Murtaugh jobs and rules, retire the Python | |
 
 ## 14. Change log
 
+- **unreleased** — Phase 2. `internal/github` gains conditional requests and
+  the pull-request reads; `internal/pullrequest` ports the state derivation;
+  `internal/ai` produces the card summaries. Adds `git.pr.fetch-reviews`,
+  `git.pr.import-state` and `git.pr.check-parity`. The parity check passes 8/8
+  against the live queue, having first caught two wrong derivations of
+  `reviewDecision` (§8).
 - **unreleased** — MCP tool names are normalised: `.` and `-` become `_` at
   the MCP boundary only (§4). Registry keys and CLI spellings are unchanged.
 - **unreleased** — `riggs install` (§12), plus the first slice of

@@ -58,8 +58,8 @@ func New(mode Mode, args []string, configPath string) (*Application, error) {
 	// and `riggs capabilities` explains the absence (§6).
 	if len(cfg.Slack.Profiles) > 0 {
 		resolver := slack.NewResolver(cfg)
-		poster := slack.NewAPI()
-		reg.Register(sendmsg.New(resolver, poster))
+		reg.Register(sendmsg.New(resolver, slack.NewAPI()))
+		registerGitHubTools(reg, cfg, resolver)
 	}
 
 	return &Application{mode: mode, args: args, registry: reg}, nil

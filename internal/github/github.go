@@ -89,6 +89,9 @@ type Client struct {
 	http    Doer
 	baseURL string
 	token   string
+	cache   Cache
+	now     func() time.Time
+	stats   Stats
 }
 
 // New builds a client for the given token.
@@ -178,15 +181,24 @@ func repoFromAPIURL(apiURL string) string {
 	return ""
 }
 
-// get performs one authenticated GET and decodes the JSON body.
+// ErrNotFound is returned for a 404, which for a PR read means "not visible to
+// this token" as often as it means "gone".
+var ErrNotFound = errors.New("github: not found")
+
+// get performs one authenticated, conditional GET and decodes the JSON body.
+//
+// A 304 is served from the cache and costs no rate-limit quota, which is the
+// entire reason this client exists rather than shelling `gh` (§8).
 func (c *Client) get(ctx context.Context, path string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
+	url := c.baseURL + path
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return fmt.Errorf("github: building request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	cachedBody, hasCache := c.conditional(ctx, req, url)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -197,14 +209,27 @@ func (c *Client) get(ctx context.Context, path string, out any) error {
 	if err != nil {
 		return fmt.Errorf("github: reading %s: %w", path, err)
 	}
+	c.stats.Requests++
 
-	if resp.StatusCode == http.StatusForbidden && resp.Header.Get("X-RateLimit-Remaining") == "0" {
+	switch {
+	case resp.StatusCode == http.StatusNotModified && hasCache:
+		c.stats.NotModified++
+		body = cachedBody
+	case resp.StatusCode == http.StatusNotModified:
+		// A 304 with nothing cached means our own bookkeeping is wrong;
+		// there is no body to fall back on.
+		return fmt.Errorf("github: GET %s: 304 with no cached response", path)
+	case resp.StatusCode == http.StatusNotFound:
+		return fmt.Errorf("%w: %s", ErrNotFound, path)
+	case resp.StatusCode == http.StatusForbidden && resp.Header.Get("X-RateLimit-Remaining") == "0":
 		return fmt.Errorf("github: rate limited on %s (resets at %s)",
 			path, resp.Header.Get("X-RateLimit-Reset"))
-	}
-	if resp.StatusCode != http.StatusOK {
+	case resp.StatusCode != http.StatusOK:
 		return fmt.Errorf("github: GET %s: HTTP %d: %s", path, resp.StatusCode, strings.TrimSpace(string(body)))
+	default:
+		c.remember(ctx, url, resp.Header.Get("ETag"), body)
 	}
+
 	if err := json.Unmarshal(body, out); err != nil {
 		return fmt.Errorf("github: decoding %s: %w", path, err)
 	}
