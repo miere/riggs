@@ -53,7 +53,7 @@ The automations being replaced:
                                       │
                       ┌───────────────┼───────────────┐
                 internal/github   internal/jira   internal/ai
-                (shells `gh`)     (REST v3)       (shells `claude -p`)
+                (REST + ETags)    (REST v3)       (shells `claude -p`)
 ```
 
 - `internal/app` is the only place tools are wired into the registry.
@@ -153,8 +153,9 @@ internal/
     <ns>/<cmd>/                  # namespaced tool
   config/                        # config file, admin identity, Slack profiles
   slack/                         # profile → delivery Target resolution
-  notify/                        # the card ledger (§8)
-  github/ jira/ ai/              # external seams
+  notify/                        # the card ledger (§9)
+  github/                        # REST client, ETag cache (§8)
+  jira/ ai/                      # external seams
 ```
 
 Rules:
@@ -176,10 +177,11 @@ references, never secrets.
 The names are the ones Murtaugh's `.env` already uses, so nothing needs
 re-provisioning at cutover.
 
-GitHub access is delegated entirely to the authenticated `gh` CLI, and card
-summaries to `claude -p`. Neither holds a credential in-process. Both are
-reached through an injected runner, never a raw `exec.Command` at the call
-site, so every loop that touches them is fakeable.
+GitHub credentials come from the authenticated `gh` CLI — Riggs never stores a
+GitHub token of its own — but Riggs owns the HTTP calls (§8). Card summaries
+shell out to `claude -p`. Both `gh` and `claude` are reached through an
+injected runner, never a raw `exec.Command` at the call site, so every loop
+that touches them is fakeable.
 
 Rules:
 
@@ -233,7 +235,58 @@ Rules:
   Mode connection (§1). The field exists so a profile can be described in full
   without the loader rejecting the key.
 
-## 8. The notification ledger
+## 8. GitHub access
+
+Riggs talks to GitHub's **REST** API over its own HTTP client, with ETag
+conditional requests. It does not shell `gh` for data, and it does not use
+GraphQL.
+
+This is a departure from the blueprint, which delegates GitHub entirely to
+`gh`. The reason is measured, not assumed. The review-queue loop runs every
+minute across every tracked repo, and `gh pr list --json` is a GraphQL query
+billed by node count:
+
+| Path | Cost | Projected at every-1m |
+| --- | --- | --- |
+| `gh pr list --limit 200` × 7 repos (the shipped loop) | 164 points/tick | ~9,840/hr against a **5,000/hr** quota |
+| same at `--limit 30` (applied to the Python as a stopgap) | 64 points/tick | ~3,840/hr |
+| REST list + `If-None-Match`, nothing changed | **0** | **0** |
+
+A conditional GET that returns `304 Not Modified` does not count against the
+rate limit — verified directly against the live token, where two consecutive
+304s left `x-ratelimit-used` unmoved. The GraphQL bucket has no equivalent: its
+cost is the same whether or not anything changed.
+
+The REST bucket is also a *different* 5,000/hr allowance, and the loop
+currently consumes **zero** of it while the GraphQL bucket runs over budget.
+
+Rules:
+
+- The token is obtained by shelling `gh auth status --show-token`, so `gh`
+  remains the credential provider and Riggs needs no GitHub environment
+  variable of its own. (`gh auth token` is not available on the installed
+  gh 2.14.7.)
+- Every ETag is stored in the ledger (§9) beside the entry it belongs to, so
+  the cache survives between invocations — which is what makes a per-minute
+  poll from a short-lived process nearly free.
+- **`updated_at` is not a sufficient change signal.** A PR's `updated_at` does
+  not move when a check run completes, and "the PR went green" is the entire
+  trigger for the review queue. Tracked open PRs therefore need their own
+  ETag'd poll of `/commits/{sha}/check-runs`; driving refresh off `updated_at`
+  alone would silently stop cards from ever appearing.
+- Assembling one PR's state takes several endpoints (`/pulls`,
+  `/pulls/{n}/reviews`, `/commits/{sha}/check-runs`, `/commits/{sha}/status`)
+  where GraphQL took one query. That is the accepted cost: each is
+  individually cacheable, and the steady state of this loop is "nothing
+  changed".
+- Discovery (`review-requested:<user>`) uses the search API, which has its own
+  much tighter bucket (30 requests/**minute**). One call per tick is fine;
+  fanning search out is not.
+- Concurrency is bounded. GitHub's secondary rate limits trigger on burst
+  concurrency independently of the quota, so the fan-out over tracked PRs is
+  deliberately modest.
+
+## 9. The notification ledger
 
 *(Designed; implemented in phase 2.)*
 
@@ -269,7 +322,7 @@ Rules:
   and `tickets.json`) is imported at cutover. Losing it re-posts a hundred
   cards into `#nc-code-reviews`, so the import is a hard requirement.
 
-## 9. Configuration file
+## 10. Configuration file
 
 `internal/config` owns the admin identity and the Slack profiles. It is loaded
 once, in the composition root.
@@ -296,7 +349,7 @@ Rules:
   one edit rather than one round-trip per mistake.
 - An empty token is a capability gap, not a config error (§6).
 
-## 10. Testing conventions
+## 11. Testing conventions
 
 - Any external process or SDK is wrapped behind a small interface inside its
   domain package; tests substitute a fake. No live external calls in tests.
@@ -310,19 +363,24 @@ Rules:
   differently from the Python, that test fails loudly instead of spamming the
   channel.
 
-## 11. Roadmap
+## 12. Roadmap
 
 | Phase | Contents | Status |
 | --- | --- | --- |
 | 0 | Skeleton, both frontends, config + profiles, `ping`, `capabilities` | done |
 | 1 | Slack domain (live client), Block Kit cards, `notify` ledger | next |
-| 2 | `gh` seam, PR state derivation, `git.pr.fetch-reviews` + parity gate | |
+| 2 | GitHub REST client + ETag cache (§8), PR state derivation, `git.pr.fetch-reviews` + parity gate | |
 | 3 | `git.pr.approve` / `--approve-merge` | |
 | 4 | Jira domain, `jira.tickets` poll/nudge/action | |
 | 5 | State import, repoint Murtaugh jobs and rules, retire the Python | |
 
-## 12. Change log
+## 13. Change log
 
+- **unreleased** — GitHub access moves to REST + ETag conditional requests
+  (§8), replacing the blueprint's "delegate everything to `gh`". Driven by
+  measurement: the shipped review-queue loop costs 164 GraphQL points/tick,
+  ~9,840/hr against a 5,000/hr quota, while the REST bucket sits unused at
+  zero. `gh` stays as the credential provider only.
 - **0.0.0** — Phase 0. Go MCP + CLI skeleton over a shared registry, with
   verb-flag command resolution, the config file (admin identity + Slack
   profiles + derived ledger path), Slack target resolution, and the `ping` and
