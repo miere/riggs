@@ -76,6 +76,10 @@ func TestLoadMissingConventionalIsEmptyConfig(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("RIGGS_CONFIG", "")
 	t.Setenv("XDG_CONFIG_HOME", dir)
+	// HOME too: DefaultPath is the last candidate, so without this the test
+	// finds the developer's real config — and reports its tokens in the
+	// failure message.
+	t.Setenv("HOME", dir)
 
 	cfg, err := Load("")
 	if err != nil {

@@ -14,8 +14,12 @@ import (
 // A machine with nothing provisioned must still boot: the notifying tools
 // report their own missing credentials, they do not stop the binary.
 func TestNewWithNoConfig(t *testing.T) {
+	dir := t.TempDir()
 	t.Setenv("RIGGS_CONFIG", "")
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	// Isolate HOME as well, or this exercises whatever config the developer
+	// happens to have rather than an unprovisioned machine.
+	t.Setenv("HOME", dir)
 
 	a, err := New(ModeCLI, []string{"ping"}, "")
 	if err != nil {
