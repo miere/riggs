@@ -139,11 +139,13 @@ func (i *Installer) jobArgs(j job, channel, configPath string) []string {
 
 // setJob registers one job through Murtaugh's CLI.
 //
-// This is deliberately `murtaugh cfg job set` rather than a write to
-// Murtaugh's database: that command re-validates the whole assembled config
-// and rolls back anything that would leave it invalid.
+// `jobs define`, not `cfg job set`: the reference documents both as
+// equivalent, but only `jobs define` actually accepts `--args`, and a job
+// without arguments would invoke Riggs with no verb at all. Either way this
+// goes through the CLI rather than Murtaugh's database, so the whole-config
+// re-validation and rollback that command performs is not bypassed.
 func (i *Installer) setJob(ctx context.Context, bin string, j job, riggsArgs []string) error {
-	argv := []string{"cfg", "job", "set", "--name", j.Name, "--command", i.opts.RiggsPath}
+	argv := []string{"jobs", "define", "--name", j.Name, "--command", i.opts.RiggsPath}
 	for _, a := range riggsArgs {
 		argv = append(argv, "--args", a)
 	}

@@ -478,10 +478,12 @@ Rules:
   later, unattended.
 - Zero PRs awaiting review is not a failure: a confirmation card is sent
   instead, and the console says which happened.
-- Murtaugh is configured **only** through `murtaugh cfg job set`. Riggs never
-  writes Murtaugh's database: that command re-validates the whole assembled
+- Murtaugh is configured **only** through its CLI — `murtaugh jobs define`,
+  never a write to its database: the command re-validates the whole assembled
   config and rolls back a change that would leave it invalid, which a
-  hand-written row would bypass.
+  hand-written row would bypass. Note `cfg job set` is documented as
+  equivalent but rejects `--args`, which would leave the job invoking Riggs
+  with no verb at all.
 - Job cadences are carried over unchanged from the existing definitions
   (1m, 3m, and the weekday cron). A migration that also changes the schedule
   makes it impossible to attribute a behaviour difference.
@@ -500,10 +502,36 @@ Rules:
 | 2 | GitHub REST client + ETag cache (§8), PR state derivation, `git.pr.fetch-reviews` + parity gate | done |
 | 3 | `git.pr.approve` / `--approve-merge` | done |
 | 4 | Jira domain, `jira.tickets.*` poll/nudge/assign/dismiss/import | done |
-| 5 | Repoint Murtaugh jobs and rules, retire the Python | next |
+| 5 | Repoint Murtaugh jobs and rules, retire the Python | done (applies on gateway restart) |
+
+## 13b. Cutover
+
+Performed 2026-08-10. Three jobs and four workflow rules now point at
+`~/.local/bin/riggs`; `fetch-important-comms` stays on Python (out of scope)
+and `pr-run-local-review` stays a `delegate-to-agent` trigger (Riggs is not
+involved).
+
+The Murtaugh runtime loads its config once at startup, so **the change takes
+effect when the gateway is restarted**, not when it is written. Until then the
+Python continues to run — which makes the staged state safe rather than
+half-migrated.
+
+Before the cutover, one thing was verified rather than assumed: that a job run
+by Murtaugh inherits the environment Riggs needs. A throwaway
+`riggs capabilities --json-output` job, run through `murtaugh jobs run`,
+confirmed both Slack tokens, Jira and the `gh`/`claude` binaries were visible.
+The whole migration rests on that, and it is not obvious — the Python needed
+only `ATLASSIAN_JIRA_*`, because it reached Slack by shelling `murtaugh`
+rather than holding a token.
+
+Rollback: the previous job and rule definitions are captured under
+`/tmp/riggs-cutover-backup/` and can be restored with the same commands.
 
 ## 14. Change log
 
+- **unreleased** — Phase 5, the cutover (§13b). Also fixes the installer,
+  which built its job command from `cfg job set` — documented as equivalent to
+  `jobs define`, but it rejects `--args`.
 - **unreleased** — Phase 4. `internal/jira` (REST v3, ADF flattening) and
   `internal/ticket`. Adds `jira.tickets.poll`, `.nudge`, `.assign`,
   `.dismiss` and `.import-state`. Verified against live Jira: 16 tickets

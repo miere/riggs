@@ -39,9 +39,11 @@ func TestRegistersJobThroughMurtaughCLI(t *testing.T) {
 	if cmd.name != "/usr/local/bin/murtaugh" {
 		t.Errorf("ran %q, want the murtaugh binary", cmd.name)
 	}
-	// Murtaugh's own CLI, never its database.
-	if got := strings.Join(cmd.args[:3], " "); got != "cfg job set" {
-		t.Errorf("argv starts %q, want `cfg job set`", got)
+	// Murtaugh's own CLI, never its database. `jobs define` specifically:
+	// `cfg job set` is documented as equivalent but rejects --args, which
+	// would leave the job invoking Riggs with no verb.
+	if got := strings.Join(cmd.args[:2], " "); got != "jobs define" {
+		t.Errorf("argv starts %q, want `jobs define`", got)
 	}
 
 	argv := joined(cmd.args)
