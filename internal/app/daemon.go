@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/miere/riggs-mcp/internal/daemon"
+	"github.com/miere/riggs-mcp/internal/pullrequest"
 	"github.com/miere/riggs-mcp/internal/slack"
 )
 
@@ -40,11 +41,49 @@ func (a *Application) runDaemon(ctx context.Context) error {
 
 // registerInteractions installs the handlers for the controls Riggs renders.
 //
-// Empty for now: the transport lands before the controls that use it, so this
-// commit can be reviewed and run on its own. A daemon with no routes still
-// connects and still logs every click it cannot place, which is exactly what
-// you want while wiring the app up in Slack.
-func (a *Application) registerInteractions(router *daemon.Router, creds slack.Credentials) {}
+// Every handler builds its own dependencies per click and closes them again.
+// A daemon that held the ledger and a GitHub client open for its lifetime would
+// be holding them open all day for the handful of seconds a week anyone spends
+// clicking, and would keep a stale connection across the reconcile pass that
+// runs in a different process entirely.
+func (a *Application) registerInteractions(router *daemon.Router, creds slack.Credentials) {
+	router.Handle(pullrequest.BulkActionID, pullrequest.IntentAskReview,
+		daemon.HandlerFunc(func(ctx context.Context, in slack.Interaction) error {
+			asker := pullrequest.NewAsker(slack.NewAPI(),
+				a.cfg.ReviewReviewer(), a.cfg.ReviewRequest.Channel, a.cfg.ReviewPrompt())
+			_, err := asker.Ask(ctx, in.Item, a.targetFor(creds, in))
+			return err
+		}))
+
+	router.Handle(pullrequest.BulkActionID, pullrequest.IntentApproveMerge,
+		daemon.HandlerFunc(func(ctx context.Context, in slack.Interaction) error {
+			approver, closer, err := approverFor(a.cfg)
+			if err != nil {
+				return err
+			}
+			defer closer.Close()
+			// The outcome is narrated into the digest's own thread, so the
+			// answer lands next to the row that was clicked.
+			_, err = approver.Run(ctx, in.Item, true, a.targetFor(creds, in), in.MessageTS)
+			return err
+		}))
+
+	// IntentOpenBrowser is deliberately unregistered. Slack opens the link
+	// itself; the interaction it also sends has nothing to do, and a handler
+	// that exists only to return nil is worse than the router's own "no handler"
+	// log line.
+}
+
+// targetFor builds the delivery target for a click: this daemon's credentials,
+// the conversation the click came from.
+func (a *Application) targetFor(creds slack.Credentials, in slack.Interaction) slack.Target {
+	return slack.Target{
+		Profile:     creds.Profile,
+		BotToken:    creds.BotToken,
+		Channel:     in.Channel,
+		AdminUserID: a.cfg.Admin.SlackUserID,
+	}
+}
 
 // daemonProfile reads --slack-profile from the daemon's arguments. Empty means
 // the default profile, which Credentials resolves.

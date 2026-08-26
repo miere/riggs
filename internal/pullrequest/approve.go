@@ -40,13 +40,18 @@ type Approver struct {
 	poster slack.Poster
 	sleep  func(time.Duration)
 	// reviewBody is the comment left with the approval.
+	//
+	// It names no tool. This approval is the admin's, submitted with the
+	// admin's credentials, and a GitHub review that advertises the automation
+	// that carried it says something about the reviewer's process to everyone
+	// who reads the pull request — which is not the reviewer's to volunteer.
 	reviewBody string
 }
 
 // NewApprover builds the approver.
 func NewApprover(gh Writer, store *notify.Store, poster slack.Poster) *Approver {
 	return &Approver{gh: gh, store: store, poster: poster, sleep: time.Sleep,
-		reviewBody: "Approved via Riggs."}
+		reviewBody: "Approved."}
 }
 
 // WithSleep overrides the retry delay; intended for tests.

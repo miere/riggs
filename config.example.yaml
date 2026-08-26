@@ -15,6 +15,16 @@ admin:
   jira-email: miere@nurturecloud.com
   github-login: miere
 
+# "Ask for Code Review" on a bulk digest row. It drops one message and stops —
+# nothing is delegated and no review is triggered; a human reads it and decides.
+# review-request:
+#   # Where the ask is posted. Omitted, it is DMed to the tagged user.
+#   channel: C0B24F579T4
+#   # Who is tagged. Omitted, the admin is — asking yourself is a defensible
+#   # default, and it never silently tags a stranger.
+#   user-id: U0B20G0ET9T
+#   prompt: Could you take a look at this pull request when you get a chance?
+
 # The Slack accounts Riggs may deliver through. A tool picks one with
 # --slack-profile; with none given, the profile named "default" is used, and a
 # missing "default" is an error rather than a silent no-op.
