@@ -52,6 +52,13 @@ func run(args []string) error {
 		return runInstall(context.Background())
 	}
 
+	// `riggs launchd` mutates this machine's launch agents. Like install, it is
+	// deliberately not a Tool: it has nothing to do with what Riggs exposes to
+	// an MCP client.
+	if len(args) > 0 && args[0] == "launchd" {
+		return runLaunchd(context.Background(), args[1:], configPath)
+	}
+
 	mode := app.ModeCLI
 	rest := args
 	if len(args) > 0 {
