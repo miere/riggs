@@ -11,10 +11,25 @@ blueprint, the departure is called out and justified.
 ## 1. What Riggs is for
 
 Riggs replaces the Python layer under Murtaugh's automations with a single Go
-binary. Murtaugh keeps owning the schedule and the Slack gateway; it invokes
-Riggs either as a CLI (from a job or a workflow rule) or over MCP. Riggs never
-opens a Socket Mode connection and never receives a Slack event — it is always
-the callee.
+binary. Murtaugh keeps owning the **schedule**: it invokes Riggs as a CLI (from
+a job) or over MCP to run a reconcile pass.
+
+Riggs owns its own **Slack app**, and therefore its own inbound half. It posts
+as itself and answers the clicks on its own messages directly, over a Socket
+Mode connection it holds open (`riggs daemon`, §7b). Its responsibility is
+exactly two things: send to Slack, and react to its own blocks.
+
+> **This reverses the original design.** Riggs began as a pure callee — Murtaugh
+> owned the connection, received every interaction, and invoked Riggs through a
+> workflow rule to act on one. That indirection existed only because Riggs
+> posted using Murtaugh's bot token, so the events landed in Murtaugh's gateway.
+> Once Riggs has its own app they land here, and routing them back out through
+> another process's config would be a detour with nothing at the end of it.
+>
+> Messages posted under Murtaugh's app before the switch stay Murtaugh's:
+> `chat.update` and `chat.delete` require the token of the app that posted, so
+> the old per-PR cards keep being served by the existing workflow rules and are
+> deliberately not migrated.
 
 The automations being replaced:
 
@@ -39,13 +54,13 @@ The automations being replaced:
                        │ internal/app         │  ← composition root
                        └──────────┬───────────┘
                                   │ builds Registry, picks Mode
-                  ┌───────────────┴───────────────┐
-         ┌────────▼─────────┐           ┌─────────▼────────┐
-         │ frontends/cli    │           │ frontends/mcp    │
-         │ (human stdin/out)│           │ (MCP stdio JSON) │
-         └────────┬─────────┘           └─────────┬────────┘
-                  └──────────────► Tool ◄─────────┘
-                                   (internal/tools)
+        ┌──────────────┼───────────────┬───────────────┐
+┌───────▼──────────┐   │   ┌───────────▼──────┐  ┌─────▼──────────┐
+│ frontends/cli    │   │   │ frontends/mcp    │  │ daemon         │
+│ (human stdin/out)│   │   │ (MCP stdio JSON) │  │ (Socket Mode)  │
+└───────┬──────────┘   │   └───────────┬──────┘  └─────┬──────────┘
+        └──────────────┴────► Tool ◄───┘               │
+                            (internal/tools)     Router → Handler
                                       │
               ┌───────────────────────┼───────────────────────┐
        internal/slack          internal/notify           internal/config
@@ -163,7 +178,8 @@ internal/
     <tool>/                      # flat tool (ping, capabilities)
     <ns>/<cmd>/                  # namespaced tool
   config/                        # config file, admin identity, Slack profiles
-  slack/                         # profile → delivery Target resolution
+  slack/                         # profile → Target resolution; inbound decode (§7b)
+  daemon/                        # Socket Mode listener + interaction router (§7b)
   notify/                        # the card ledger (§9)
   github/                        # REST client, ETag cache (§8)
   jira/ ai/                      # external seams
@@ -249,9 +265,10 @@ Rules:
 - `admin` exists because that identity was previously spread across five
   settings in three files (`REVIEWER_HANDLE`, `REVIEWER_SLACK_ID`,
   `nudge_user_id`, `allowed_users`, `slack_to_jira_email`) and could drift.
-- `app-token` is accepted on a profile but unused: Riggs never opens a Socket
-  Mode connection (§1). The field exists so a profile can be described in full
-  without the loader rejecting the key.
+- `app-token` is the xapp- token `riggs daemon` opens its Socket Mode
+  connection with (§7b). It is required only on the profile the daemon listens
+  as, and ignored on every other: a profile Riggs only posts through needs a bot
+  token and nothing more.
 - The client speaks **HTTP directly**, not through `slack-go` (which Murtaugh
   uses). Riggs needs three endpoints — `chat.postMessage`, `chat.update`,
   `conversations.open` — and the cards are `container` blocks, a type the
@@ -262,6 +279,46 @@ Rules:
   status code alone never tells you whether a post succeeded. Every response is
   checked on `ok`. `message_not_found` is translated into a typed error,
   because to the ledger it means "re-post", not "fail".
+
+## 7b. The daemon (inbound)
+
+`riggs daemon` holds a Socket Mode connection open and dispatches the
+interactions Slack pushes down it. `internal/daemon` owns the connection, the
+routing table and nothing else.
+
+```
+Slack ──ws──► SocketListener ──► Daemon ──► Router ──► Handler
+                (slack-go)         (decode)   (dispatch)
+```
+
+- **Routing is on `(action_id, intent)`, matched exactly.** `intent` is the
+  selected option's value for an overflow, or the button's value for a button.
+  This is inherited from the workflow rules it replaces, and it is why every
+  option's value is a bare token (`approve_merge`): a value that varied per row
+  could not be matched by a table.
+- **The per-row reference rides in the `block_id`**, because an overflow click's
+  payload reports its own block_id but not its siblings' values. That is the
+  only place a per-row identity can travel.
+- **slack-go is used inbound only.** An inbound callback is a payload Slack
+  composed, its shape is Slack's to change, and the SDK already models it.
+  Outbound stays hand-built ordered-struct JSON — that is what makes blockkit's
+  fingerprint stable, and therefore what makes the ledger's "update only when it
+  actually changed" mean anything (§9). A map-backed encoder would quietly
+  break it.
+- **Every callback is acked before it is handled**, and handled on its own
+  goroutine. Slack expects an ack within three seconds; approving a pull request
+  makes several GitHub calls with retries and legitimately takes longer, so
+  acking after the work would have Slack re-sending an interaction already being
+  acted on.
+- **A handler error is logged and swallowed.** One failed click must not take the
+  connection down: the next click is separate work, and an exit here needs a
+  human to notice before any button works again.
+- **The scheduler stays in Murtaugh.** The daemon owns reactions, not timing. So
+  a reconcile pass (CLI) and a click (daemon) are separate processes writing the
+  same ledger — which is what its WAL and busy timeout were chosen for (§9).
+- **An unroutable click is reported, not an error.** A retired control whose
+  message is still in the channel is an ordinary occurrence, and the daemon logs
+  what it could not place.
 
 ## 8. GitHub access
 
@@ -503,6 +560,10 @@ Rules:
 | 3 | `git.pr.approve` / `--approve-merge` | done |
 | 4 | Jira domain, `jira.tickets.*` poll/nudge/assign/dismiss/import | done |
 | 5 | Repoint Murtaugh jobs and rules, retire the Python | done (applies on gateway restart) |
+| 6 | Riggs' own Slack app: `riggs daemon`, Socket Mode, interaction router (§7b) | done |
+| 7 | The bulk digest block (§7c) | done |
+| 8 | The item ledger and the digest reconcile loop (§9b) | done |
+| 9 | The digest's actions: ask-review, approve-and-merge | done |
 
 ## 13b. Cutover
 
@@ -529,6 +590,12 @@ Rollback: the previous job and rule definitions are captured under
 
 ## 14. Change log
 
+- **unreleased** — Phase 6. Riggs gets its own Slack app and its own inbound
+  half: `riggs daemon` (§7b), a Socket Mode listener and an
+  `(action_id, intent)` router. slack-go joins as the first Slack dependency,
+  used to *decode* callbacks only — outbound stays hand-built JSON, because the
+  ledger's fingerprint depends on a stable encoding. Reverses §1's
+  "always the callee" invariant and puts `app-token` (§7) to work.
 - **unreleased** — Phase 5, the cutover (§13b). Also fixes the installer,
   which built its job command from `cfg job set` — documented as equivalent to
   `jobs define`, but it rejects `--args`.

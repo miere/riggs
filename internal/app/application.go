@@ -28,6 +28,9 @@ const (
 	ModeCLI Mode = iota
 	// ModeMCP runs the MCP stdio server frontend.
 	ModeMCP
+	// ModeDaemon holds a Socket Mode connection open and reacts to clicks on
+	// Riggs' own messages. Unlike the other two it is long-lived.
+	ModeDaemon
 )
 
 // Application is the composition root for a single riggs invocation.
@@ -35,6 +38,9 @@ type Application struct {
 	mode     Mode
 	args     []string
 	registry *tools.Registry
+	// cfg is retained for the modes that need more than the registry. The
+	// daemon resolves its own credentials from it.
+	cfg *config.Config
 }
 
 // New constructs an Application configured for the given mode. args is the list
@@ -63,7 +69,7 @@ func New(mode Mode, args []string, configPath string) (*Application, error) {
 		registerJiraTools(reg, cfg, resolver)
 	}
 
-	return &Application{mode: mode, args: args, registry: reg}, nil
+	return &Application{mode: mode, args: args, registry: reg, cfg: cfg}, nil
 }
 
 // ToolNames reports which tools this binary exposes under the config at path.
@@ -87,6 +93,8 @@ func (a *Application) Run(ctx context.Context) error {
 	switch a.mode {
 	case ModeMCP:
 		return mcp.New(a.registry).Serve(ctx)
+	case ModeDaemon:
+		return a.runDaemon(ctx)
 	default:
 		return cli.New(a.registry).Run(ctx, a.args)
 	}
@@ -127,7 +135,7 @@ func (a *Application) UsageLine() string {
 		sort.Strings(subs)
 		parts = append(parts, fmt.Sprintf("%s <%s>", ns, strings.Join(subs, "|")))
 	}
-	// The two modes handled in main.go, outside the registry.
-	parts = append(parts, "mcp", "install")
+	// The modes handled in main.go, outside the registry.
+	parts = append(parts, "mcp", "daemon", "install")
 	return "usage: riggs <command>; commands: " + strings.Join(parts, ", ")
 }
