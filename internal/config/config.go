@@ -104,9 +104,10 @@ type Slack struct {
 // Profile is one Slack app's credentials. Tokens are written as ${ENV}
 // references so the config file itself carries no secrets.
 //
-// AppToken is accepted but unused: Riggs never opens a Socket Mode connection
-// — it is only ever invoked by Murtaugh, as a CLI or over MCP. The field exists
-// so a profile can be described in full without the loader rejecting the key.
+// AppToken is the xapp- token that opens a Socket Mode connection. It is
+// required only by the profile `riggs daemon` listens as, and ignored on every
+// other profile — a profile Riggs only ever posts through needs a bot token and
+// nothing more.
 type Profile struct {
 	BotToken  string `yaml:"bot-token"`
 	UserToken string `yaml:"user-token"`

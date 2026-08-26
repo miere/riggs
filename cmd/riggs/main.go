@@ -1,14 +1,20 @@
-// Command riggs is the single entry point for the Riggs tool. It runs either
-// as a CLI (`riggs ping`) or as an MCP stdio server (`riggs mcp`). Both modes
-// are backed by the same tool registry, so Murtaugh can invoke it either way.
+// Command riggs is the single entry point for the Riggs tool. It runs as a CLI
+// (`riggs ping`), as an MCP stdio server (`riggs mcp`), or as a Socket Mode
+// daemon (`riggs daemon`).
+//
+// The first two are one-shots backed by the same tool registry, so Murtaugh can
+// invoke either. The third is long-lived and backed by a routing table instead:
+// it is how Riggs answers clicks on the messages it posted itself.
 package main
 
 import (
 	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"slices"
 	"strings"
+	"syscall"
 
 	"github.com/miere/riggs-mcp/internal/app"
 	"github.com/miere/riggs-mcp/internal/installer"
@@ -48,9 +54,13 @@ func run(args []string) error {
 
 	mode := app.ModeCLI
 	rest := args
-	if len(args) > 0 && args[0] == "mcp" {
-		mode = app.ModeMCP
-		rest = args[1:]
+	if len(args) > 0 {
+		switch args[0] {
+		case "mcp":
+			mode, rest = app.ModeMCP, args[1:]
+		case "daemon":
+			mode, rest = app.ModeDaemon, args[1:]
+		}
 	}
 
 	a, err := app.New(mode, rest, configPath)
@@ -60,7 +70,17 @@ func run(args []string) error {
 	if mode == app.ModeCLI && len(args) == 0 {
 		return fmt.Errorf("%s", a.UsageLine())
 	}
-	return a.Run(context.Background())
+
+	ctx := context.Background()
+	if mode == app.ModeDaemon {
+		// The only long-lived mode, and the only one a supervisor stops with a
+		// signal. Cancelling the context lets the socket close and in-flight
+		// handlers finish rather than dying mid-approval.
+		var stop context.CancelFunc
+		ctx, stop = signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+		defer stop()
+	}
+	return a.Run(ctx)
 }
 
 // runInstall drives the interactive installer.

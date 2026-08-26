@@ -25,8 +25,19 @@ slack:
       # Optional. Only needed by tools that must post as Miere rather than as
       # the app.
       user-token: ${SLACK_USER_TOKEN}
-      # Accepted but unused: Riggs never opens a Socket Mode connection.
+      # Only needed on the profile `riggs daemon` listens as: the xapp- token
+      # that opens the Socket Mode connection.
       # app-token: ${SLACK_APP_TOKEN}
+
+    # Riggs' own Slack app: what the bulk digest is posted as, and what the
+    # daemon listens as. Clicks on a message land in the app that posted it, so
+    # the digest and the daemon must share one profile.
+    #
+    #   riggs daemon --slack-profile riggs
+    #
+    # riggs:
+    #   bot-token: ${SLACK_RIGGS_BOT_TOKEN}
+    #   app-token: ${SLACK_RIGGS_APP_TOKEN}
 
     # A second workspace, selected with --slack-profile nc.
     # nc:
