@@ -35,7 +35,7 @@ The automations being replaced:
 
 | Today | Trigger | Becomes |
 | --- | --- | --- |
-| `pull_request/main.py review-queue` | job, every 1m | `git.pr.fetch-reviews` |
+| `pull_request/main.py review-queue` | job, every 3m | `git.pr.bulk` (was `git.pr.fetch-reviews`, §12c) |
 | `pull_request/main.py approve` | rule `pr-approve` | `git.pr.approve` |
 | `pull_request/main.py approve --action-id approve_merge` | rule `pr-approve-merge` | `git.pr.approve-merge` |
 | `quick_coding_tasks/main.py poll` | job, every 3m | `jira.tickets.poll` |
@@ -671,14 +671,42 @@ Rules:
   hand-written row would bypass. Note `cfg job set` is documented as
   equivalent but rejects `--args`, which would leave the job invoking Riggs
   with no verb at all.
-- Job cadences are carried over unchanged from the existing definitions
-  (1m, 3m, and the weekday cron). A migration that also changes the schedule
-  makes it impossible to attribute a behaviour difference.
+- Ticket job cadences are carried over unchanged (3m and the weekday cron). A
+  migration that also changes the schedule makes it impossible to attribute a
+  behaviour difference. The review job is the one exception, and it is not a
+  migration any more — see §12c.
 - A job whose tool this build does not expose is **skipped and reported**, not
   installed. Registering `jira.tickets` before phase 4 would mean a scheduled
   failure every three minutes.
 - The job passes `--config-file` only when the config is not where Riggs would
   look anyway, so the common case stays readable.
+
+### 12c. Decommissioning the card job
+
+The digest and the per-PR cards mirror the same review queue. Running both
+means every pull request is announced twice, which is noise rather than
+redundancy — so the digest **replaces** the card job rather than joining it.
+
+The mechanism is the job *name*: `github-review-queue` is redefined to run
+`git.pr.bulk` at 3m. Redefining replaces the old definition, so there is
+nothing left over. Registering the digest under a new name would have left the
+card job running, and nothing in the install path removes a job.
+
+**The card renderer is retained.** `blockkit.Card`, `pullrequest.Card` and the
+`git.pr.fetch-reviews` tool are untouched and still registered — the shape is
+about to be reused for something else. What changed is only that nothing is on
+a schedule to drive it; run `riggs git pr --fetch-reviews` and the cards work
+exactly as before.
+
+3m rather than 1m because the digest's governing timescale is the 3h cooldown
+(§9b). The tick rate only bounds how quickly a new pull request first appears,
+and two minutes of latency on a code review is not worth 20 wakeups an hour.
+The card loop was at 1m for a different reason — there, posting the card the
+moment checks go green *is* the notification.
+
+> **Cards already in Slack stop updating.** They were posted by Murtaugh's app
+> and are maintained by its workflow rules, which still work; they simply will
+> not collapse to their final state any more. Nothing deletes them.
 
 ### 12b. Supervising the daemon
 
@@ -743,6 +771,7 @@ same in each.
 | 8 | The item ledger and the digest reconcile loop (§9b) | done |
 | 9 | The digest's actions: ask-review, approve-and-merge | done |
 | 10 | Supervising the daemon: `riggs launchd`, `env-file` (§12b) | done |
+| 11 | Decommission the per-PR card job, keeping the renderer (§12c) | done |
 
 ## 13b. Cutover
 
@@ -795,6 +824,10 @@ Rollback: the previous job and rule definitions are captured under
   supervises the daemon as a macOS launch agent. Adds `env-file` to the config,
   because a launch agent inherits no environment and every `${SLACK_...}` would
   otherwise expand to empty — a daemon connected to nothing.
+- **unreleased** — Phase 11. The digest replaces the per-PR card job (§12c) by
+  reusing its name, so the review queue has exactly one notifier again. The card
+  renderer and `git.pr.fetch-reviews` are retained and still registered — only
+  the schedule is gone.
 - **unreleased** — Phase 5, the cutover (§13b). Also fixes the installer,
   which built its job command from `cfg job set` — documented as equivalent to
   `jobs define`, but it rejects `--args`.

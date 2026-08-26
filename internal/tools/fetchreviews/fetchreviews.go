@@ -1,5 +1,11 @@
-// Package fetchreviews mirrors GitHub review requests into Slack — the
-// every-1m job that replaces `pull_request/main.py review-queue`.
+// Package fetchreviews mirrors GitHub review requests into Slack as one
+// self-updating card per pull request.
+//
+// It is **no longer scheduled**. The digest (`git.pr.bulk`) took the review
+// queue's job over, because two notifiers mirroring one queue announces every
+// pull request twice (§12c). The tool is deliberately still registered and the
+// renderer is untouched: the card shape is about to be reused, and
+// `riggs git pr --fetch-reviews` still drives it exactly as before.
 package fetchreviews
 
 import (

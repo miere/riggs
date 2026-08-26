@@ -1,5 +1,9 @@
-// Package blockkit renders the one card shape Riggs posts: Slack's
-// collapsible `container` block.
+// Package blockkit renders the collapsible `container` card: one entity, one
+// self-updating message.
+//
+// Nothing drives it on a schedule any more — the review queue moved to the bulk
+// digest in bulk.go (§12c) — but it is retained on purpose rather than left to
+// rot: this shape is about to be reused, and the ticket queue still posts it.
 //
 // Both automations already draw the same card — a title, a subtitle, an icon,
 // an AI-written body, and then either an actions row (live) or a single
