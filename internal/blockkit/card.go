@@ -13,11 +13,8 @@
 // encoding would rewrite every card on every tick.
 package blockkit
 
-import (
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
-)
+// The fingerprint helper this file's Card.Fingerprint delegates to lives in
+// fingerprint.go, shared with the bulk digest.
 
 // Card is a collapsible container card.
 type Card struct {
@@ -222,17 +219,7 @@ func (c Card) Blocks() []any {
 // Fingerprint is a stable digest of the rendered card. The ledger compares it
 // to decide whether a Slack update is needed at all, so two renders of an
 // unchanged card must produce identical bytes.
-func (c Card) Fingerprint() string {
-	b, err := json.Marshal(c.Blocks())
-	if err != nil {
-		// Every type in the tree is a plain struct of strings, bools and
-		// slices, so this cannot fail. Degrade to a value that never matches
-		// rather than panicking inside a scheduled job.
-		return ""
-	}
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
-}
+func (c Card) Fingerprint() string { return fingerprint(c.Blocks()) }
 
 // TextBlocks renders a bare mrkdwn message — the shape used for threaded
 // replies (the reviewer tag, the idle nudge), which are not cards.
