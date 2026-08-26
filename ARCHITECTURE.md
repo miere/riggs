@@ -510,6 +510,60 @@ Rules:
 Tables: `cards` (key → profile, channel, ts, fingerprint), `latches`
 (key, name → fired_at) and `http_cache` (url → etag, body) for §8.
 
+## 9b. The item ledger (bulk digests)
+
+§9's unit is a **card**: one message about one entity, keyed by that entity
+forever. A digest breaks that assumption — one message carries many items, and
+which items it carries moves underneath it. So `items` records the membership
+`cards` never needed:
+
+```
+items(key, stream, post_key, position, status, done, posted_at, updated_at)
+```
+
+`cards` keeps its job as the *post* table; a digest's row there is keyed
+`git.pr.bulk:post:<n>`, allocated by `NextPostKey`.
+
+**`posted_at` is the cooldown anchor, and it moves only on entry to a NEW post.**
+An in-place status refresh deliberately does not touch it. Otherwise a busy pull
+request — checks flipping red and green all morning — would keep resetting its
+own clock and could never age out of the message it was first announced in.
+
+One pass, per pull request:
+
+| State | Action |
+| --- | --- |
+| untracked, actionable | candidate to join the next digest |
+| untracked, not actionable | ignored — never announced (same dead-on-arrival rule as §9) |
+| tracked, within cooldown | stays; row refreshed in place |
+| tracked, cooled, still open | moves: out of its old post, into the new one |
+| tracked, cooled, done | purged |
+
+Then every existing post is rebuilt from the items that remain in it, and one
+new post is created from the selection.
+
+Rules:
+
+- **Rolling 3h cooldown**, not calendar blocks.
+- **FIFO by pull request age** — oldest waiting first, not by when Riggs noticed
+  it.
+- **The cap holds, it does not drop.** Anything past its cooldown that misses
+  the cap stays exactly where it is and leads the queue next pass. A row removed
+  with nowhere to go would simply vanish.
+- **A done row does not rotate.** It stays struck through where it is until its
+  cooldown expires, then it is purged. That is what eventually empties a post —
+  and it means a pull request that goes green again comes back as new, which is
+  the same non-stickiness §9's cards have.
+- **An emptied post is deleted, not blanked** (§7c).
+- **A vanished digest stays vanished.** Unlike a card, a digest whose message is
+  gone is not re-posted: its items come back on their own cooldown, and
+  resurrecting a message the reader dismissed is the wrong answer.
+- **A post that cannot be read from GitHub is not treated as deleted.** A failed
+  read is skipped and retried; only the cooldown purges.
+- **Rebuilding is idempotent.** The fingerprint gate means a pass that changes
+  nothing makes no Slack call, which is what keeps a per-minute schedule
+  affordable.
+
 ## 10. Configuration file
 
 `internal/config` owns the admin identity and the Slack profiles. It is loaded
@@ -640,6 +694,12 @@ Rollback: the previous job and rule definitions are captured under
   refactor of `Card` — the two shapes share only the fingerprint rule and the
   primitive text objects, because a per-entity card and a list whose membership
   moves are about to evolve apart.
+- **unreleased** — Phase 8. The item ledger (§9b) and the digest reconcile
+  loop: `items` records which post each pull request is shown in and when its
+  3h cooldown started, `chat.delete` joins the Slack client so an emptied
+  digest can be removed rather than blanked, and `git.pr.bulk` schedules the
+  pass. Sibling of `git.pr.fetch-reviews`, not a replacement — both read the
+  same GitHub and write the same ledger in different streams.
 - **unreleased** — Phase 5, the cutover (§13b). Also fixes the installer,
   which built its job command from `cfg job set` — documented as equivalent to
   `jobs define`, but it rejects `--args`.

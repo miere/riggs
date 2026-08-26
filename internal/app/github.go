@@ -15,6 +15,7 @@ import (
 	"github.com/miere/riggs-mcp/internal/slack"
 	"github.com/miere/riggs-mcp/internal/tools"
 	"github.com/miere/riggs-mcp/internal/tools/approve"
+	"github.com/miere/riggs-mcp/internal/tools/bulkreviews"
 	"github.com/miere/riggs-mcp/internal/tools/fetchreviews"
 	"github.com/miere/riggs-mcp/internal/tools/importstate"
 	"github.com/miere/riggs-mcp/internal/tools/parity"
@@ -64,6 +65,24 @@ func engineFor(cfg *config.Config, login string) (*pullrequest.Engine, io.Closer
 	return engine, store, nil
 }
 
+// bulkEngineFor assembles the digest reconciler for one invocation. It reuses
+// engineFor's GitHub reads and ledger — the digest is a second consumer of
+// both, in its own ledger stream.
+func bulkEngineFor(cfg *config.Config, login string, opts pullrequest.BulkOptions) (*pullrequest.BulkEngine, io.Closer, error) {
+	store, err := ledger(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	gh, err := githubClient(context.Background(), store)
+	if err != nil {
+		store.Close()
+		return nil, nil, err
+	}
+	notifier := notify.New(store, slack.NewAPI())
+	engine := pullrequest.NewEngine(gh, store, notifier, summariser(), login, cfg.Admin.SlackUserID)
+	return pullrequest.NewBulkEngine(engine, store, notifier, opts), store, nil
+}
+
 // approverFor assembles the approver for one invocation.
 func approverFor(cfg *config.Config) (*pullrequest.Approver, io.Closer, error) {
 	store, err := ledger(cfg)
@@ -87,6 +106,11 @@ func registerGitHubTools(reg *tools.Registry, cfg *config.Config, resolver *slac
 	reg.Register(fetchreviews.New(resolver, login,
 		func(_ context.Context, login string) (fetchreviews.Engine, io.Closer, error) {
 			return engineFor(cfg, login)
+		}))
+
+	reg.Register(bulkreviews.New(resolver, login,
+		func(_ context.Context, login string, opts pullrequest.BulkOptions) (bulkreviews.Engine, io.Closer, error) {
+			return bulkEngineFor(cfg, login, opts)
 		}))
 
 	reg.Register(parity.New(login,

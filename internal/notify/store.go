@@ -111,6 +111,24 @@ CREATE TABLE IF NOT EXISTS http_cache (
 	body       BLOB NOT NULL,
 	updated_at TEXT NOT NULL
 );
+
+-- items belong to a bulk digest (§9b). A row in cards is one message about one
+-- entity; a digest is one message about many, so the membership that cards
+-- never needed lives here: which post an item is currently shown in, and when
+-- it last entered a new one.
+CREATE TABLE IF NOT EXISTS items (
+	key        TEXT PRIMARY KEY,
+	stream     TEXT NOT NULL,
+	post_key   TEXT NOT NULL,
+	position   INTEGER NOT NULL,
+	status     TEXT NOT NULL,
+	done       INTEGER NOT NULL DEFAULT 0,
+	posted_at  TEXT NOT NULL,
+	updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS items_post   ON items(post_key);
+CREATE INDEX IF NOT EXISTS items_stream ON items(stream);
 `
 
 func (s *Store) migrate(ctx context.Context) error {

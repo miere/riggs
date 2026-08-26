@@ -44,6 +44,10 @@ type Ref struct {
 type Poster interface {
 	Post(ctx context.Context, target Target, msg Message) (Ref, error)
 	Update(ctx context.Context, target Target, ref Ref, msg Message) error
+	// Delete removes a message. A digest that empties out is deleted rather
+	// than updated to an empty shell (§7c), which is the only reason this
+	// exists.
+	Delete(ctx context.Context, target Target, ref Ref) error
 }
 
 // Doer is the HTTP seam, so tests can drive the client without a network.
@@ -53,11 +57,12 @@ type Doer interface {
 
 // API is the live Slack Web API client.
 //
-// It speaks HTTP directly rather than through slack-go. Riggs needs exactly
-// three endpoints, and the cards are `container` blocks — a block type the
-// typed SDK does not model — so the payload would be hand-built JSON either
-// way. Owning the request also means owning 429 handling, which matters for a
-// per-minute job.
+// It speaks HTTP directly rather than through slack-go, even though slack-go is
+// now a dependency for decoding inbound callbacks (§7b). Outbound stays here:
+// the blocks are ordered structs so their encoded bytes are stable, and that
+// stability is what makes blockkit's fingerprint — and the ledger's "update only
+// when it actually changed" — mean anything. Owning the request also means
+// owning 429 handling, which matters for a per-minute job.
 type API struct {
 	http    Doer
 	baseURL string
@@ -116,6 +121,15 @@ func (a *API) Update(ctx context.Context, target Target, ref Ref, msg Message) e
 		body["blocks"] = msg.Blocks
 	}
 	return a.call(ctx, target.BotToken, "chat.update", body, nil)
+}
+
+// Delete removes a message.
+//
+// A message that is already gone is reported as ErrMessageNotFound, which the
+// caller treats as success: the intent was for it not to be there.
+func (a *API) Delete(ctx context.Context, target Target, ref Ref) error {
+	body := map[string]any{"channel": ref.Channel, "ts": ref.TS}
+	return a.call(ctx, target.BotToken, "chat.delete", body, nil)
 }
 
 // channelFor resolves the conversation to post into: the named channel, or the
