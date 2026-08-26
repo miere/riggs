@@ -136,6 +136,6 @@ func (a *Application) UsageLine() string {
 		parts = append(parts, fmt.Sprintf("%s <%s>", ns, strings.Join(subs, "|")))
 	}
 	// The modes handled in main.go, outside the registry.
-	parts = append(parts, "mcp", "daemon", "install")
+	parts = append(parts, "mcp", "daemon", "launchd", "install")
 	return "usage: riggs <command>; commands: " + strings.Join(parts, ", ")
 }

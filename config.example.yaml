@@ -15,6 +15,17 @@ admin:
   jira-email: miere@nurturecloud.com
   github-login: miere
 
+# A dotenv file loaded before the ${VAR} references below are expanded.
+#
+# Required for `riggs launchd`: a launch agent inherits none of your shell
+# environment, so without this every ${SLACK_...} expands to empty and the
+# daemon starts up connected to nothing. Point it at Murtaugh's .env rather
+# than duplicating the secrets.
+#
+# Omitted, `.env` beside this file is used if it exists. A file named here that
+# cannot be read is an error.
+# env-file: ~/.config/murtaugh/.env
+
 # "Ask for Code Review" on a bulk digest row. It drops one message and stops —
 # nothing is delegated and no review is triggered; a human reads it and decides.
 # review-request:

@@ -680,6 +680,54 @@ Rules:
 - The job passes `--config-file` only when the config is not where Riggs would
   look anyway, so the common case stays readable.
 
+### 12b. Supervising the daemon
+
+`riggs launchd <install|uninstall|status>` (in `internal/launchd`) runs
+`riggs daemon` as a macOS launch agent, labelled `io.riggs.daemon`.
+
+Everything else Riggs does is a one-shot Murtaugh starts and waits for. The
+daemon is the first part that has to *keep running* — across a crash, a logout
+and a reboot — and nothing in the design had an opinion about that.
+
+Rules:
+
+- **`KeepAlive` is unconditional**, not `SuccessfulExit=false`. The daemon exits
+  *cleanly* when its socket closes, so restarting only on failure would leave a
+  disconnected daemon down until somebody noticed. `launchctl bootout` still
+  stops it.
+- **`ThrottleInterval` is set.** An agent that cannot start — bad token, no
+  network — otherwise respawns as fast as launchd can fork it.
+- **The plist names the config path explicitly.** A launch agent inherits none
+  of the shell's environment, so `$RIGGS_CONFIG` never reaches it and the
+  precedence chain (§10) would resolve somewhere else entirely.
+- **Install is idempotent**: it boots out any previous incarnation first, so
+  re-running after changing the profile or upgrading the binary picks the change
+  up instead of leaving the old agent running.
+- **The log directory is created.** launchd will not, and a missing one makes
+  the agent fail to spawn with a message only `launchctl print` reveals.
+- **Values are XML-escaped.** A home directory with an `&` in it is unusual and
+  entirely legal, and would otherwise produce a plist launchd silently refuses.
+- **macOS is checked at runtime, not by build tag**, so the command exists on
+  Linux and explains itself rather than vanishing from the usage line.
+
+#### `env-file`
+
+The same "no inherited environment" problem breaks the tokens: every
+`${SLACK_...}` in the config would expand to empty and the daemon would start up
+connected to nothing.
+
+So `config.yaml` gains `env-file`, a dotenv file loaded **before** expansion,
+defaulting to `.env` beside the config. It uses the parser Murtaugh already
+uses, which is the point: one `.env` can serve both, and quoting behaves the
+same in each.
+
+- An already-set variable wins (standard dotenv precedence).
+- A **missing conventional** file is not an error — Riggs is still invoked from
+  Murtaugh with the variables already exported, and refusing to start there
+  would be a regression.
+- A **named** file that cannot be read **is** an error, the same rule
+  `--config-file` follows.
+
 ## 13. Roadmap
 
 | Phase | Contents | Status |
@@ -694,6 +742,7 @@ Rules:
 | 7 | The bulk digest block (§7c) | done |
 | 8 | The item ledger and the digest reconcile loop (§9b) | done |
 | 9 | The digest's actions: ask-review, approve-and-merge | done |
+| 10 | Supervising the daemon: `riggs launchd`, `env-file` (§12b) | done |
 
 ## 13b. Cutover
 
@@ -742,6 +791,10 @@ Rollback: the previous job and rule definitions are captured under
   `approve_merge` reuses the existing rebase-only approver. Also states the
   Common Rule and fixes the one place that broke it — the GitHub approval body
   said "Approved via Riggs." and now says "Approved."
+- **unreleased** — Phase 10. `riggs launchd install|uninstall|status` (§12b)
+  supervises the daemon as a macOS launch agent. Adds `env-file` to the config,
+  because a launch agent inherits no environment and every `${SLACK_...}` would
+  otherwise expand to empty — a daemon connected to nothing.
 - **unreleased** — Phase 5, the cutover (§13b). Also fixes the installer,
   which built its job command from `cfg job set` — documented as equivalent to
   `jobs define`, but it rejects `--args`.

@@ -50,6 +50,18 @@ type Config struct {
 	Jira          Jira          `yaml:"jira"`
 	ReviewRequest ReviewRequest `yaml:"review-request"`
 
+	// EnvFile is a dotenv file loaded before ${VAR} references are expanded.
+	//
+	// This exists for launchd. A launch agent inherits none of the shell
+	// environment, so every ${SLACK_...} in this file would expand to empty and
+	// the daemon would start up connected to nothing. Pointing at a dotenv file
+	// — Murtaugh's own, typically — makes the daemon behave identically whether
+	// it was started by launchd or by hand.
+	//
+	// Empty looks for `.env` beside this config file, and a missing one is not
+	// an error: the variables may perfectly well come from the real environment.
+	EnvFile string `yaml:"env-file"`
+
 	// Path records where this config came from, for diagnostics. It is
 	// NoFilePath when no file was read.
 	Path string `yaml:"-"`
@@ -226,6 +238,11 @@ func parse(path string, data []byte) (*Config, error) {
 		cfg.Path = NoFilePath
 	}
 	cfg.dbPath = deriveDBPath(path)
+	// Before expansion, not after: the dotenv file is where the ${VAR}
+	// references are meant to resolve from.
+	if err := cfg.loadEnvFile(path); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
 	cfg.expand()
 	if err := cfg.validate(); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
