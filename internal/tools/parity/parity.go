@@ -87,12 +87,12 @@ type Comparison struct {
 type Result struct {
 	Source string `json:"source"`
 	// Live is how many entries could still change, and so were checked.
-	Live      int          `json:"live"`
-	Checked   int          `json:"checked"`
-	Matched   int          `json:"matched"`
-	Mismatched int         `json:"mismatched"`
-	Errors    int          `json:"errors"`
-	Details   []Comparison `json:"details"`
+	Live       int          `json:"live"`
+	Checked    int          `json:"checked"`
+	Matched    int          `json:"matched"`
+	Mismatched int          `json:"mismatched"`
+	Errors     int          `json:"errors"`
+	Details    []Comparison `json:"details"`
 }
 
 // Passed reports whether every checked entry agreed.

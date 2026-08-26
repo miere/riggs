@@ -13,10 +13,10 @@ import (
 
 // Call records one interaction with the fake.
 type Call struct {
-	// Kind is "post" or "update".
+	// Kind is "post", "update" or "delete".
 	Kind   string
 	Target slack.Target
-	// Ref is the message being updated; zero for a post.
+	// Ref is the message being updated or deleted; zero for a post.
 	Ref slack.Ref
 	Msg slack.Message
 }
@@ -30,6 +30,8 @@ type Fake struct {
 	// UpdateErr, when set, fails every Update — set it to
 	// slack.ErrMessageNotFound to exercise the re-post path.
 	UpdateErr error
+	// DeleteErr, when set, fails every Delete.
+	DeleteErr error
 
 	seq int
 }
@@ -56,6 +58,23 @@ func (f *Fake) Post(_ context.Context, target slack.Target, msg slack.Message) (
 func (f *Fake) Update(_ context.Context, target slack.Target, ref slack.Ref, msg slack.Message) error {
 	f.Calls = append(f.Calls, Call{Kind: "update", Target: target, Ref: ref, Msg: msg})
 	return f.UpdateErr
+}
+
+// Delete records the call and returns DeleteErr.
+func (f *Fake) Delete(_ context.Context, target slack.Target, ref slack.Ref) error {
+	f.Calls = append(f.Calls, Call{Kind: "delete", Target: target, Ref: ref})
+	return f.DeleteErr
+}
+
+// Deleted returns the refs passed to Delete, in order.
+func (f *Fake) Deleted() []slack.Ref {
+	var out []slack.Ref
+	for _, c := range f.Calls {
+		if c.Kind == "delete" {
+			out = append(out, c.Ref)
+		}
+	}
+	return out
 }
 
 // Kinds returns the sequence of call kinds, which is usually what a test wants

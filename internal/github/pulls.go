@@ -21,11 +21,14 @@ type Detail struct {
 	Author string
 	Draft  bool
 	// State is "open" or "closed"; Merged distinguishes the two closures.
-	State    string
-	Merged   bool
-	MergedAt *time.Time
-	ClosedAt *time.Time
-	HeadSHA  string
+	State  string
+	Merged bool
+	// CreatedAt orders the bulk digest, which is FIFO by pull request age
+	// (§9b) — oldest waiting first.
+	CreatedAt *time.Time
+	MergedAt  *time.Time
+	ClosedAt  *time.Time
+	HeadSHA   string
 	// RequestedUsers are the logins still awaiting review. GitHub removes a
 	// reviewer from this list the moment they review, which is what makes the
 	// queue non-sticky without storing a flag.
@@ -51,16 +54,17 @@ func (d Detail) Ref() string { return fmt.Sprintf("%s#%d", d.Repo, d.Number) }
 // PullRequestDetail fetches one pull request.
 func (c *Client) PullRequestDetail(ctx context.Context, repo string, number int) (Detail, error) {
 	var raw struct {
-		Number   int        `json:"number"`
-		Title    string     `json:"title"`
-		Body     string     `json:"body"`
-		HTMLURL  string     `json:"html_url"`
-		Draft    bool       `json:"draft"`
-		State    string     `json:"state"`
-		Merged   bool       `json:"merged"`
-		MergedAt *time.Time `json:"merged_at"`
-		ClosedAt *time.Time `json:"closed_at"`
-		User     struct {
+		Number    int        `json:"number"`
+		Title     string     `json:"title"`
+		Body      string     `json:"body"`
+		HTMLURL   string     `json:"html_url"`
+		Draft     bool       `json:"draft"`
+		State     string     `json:"state"`
+		Merged    bool       `json:"merged"`
+		CreatedAt *time.Time `json:"created_at"`
+		MergedAt  *time.Time `json:"merged_at"`
+		ClosedAt  *time.Time `json:"closed_at"`
+		User      struct {
 			Login string `json:"login"`
 		} `json:"user"`
 		Head struct {
@@ -80,8 +84,8 @@ func (c *Client) PullRequestDetail(ctx context.Context, repo string, number int)
 	d := Detail{
 		Repo: repo, Number: raw.Number, Title: raw.Title, Body: raw.Body,
 		URL: raw.HTMLURL, Author: raw.User.Login, Draft: raw.Draft,
-		State: raw.State, Merged: raw.Merged, MergedAt: raw.MergedAt,
-		ClosedAt: raw.ClosedAt, HeadSHA: raw.Head.SHA,
+		State: raw.State, Merged: raw.Merged, CreatedAt: raw.CreatedAt,
+		MergedAt: raw.MergedAt, ClosedAt: raw.ClosedAt, HeadSHA: raw.Head.SHA,
 	}
 	for _, u := range raw.RequestedReviewers {
 		d.RequestedUsers = append(d.RequestedUsers, u.Login)

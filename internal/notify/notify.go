@@ -25,6 +25,10 @@ const (
 	// Reposted means the tracked message was gone, so a replacement was
 	// posted and its latches cleared.
 	Reposted Outcome = "reposted"
+	// Gone means the tracked message had been deleted and was not replaced.
+	// Only a digest reports this: a card that vanishes is re-posted, but a
+	// digest the reader dismissed should stay dismissed.
+	Gone Outcome = "gone"
 )
 
 // Policy selects how a latch decides whether a threaded message may fire.
