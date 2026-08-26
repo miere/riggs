@@ -44,10 +44,11 @@ const DefaultProfile = "default"
 
 // Config is the effective, validated configuration.
 type Config struct {
-	Version int   `yaml:"version"`
-	Admin   Admin `yaml:"admin"`
-	Slack   Slack `yaml:"slack"`
-	Jira    Jira  `yaml:"jira"`
+	Version       int           `yaml:"version"`
+	Admin         Admin         `yaml:"admin"`
+	Slack         Slack         `yaml:"slack"`
+	Jira          Jira          `yaml:"jira"`
+	ReviewRequest ReviewRequest `yaml:"review-request"`
 
 	// Path records where this config came from, for diagnostics. It is
 	// NoFilePath when no file was read.
@@ -94,6 +95,43 @@ func (c *Config) JiraCredentials() (email, token string) {
 		token = os.Getenv("ATLASSIAN_JIRA_TOKEN")
 	}
 	return email, token
+}
+
+// ReviewRequest configures the "Ask for Code Review" action: where the ask is
+// posted, who is tagged in it, and what it says.
+//
+// Nothing here triggers a review. The action drops a message and stops; a human
+// reads it and decides. That is the whole feature.
+type ReviewRequest struct {
+	// Channel is where the ask is posted. Empty DMs the tagged user, which is
+	// what makes "a channel or a DM" a configuration choice rather than two
+	// code paths.
+	Channel string `yaml:"channel"`
+	// UserID is the Slack user tagged in the ask. Empty falls back to the
+	// admin — asking yourself is a defensible default and never silently
+	// tags a stranger.
+	UserID string `yaml:"user-id"`
+	// Prompt is the body of the ask. Empty uses DefaultReviewPrompt.
+	Prompt string `yaml:"prompt"`
+}
+
+// DefaultReviewPrompt is used when the config names none.
+const DefaultReviewPrompt = "Could you take a look at this pull request when you get a chance?"
+
+// ReviewPrompt is the configured prompt, or the default.
+func (c *Config) ReviewPrompt() string {
+	if strings.TrimSpace(c.ReviewRequest.Prompt) == "" {
+		return DefaultReviewPrompt
+	}
+	return c.ReviewRequest.Prompt
+}
+
+// ReviewReviewer is the Slack user the ask tags, falling back to the admin.
+func (c *Config) ReviewReviewer() string {
+	if id := strings.TrimSpace(c.ReviewRequest.UserID); id != "" {
+		return id
+	}
+	return c.Admin.SlackUserID
 }
 
 // Slack holds the named accounts Riggs can deliver through.

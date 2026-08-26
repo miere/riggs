@@ -320,6 +320,43 @@ Slack ──ws──► SocketListener ──► Daemon ──► Router ──�
   message is still in the channel is an ordinary occurrence, and the daemon logs
   what it could not place.
 
+## 7bb. The digest's actions
+
+Three options render on a live row; two of them are answered by the daemon.
+
+| Option | Intent | Handler |
+| --- | --- | --- |
+| ⧉ Open on Browser | `open_browser` | none — the option carries a `url` and Slack opens it |
+| ✎ Ask for Code Review | `ask_review` | `pullrequest.Asker` |
+| ✓ Approve and Merge | `approve_merge` | `pullrequest.Approver`, rebase-only (§8) |
+
+- **Approve is not implemented.** It is specified for later, and it is not
+  rendered: a button that silently does nothing is worse than one that is not
+  there.
+- **Approve and Merge renders only on a Dependabot-authored pull request.**
+- **A done row keeps only the link.** There is nothing left to approve or ask
+  about on a pull request that has been reviewed, merged or closed.
+- **Ask for Code Review drops a message and stops.** Nothing is delegated and no
+  review is started — that is smaller than the `delegate-to-agent` workflow rule
+  it replaces, and deliberately so. Destination is `review-request` in the
+  config: a channel, or a DM when none is named.
+- **Handlers build their dependencies per click** and close them again. Holding
+  a ledger handle and a GitHub client open all day for the seconds a week anyone
+  spends clicking would also mean holding them across the reconcile pass that
+  runs in a different process.
+
+### The Common Rule
+
+**Nothing Riggs sends anywhere may refer to Riggs.** Not the Slack messages, not
+the GitHub review bodies, not a Jira comment. Every one of them is submitted
+with the admin's own credentials and reads as the admin's own words, because it
+is the admin's own decision that produced it — naming the automation that
+carried it says something about their process to everyone who reads the pull
+request, and that is not the tool's to volunteer.
+
+The approval body was `"Approved via Riggs."` until Phase 9. It is now
+`"Approved."`, and `assertNoSelfReference` in the tests holds the line.
+
 ## 7c. The bulk block
 
 `internal/blockkit` now renders two shapes, and they are separate on purpose.
@@ -700,6 +737,11 @@ Rollback: the previous job and rule definitions are captured under
   digest can be removed rather than blanked, and `git.pr.bulk` schedules the
   pass. Sibling of `git.pr.fetch-reviews`, not a replacement — both read the
   same GitHub and write the same ledger in different streams.
+- **unreleased** — Phase 9. The digest's actions (§7bb): `ask_review` drops a
+  message tagging a configured reviewer in a configured channel or DM, and
+  `approve_merge` reuses the existing rebase-only approver. Also states the
+  Common Rule and fixes the one place that broke it — the GitHub approval body
+  said "Approved via Riggs." and now says "Approved."
 - **unreleased** — Phase 5, the cutover (§13b). Also fixes the installer,
   which built its job command from `cfg job set` — documented as equivalent to
   `jobs define`, but it rejects `--args`.
