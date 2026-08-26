@@ -31,6 +31,13 @@ type job struct {
 	Timeout  string
 	// What describes the job in the prompt.
 	What string
+	// AskProfile makes the installer ask which Slack profile the job posts
+	// through, and pass it as --slack-profile.
+	//
+	// Only the digest needs it, and it is not cosmetic: a click is delivered to
+	// the app that posted the message, so a digest posted through the wrong
+	// profile produces buttons the daemon never hears about.
+	AskProfile bool
 }
 
 // jobs is the set Riggs takes over. Cadences are the ones already configured
@@ -38,11 +45,19 @@ type job struct {
 // a migration hides which change caused a behaviour difference.
 var jobs = []job{
 	{
+		// Deliberately the SAME name the per-PR card job used. Redefining it
+		// replaces that definition rather than adding a second notifier beside
+		// it — two jobs mirroring one review queue is noise, not redundancy,
+		// and nothing would have removed the old one.
+		//
+		// The card renderer is retained and still reachable as
+		// `git.pr.fetch-reviews`; it is simply no longer on a schedule. See §12.
 		Name:  "github-review-queue",
-		Tool:  "git.pr.fetch-reviews",
-		Args:  []string{"git", "pr", "--fetch-reviews"},
-		Every: "1m", Timeout: "2m",
-		What: "PR review queue",
+		Tool:  "git.pr.bulk",
+		Args:  []string{"git", "pr", "--bulk"},
+		Every: "3m", Timeout: "2m",
+		What:       "PR review digest",
+		AskProfile: true,
 	},
 	{
 		Name:  "quick-coding-tasks-poll",
@@ -102,7 +117,15 @@ func (i *Installer) wireMurtaugh(ctx context.Context, cfg *config.Config, config
 		if err != nil {
 			return err
 		}
-		args := i.jobArgs(j, strings.TrimSpace(channel), configPath)
+		profile := ""
+		if j.AskProfile {
+			profile, err = i.p.Ask(
+				"  Slack profile to post it as (must match `riggs daemon`)", config.DefaultProfile)
+			if err != nil {
+				return err
+			}
+		}
+		args := i.jobArgs(j, strings.TrimSpace(channel), strings.TrimSpace(profile), configPath)
 		if err := i.setJob(ctx, bin, j, args); err != nil {
 			return err
 		}
@@ -126,10 +149,13 @@ func (i *Installer) wireMurtaugh(ctx context.Context, cfg *config.Config, config
 // jobArgs builds the Riggs argument list for a job, appending the delivery
 // target and — when the config is not in its default location — the flag that
 // points Riggs at it.
-func (i *Installer) jobArgs(j job, channel, configPath string) []string {
+func (i *Installer) jobArgs(j job, channel, profile, configPath string) []string {
 	args := append([]string{}, j.Args...)
 	if channel != "" {
 		args = append(args, "--slack-channel", channel)
+	}
+	if profile != "" {
+		args = append(args, "--slack-profile", profile)
 	}
 	if configPath != config.DefaultPath() {
 		args = append(args, "--config-file", configPath)

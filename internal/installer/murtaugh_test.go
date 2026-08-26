@@ -27,7 +27,7 @@ func joined(args []string) string { return strings.Join(args, "\x00") }
 
 func TestRegistersJobThroughMurtaughCLI(t *testing.T) {
 	s := happyScript("C0B29C20Z9S")
-	r := newRig(t, s, map[string]bool{"git.pr.fetch-reviews": true})
+	r := newRig(t, s, map[string]bool{"git.pr.bulk": true})
 
 	if err := r.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -50,9 +50,9 @@ func TestRegistersJobThroughMurtaughCLI(t *testing.T) {
 	for _, want := range []string{
 		"--name\x00github-review-queue",
 		"--command\x00/usr/local/bin/riggs",
-		"--args\x00git\x00--args\x00pr\x00--args\x00--fetch-reviews",
+		"--args\x00git\x00--args\x00pr\x00--args\x00--bulk",
 		"--args\x00--slack-channel\x00--args\x00C0B29C20Z9S",
-		"--every\x001m",
+		"--every\x003m",
 		"--timeout\x002m",
 	} {
 		if !strings.Contains(argv, want) {
@@ -64,7 +64,7 @@ func TestRegistersJobThroughMurtaughCLI(t *testing.T) {
 // An empty channel means DM the admin, so no channel flag is passed at all.
 func TestEmptyChannelOmitsTheFlag(t *testing.T) {
 	s := happyScript() // no channel answer -> empty
-	r := newRig(t, s, map[string]bool{"git.pr.fetch-reviews": true})
+	r := newRig(t, s, map[string]bool{"git.pr.bulk": true})
 
 	if err := r.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -83,7 +83,7 @@ func TestEmptyChannelOmitsTheFlag(t *testing.T) {
 func TestConfigFileFlagOnlyWhenNonDefault(t *testing.T) {
 	s := happyScript()
 	s.answers[0] = config.DefaultPath()
-	r := newRig(t, s, map[string]bool{"git.pr.fetch-reviews": true})
+	r := newRig(t, s, map[string]bool{"git.pr.bulk": true})
 
 	if err := r.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -95,7 +95,7 @@ func TestConfigFileFlagOnlyWhenNonDefault(t *testing.T) {
 
 	s2 := happyScript()
 	s2.answers[0] = "/opt/riggs/config.yaml"
-	r2 := newRig(t, s2, map[string]bool{"git.pr.fetch-reviews": true})
+	r2 := newRig(t, s2, map[string]bool{"git.pr.bulk": true})
 	if err := r2.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestConfigFileFlagOnlyWhenNonDefault(t *testing.T) {
 // would mean a scheduled failure every minute until the phase lands.
 func TestSkipsJobsWhoseToolIsNotBuilt(t *testing.T) {
 	s := happyScript()
-	r := newRig(t, s, map[string]bool{"git.pr.fetch-reviews": true})
+	r := newRig(t, s, map[string]bool{"git.pr.bulk": true})
 
 	if err := r.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -131,13 +131,13 @@ func TestSkipsJobsWhoseToolIsNotBuilt(t *testing.T) {
 func TestPreservesExistingCadences(t *testing.T) {
 	s := happyScript("", "", "")
 	r := newRig(t, s, map[string]bool{
-		"git.pr.fetch-reviews": true, "jira.tickets.poll": true, "jira.tickets.nudge": true})
+		"git.pr.bulk": true, "jira.tickets.poll": true, "jira.tickets.nudge": true})
 
 	if err := r.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	for _, tc := range []struct{ job, flag, value string }{
-		{"github-review-queue", "--every", "1m"},
+		{"github-review-queue", "--every", "3m"},
 		{"quick-coding-tasks-poll", "--every", "3m"},
 		{"quick-coding-tasks-nudge", "--schedule", "0 9,12,14,17 * * 1-5"},
 	} {
@@ -161,7 +161,7 @@ func TestPreservesExistingCadences(t *testing.T) {
 func TestEmptyMurtaughPathSkipsRegistration(t *testing.T) {
 	s := happyScript()
 	s.answers[4] = "<empty>"
-	r := newRig(t, s, map[string]bool{"git.pr.fetch-reviews": true})
+	r := newRig(t, s, map[string]bool{"git.pr.bulk": true})
 
 	if err := r.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -177,7 +177,7 @@ func TestEmptyMurtaughPathSkipsRegistration(t *testing.T) {
 // A config path that does not exist is a typo, not an install-free machine.
 func TestMissingMurtaughConfigIsAnError(t *testing.T) {
 	s := happyScript()
-	r := newRig(t, s, map[string]bool{"git.pr.fetch-reviews": true})
+	r := newRig(t, s, map[string]bool{"git.pr.bulk": true})
 	r.Installer.stat = func(string) (os.FileInfo, error) { return nil, os.ErrNotExist }
 
 	err := r.Run(context.Background())
@@ -188,7 +188,7 @@ func TestMissingMurtaughConfigIsAnError(t *testing.T) {
 
 func TestMissingMurtaughBinaryIsAnError(t *testing.T) {
 	s := happyScript()
-	r := newRig(t, s, map[string]bool{"git.pr.fetch-reviews": true})
+	r := newRig(t, s, map[string]bool{"git.pr.bulk": true})
 	r.Installer.lookPath = func(string) (string, error) { return "", os.ErrNotExist }
 
 	err := r.Run(context.Background())
@@ -206,6 +206,83 @@ func TestRedact(t *testing.T) {
 	} {
 		if got := redact(tc.in); got != tc.want {
 			t.Errorf("redact(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// Decommissioning the per-PR card job is done by REUSING its name: redefining
+// it replaces the old definition rather than adding a second notifier beside
+// it. Two jobs mirroring one review queue is noise, and nothing else would have
+// removed the old one.
+func TestDigestReplacesTheCardJobRatherThanJoiningIt(t *testing.T) {
+	s := happyScript("C0B29C20Z9S")
+	r := newRig(t, s, map[string]bool{"git.pr.bulk": true, "git.pr.fetch-reviews": true})
+
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// Exactly one review job, whatever else this build exposes.
+	registrations := 0
+	for _, cmd := range r.cmds {
+		if strings.Contains(joined(cmd.args), "--name\x00github-review-queue") {
+			registrations++
+		}
+	}
+	if registrations != 1 {
+		t.Fatalf("registered the review job %d times, want once", registrations)
+	}
+
+	argv, ok := argvOf(r, "github-review-queue")
+	if !ok {
+		t.Fatal("review job not registered")
+	}
+	// The card renderer is retained, but it is no longer on a schedule.
+	if strings.Contains(joined(argv), "--fetch-reviews") {
+		t.Errorf("the card job is still scheduled:\n%v", argv)
+	}
+	if !strings.Contains(joined(argv), "--args\x00--bulk") {
+		t.Errorf("the review job does not run the digest:\n%v", argv)
+	}
+}
+
+// A click is delivered to the app that posted the message, so a digest posted
+// through the wrong profile produces buttons the daemon never hears about.
+func TestDigestJobCarriesTheSlackProfile(t *testing.T) {
+	s := happyScript("C0B29C20Z9S", "riggs")
+	r := newRig(t, s, map[string]bool{"git.pr.bulk": true})
+
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	argv, _ := argvOf(r, "github-review-queue")
+	if !strings.Contains(joined(argv), "--args\x00--slack-profile\x00--args\x00riggs") {
+		t.Errorf("the digest job does not name a Slack profile:\n%v", argv)
+	}
+
+	// And the operator is told why it matters.
+	if !strings.Contains(r.prompt.transcript()+strings.Join(r.prompt.asked, "\n"), "riggs daemon") {
+		t.Error("the profile prompt does not say it must match the daemon")
+	}
+}
+
+// Only the digest asks; the ticket jobs are posted by whatever profile is
+// already the default, and adding a prompt to each would be noise.
+func TestOnlyTheDigestAsksForAProfile(t *testing.T) {
+	s := happyScript("", "", "")
+	r := newRig(t, s, map[string]bool{
+		"git.pr.bulk": true, "jira.tickets.poll": true, "jira.tickets.nudge": true})
+
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for _, name := range []string{"quick-coding-tasks-poll", "quick-coding-tasks-nudge"} {
+		argv, ok := argvOf(r, name)
+		if !ok {
+			t.Fatalf("%s not registered", name)
+		}
+		if strings.Contains(joined(argv), "--slack-profile") {
+			t.Errorf("%s was given a profile flag:\n%v", name, argv)
 		}
 	}
 }
