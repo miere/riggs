@@ -320,6 +320,45 @@ Slack ──ws──► SocketListener ──► Daemon ──► Router ──�
   message is still in the channel is an ordinary occurrence, and the daemon logs
   what it could not place.
 
+## 7c. The bulk block
+
+`internal/blockkit` now renders two shapes, and they are separate on purpose.
+
+| | `Card` (card.go) | `Digest` (bulk.go) |
+| --- | --- | --- |
+| Carries | one entity | many items |
+| Slack shape | `container` + `actions` row | `card` header + `section` rows |
+| Controls | buttons, link button, overflow | one `overflow` accessory per row |
+| Identity | `actions` block_id | each row's block_id |
+| Changes when | that entity changes | membership changes |
+
+They look alike and are not the same feature. A `Card` is one entity's
+self-updating container; a `Digest` is a list whose membership moves underneath
+it. Collapsing them would couple two lifecycles that are about to diverge, so
+only what is *provably* identical is shared: the fingerprint rule
+(`fingerprint.go`) and the primitive text/icon objects. Everything else is
+duplicated deliberately.
+
+That includes the menu option type. A digest option can carry a `url` — which is
+how "Open on Browser" costs no interaction — and a container card's overflow
+never has; giving the shared type a URL field would have changed the bytes every
+existing card renders, and the fingerprint with them.
+
+Rules:
+
+- **A row's block_id is its identity.** Same constraint as §7b: the overflow
+  click reports its own block_id and not its siblings' values.
+- **Option values are bare intent tokens**, identical on every row, so the
+  router's table can match them exactly.
+- **Only the title is struck through** on a done row. The reference and author
+  stay legible, because they are what you read to find the thing again.
+- **Titles are escaped and elided.** A title containing `&` or `<` would
+  otherwise re-open the row's own bold run and garble every row after it; one
+  untruncated title in a list of ten pushes the reference onto a wrap.
+- **An empty digest is deleted, not rendered.** A header with nothing under it
+  reads as "nothing needs you" while occupying the space of when something did.
+  `Empty()` reports it; §9b acts on it.
+
 ## 8. GitHub access
 
 Riggs talks to GitHub's **REST** API over its own HTTP client, with ETag
@@ -596,6 +635,11 @@ Rollback: the previous job and rule definitions are captured under
   used to *decode* callbacks only — outbound stays hand-built JSON, because the
   ledger's fingerprint depends on a stable encoding. Reverses §1's
   "always the callee" invariant and puts `app-token` (§7) to work.
+- **unreleased** — Phase 7. `blockkit.Digest` (§7c): the bulk block, a `card`
+  header over `section` rows with `overflow` accessories. Deliberately not a
+  refactor of `Card` — the two shapes share only the fingerprint rule and the
+  primitive text objects, because a per-entity card and a list whose membership
+  moves are about to evolve apart.
 - **unreleased** — Phase 5, the cutover (§13b). Also fixes the installer,
   which built its job command from `cfg job set` — documented as equivalent to
   `jobs define`, but it rejects `--args`.
