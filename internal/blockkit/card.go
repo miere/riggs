@@ -186,12 +186,34 @@ func (o Overflow) marshal() any {
 	return overflowElem{Type: "overflow", ActionID: o.ActionID, Options: opts}
 }
 
+// bodyLimit caps the body section's text, in runes.
+//
+// Slack's section block takes at most 3,000 characters, and going over does not
+// truncate the block — it rejects the whole message with invalid_blocks. An
+// uncapped body is therefore not a card that renders badly, it is a card that
+// never posts, and the click that asked for it looks to the user as though
+// nothing happened at all.
+//
+// The margin under the limit is deliberate. The count Slack applies is its own,
+// and a hundred characters of headroom costs nothing on a body that exists to
+// be read at a glance.
+//
+// The cut can land inside a mrkdwn run and leave an unpaired `*`, which Slack
+// renders as a literal asterisk. That is a blemish on a card; the alternative
+// it replaces is no card.
+//
+// This is the backstop, not the cure. A body that reaches four figures is
+// usually one nobody wanted rendered in full — see slackmd.stripDetails, which
+// removes the collapsed HTML that puts a Dependabot description over the line
+// in the first place.
+const bodyLimit = 2900
+
 // Blocks renders the card as the message's blocks array.
 func (c Card) Blocks() []any {
 	children := make([]any, 0, 3)
 	if c.Body != "" {
 		children = append(children, sectionBlock{
-			Type: "section", BlockID: c.BodyBlockID, Text: mrkdwn(c.Body),
+			Type: "section", BlockID: c.BodyBlockID, Text: mrkdwn(Truncate(c.Body, bodyLimit, bodyLimit)),
 		})
 	}
 	children = append(children, dividerBlock{Type: "divider"})

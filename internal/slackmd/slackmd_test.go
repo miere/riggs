@@ -246,6 +246,77 @@ func TestExcerpt(t *testing.T) {
 	}
 }
 
+// The bug this was written for: a Dependabot description is ~99% collapsed
+// release notes, and the HTML does not merely take up room — escaping grows it,
+// so the body arrives over Slack's 3,000-character section limit and the whole
+// message is rejected with invalid_blocks. What survives is the one sentence
+// that says what the change does.
+func TestDependabotBodyCollapsesToItsOneSentence(t *testing.T) {
+	body := "Bumps [pytest](https://github.com/pytest-dev/pytest) from 8.4.2 to 9.0.3.\n" +
+		"<details>\n<summary>Release notes</summary>\n<p><em>Sourced from " +
+		"<a href=\"https://github.com/pytest-dev/pytest/releases\">releases</a>.</em></p>\n" +
+		"<blockquote>\n<h2>9.0.3</h2>\n<ul><li>a bug fix</li></ul>\n</blockquote>\n</details>\n" +
+		"<details>\n<summary>Commits</summary>\n<ul><li><code>abc1234</code> a commit</li></ul>\n" +
+		"</details>\n<br />\n"
+
+	got := Excerpt(body, 2)
+
+	if !strings.Contains(got, "from 8.4.2 to 9.0.3") {
+		t.Errorf("the sentence that matters did not survive: %q", got)
+	}
+	for _, gone := range []string{"Release notes", "Commits", "blockquote", "abc1234", "&lt;"} {
+		if strings.Contains(got, gone) {
+			t.Errorf("%q survived the strip: %q", gone, got)
+		}
+	}
+	// Comfortably inside the section limit, rather than merely under it.
+	if len(got) > 200 {
+		t.Errorf("excerpt is %d chars, expected the one sentence: %q", len(got), got)
+	}
+}
+
+// Dependabot folds a details block inside another for its ignore conditions. A
+// non-greedy pattern stops at the inner closing tag and leaves a stray
+// `</details>` in the body.
+func TestNestedDetailsLeaveNoStrayTag(t *testing.T) {
+	got := FirstParagraphs("before\n<details><summary>s</summary>outer"+
+		"<details><summary>inner</summary>deep</details>tail</details>\nafter", 2)
+	if strings.Contains(got, "details") || strings.Contains(got, "deep") {
+		t.Errorf("nested block was not fully removed: %q", got)
+	}
+	for _, want := range []string{"before", "after"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("%q outside the block was lost: %q", want, got)
+		}
+	}
+}
+
+// An unclosed tag collapses the rest of the body on GitHub too, so taking the
+// remainder with it is what the reader already sees. A closing tag with no
+// opener is malformed input and is passed through rather than guessed at.
+func TestUnbalancedDetails(t *testing.T) {
+	if got := FirstParagraphs("keep this\n<details><summary>s</summary>swallowed", 2); strings.Contains(got, "swallowed") {
+		t.Errorf("unclosed block did not take the rest: %q", got)
+	} else if !strings.Contains(got, "keep this") {
+		t.Errorf("text before the block was lost: %q", got)
+	}
+	if got := FirstParagraphs("orphan</details>", 2); !strings.Contains(got, "orphan") {
+		t.Errorf("a stray closing tag ate the body: %q", got)
+	}
+}
+
+// Stripping a details block routinely leaves the `<br />` that followed it
+// alone in a paragraph. Escaped, it reaches the card as a literal `<br />`.
+func TestParagraphOfOnlyMarkupIsSkipped(t *testing.T) {
+	got := Excerpt("the real text\n\n<br />\n\nsecond paragraph", 2)
+	if strings.Contains(got, "br") {
+		t.Errorf("a markup-only paragraph was kept: %q", got)
+	}
+	if !strings.Contains(got, "second paragraph") {
+		t.Errorf("the markup-only paragraph was counted against n: %q", got)
+	}
+}
+
 // Deterministic, which is the other half of why this replaced an LLM call: a
 // card body that changes between renders cannot be fingerprinted.
 func TestConversionIsDeterministic(t *testing.T) {
