@@ -131,8 +131,12 @@ func (p *Publisher) Publish(ctx context.Context, userID string) error {
 // everybody else — it is a GitHub request per curious colleague, against a
 // 60-an-hour unauthenticated quota, for a section they will never be shown.
 func (p *Publisher) render(ctx context.Context, userID string) blockkit.Home {
-	home := blockkit.Home{Version: p.deps.Version}
-	if !p.IsAdmin(userID) || p.deps.Checker == nil || p.deps.Installer == nil {
+	admin := p.IsAdmin(userID)
+	// The controls menu needs nothing but the gate: there is always something
+	// to restart. The update section needs a release AND something able to
+	// install it.
+	home := blockkit.Home{Version: p.deps.Version, Admin: admin && p.deps.Restart != nil}
+	if !admin || p.deps.Checker == nil || p.deps.Installer == nil {
 		return home
 	}
 
@@ -226,6 +230,42 @@ func (p *Publisher) Update(ctx context.Context, userID string) error {
 	// No republish on the success path: this process is on its way out, and the
 	// view it would publish is the OLD version's. The restarted daemon
 	// publishes the new one the next time the tab is opened.
+	return nil
+}
+
+// Restart brings the daemon back on the binary it is already running.
+//
+// Same admin re-check as Update, for the same reason: the menu is only ever
+// rendered for the admin, but an action_id and a value are just strings in a
+// payload, and this one takes Riggs off Slack for as long as its supervisor
+// needs to bring it back.
+//
+// Unlike Update there is nothing to install and nothing to verify first, so the
+// only failure worth reporting is launchd declining — which means the daemon is
+// NOT coming back on its own and the admin has to be told, rather than left
+// watching a tab that will never change.
+func (p *Publisher) Restart(ctx context.Context, userID string) error {
+	if !p.IsAdmin(userID) {
+		p.deps.Logger.Warn("denied an app home restart from a non-admin", "user", userID)
+		return fmt.Errorf("apphome: %s is not the admin", userID)
+	}
+	if p.deps.Restart == nil {
+		p.deps.Logger.Warn("app home restart requested but none is configured", "user", userID)
+		p.say(ctx, fmt.Sprintf("%s Riggs has no supervisor configured, so it cannot restart itself.",
+			blockkit.MarkerWarning))
+		return fmt.Errorf("apphome: no restart configured")
+	}
+
+	// Said BEFORE the restart, not after: after, this process is gone.
+	p.say(ctx, fmt.Sprintf("%s Restarting Riggs.", blockkit.MarkerRunning))
+	p.deps.Logger.Info("app home restart requested", "user", userID)
+
+	if err := p.deps.Restart(ctx); err != nil {
+		p.deps.Logger.Error("app home restart failed", "user", userID, "error", err)
+		p.say(ctx, fmt.Sprintf("%s Restart failed: %v. Riggs is still running the old process.",
+			blockkit.MarkerFailed, err))
+		return err
+	}
 	return nil
 }
 

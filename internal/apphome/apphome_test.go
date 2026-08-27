@@ -58,6 +58,16 @@ func (f *fakeViews) count() int {
 	return len(f.published)
 }
 
+// hasControlsMenu reports whether the version line carries the overflow menu.
+func (p publishedView) hasControlsMenu() bool {
+	blocks, _ := p.view["blocks"].([]any)
+	if len(blocks) < 2 {
+		return false
+	}
+	_, found := blocks[1].(map[string]any)["accessory"]
+	return found
+}
+
 // blockTypes reports the rendered surface's block types, which is the only
 // thing these tests need from the view.
 func (p publishedView) blockTypes() []string {
@@ -132,7 +142,7 @@ func TestTheAdminSeesPastTheDivider(t *testing.T) {
 		t.Fatalf("Publish: %v", err)
 	}
 	got := strings.Join(views.last().blockTypes(), ",")
-	if got != "image,context,divider,header,section" {
+	if got != "image,section,divider,header,section" {
 		t.Fatalf("admin view = %s", got)
 	}
 }
@@ -145,7 +155,7 @@ func TestANonAdminNeverSeesTheUpdateSection(t *testing.T) {
 	if err := p.Publish(context.Background(), "U0SOMEONE"); err != nil {
 		t.Fatalf("Publish: %v", err)
 	}
-	if got := strings.Join(views.last().blockTypes(), ","); got != "image,context" {
+	if got := strings.Join(views.last().blockTypes(), ","); got != "image,section" {
 		t.Fatalf("non-admin view = %s", got)
 	}
 	// And they cost nothing: no GitHub lookup runs for a section they will
@@ -163,7 +173,7 @@ func TestAnUnsetAdminMatchesNobody(t *testing.T) {
 		t.Fatal("an unset admin matched someone")
 	}
 	p.Publish(context.Background(), admin)
-	if got := strings.Join(views.last().blockTypes(), ","); got != "image,context" {
+	if got := strings.Join(views.last().blockTypes(), ","); got != "image,section" {
 		t.Fatalf("view = %s, want no update section", got)
 	}
 }
@@ -173,7 +183,7 @@ func TestNoUpdateAvailableStopsAtTheVersion(t *testing.T) {
 	p.deps.Checker.(*fakeChecker).rel = updates.Release{Current: "v0.2.0", Tag: "v0.2.0"}
 
 	p.Publish(context.Background(), admin)
-	if got := strings.Join(views.last().blockTypes(), ","); got != "image,context" {
+	if got := strings.Join(views.last().blockTypes(), ","); got != "image,section" {
 		t.Fatalf("view = %s", got)
 	}
 }
@@ -186,7 +196,7 @@ func TestAFailedCheckStillPublishesTheVersion(t *testing.T) {
 	if err := p.Publish(context.Background(), admin); err != nil {
 		t.Fatalf("Publish: %v", err)
 	}
-	if got := strings.Join(views.last().blockTypes(), ","); got != "image,context" {
+	if got := strings.Join(views.last().blockTypes(), ","); got != "image,section" {
 		t.Fatalf("view = %s", got)
 	}
 }
@@ -211,6 +221,100 @@ func TestAChangedViewIsRepublished(t *testing.T) {
 
 	if views.count() != 2 {
 		t.Fatalf("published %d times, want 2", views.count())
+	}
+}
+
+// --- the controls menu ------------------------------------------------------
+
+func TestOnlyTheAdminGetsTheControlsMenu(t *testing.T) {
+	p, views, _, _, _ := publisher(t, nil)
+
+	p.Publish(context.Background(), admin)
+	if !views.last().hasControlsMenu() {
+		t.Error("the admin was shown no controls menu")
+	}
+	p.Publish(context.Background(), "U0SOMEONE")
+	if views.last().hasControlsMenu() {
+		t.Error("a non-admin was shown the controls menu")
+	}
+}
+
+// Drawing a Restart option on a Riggs that has no way to restart itself is the
+// same mistake as drawing a disabled button: it invites a click and then
+// explains why it will not work.
+func TestWithNoSupervisorTheMenuIsNotDrawn(t *testing.T) {
+	p, views, _, _, _ := publisher(t, func(d *Deps) { d.Restart = nil })
+
+	p.Publish(context.Background(), admin)
+	if views.last().hasControlsMenu() {
+		t.Error("the menu was drawn with no supervisor to restart through")
+	}
+}
+
+// Restarting is not about a release. It is offered whether or not there is
+// anything to install.
+func TestTheMenuSurvivesWithNothingToInstall(t *testing.T) {
+	p, views, checker, _, _ := publisher(t, nil)
+	checker.rel = updates.Release{Current: "v0.2.0", Tag: "v0.2.0"}
+
+	p.Publish(context.Background(), admin)
+	if !views.last().hasControlsMenu() {
+		t.Error("the menu vanished when Riggs was up to date")
+	}
+}
+
+func TestRestartAsksTheSupervisor(t *testing.T) {
+	restarted := 0
+	p, _, _, installer, poster := publisher(t, func(d *Deps) {
+		d.Restart = func(context.Context) error { restarted++; return nil }
+	})
+
+	if err := p.Restart(context.Background(), admin); err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+	if restarted != 1 {
+		t.Fatalf("restarted %d times, want 1", restarted)
+	}
+	// Nothing is installed on the way past: this is a restart, not an update.
+	if len(installer.tags) != 0 {
+		t.Fatalf("the installer ran: %v", installer.tags)
+	}
+	// And the admin is told BEFORE the process goes, since afterwards there is
+	// nobody left to say it.
+	if len(poster.posted) != 1 || !strings.Contains(poster.posted[0], "Restarting") {
+		t.Fatalf("the restart was not announced: %v", poster.posted)
+	}
+}
+
+// The menu is only ever rendered for the admin, but an action_id and a value
+// are just strings in a payload — and this one takes Riggs off Slack.
+func TestRestartRefusesANonAdmin(t *testing.T) {
+	restarted := 0
+	p, _, _, _, _ := publisher(t, func(d *Deps) {
+		d.Restart = func(context.Context) error { restarted++; return nil }
+	})
+
+	if err := p.Restart(context.Background(), "U0SOMEONE"); err == nil {
+		t.Fatal("a non-admin restarted Riggs")
+	}
+	if restarted != 0 {
+		t.Fatal("the supervisor was asked anyway")
+	}
+}
+
+// launchd declining means the daemon is NOT coming back on its own. Saying so
+// is the difference between a slow restart and a dead Riggs nobody noticed.
+func TestARefusedRestartIsReported(t *testing.T) {
+	p, _, _, _, poster := publisher(t, func(d *Deps) {
+		d.Restart = func(context.Context) error { return errors.New("launchd does not know this agent") }
+	})
+
+	if err := p.Restart(context.Background(), admin); err == nil {
+		t.Fatal("Restart swallowed the supervisor's refusal")
+	}
+	joined := strings.Join(poster.posted, "\n")
+	if !strings.Contains(joined, "still running the old process") {
+		t.Fatalf("the failure was not explained: %v", poster.posted)
 	}
 }
 

@@ -26,6 +26,13 @@ const (
 	// HomePortraitAlt is its alt text.
 	HomePortraitAlt = "Riggs Photo"
 
+	// HomeMenuActionID is the action_id of the overflow menu beside the
+	// version line — Riggs' own controls, as opposed to the Update button,
+	// which belongs to a release rather than to the app.
+	HomeMenuActionID = "app_menu"
+	// HomeRestartIntent is the menu's restart option.
+	HomeRestartIntent = "restart"
+
 	// HomeUpdateActionID is the action_id of the Update button.
 	HomeUpdateActionID = "home_update"
 	// HomeUpdateIntent is its value: a bare token, like every other control
@@ -50,6 +57,11 @@ const (
 type Home struct {
 	// Version is the running build, rendered verbatim under the portrait.
 	Version string
+	// Admin puts the controls menu on the version line. It is a separate flag
+	// from Update because the two answer different questions: Update is "is
+	// there a release to install", Admin is "may this viewer operate Riggs at
+	// all". Restarting is available whether or not anything is out of date.
+	Admin bool
 	// Update, when set, appends the divider and everything after it. Nil is
 	// the ordinary state: up to date, or a viewer with no business seeing it.
 	Update *HomeUpdate
@@ -100,9 +112,25 @@ type homeView struct {
 
 // Blocks renders the Home tab.
 func (h Home) Blocks() []any {
+	version := accessorySection{Type: "section", Text: mrkdwn(h.versionLine())}
+	// The menu rides on the version line rather than sitting below the
+	// divider with the update, because it is not about a release: there is
+	// something to restart whether or not there is anything to install. It is
+	// still admin-only — a non-admin is shown no menu at all, not a menu whose
+	// one option refuses them.
+	if h.Admin {
+		version.Accessory = menuElem{
+			Type:     "overflow",
+			ActionID: HomeMenuActionID,
+			Options: []menuOptionObj{
+				{Text: plainVerbatim("Restart"), Value: HomeRestartIntent},
+			},
+		}
+	}
+
 	blocks := []any{
 		imageBlock{Type: "image", ImageURL: HomePortraitURL, AltText: HomePortraitAlt},
-		contextBlock{Type: "context", Elements: []textObj{plainEmoji(h.versionLine())}},
+		version,
 	}
 	if h.Update == nil {
 		return blocks
