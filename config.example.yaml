@@ -7,13 +7,18 @@
 # ~/.config/riggs/config.yaml -> ~/.config/riggs/config.db.
 version: 1
 
-# The single human Riggs acts for. Used as the reviewer handle to watch, the
-# Jira account tickets are assigned to, and the DM target when a tool is given
-# no --slack-channel.
+# The single human Riggs acts for: the Jira account tickets are assigned to, and
+# the DM target when a tool is given no --slack-channel.
+#
+# There is deliberately NO github-login here. The reviewer handle goes on the
+# command that fetches reviews (`riggs git pr --bulk <user>`), so the job says
+# whose queue it mirrors. As a setting it was resolved at run time, which meant
+# an edit to this file could repoint the queue at a different person while the
+# scheduled job looked entirely unchanged. A config that still carries the key
+# is refused at load, with a message saying so.
 admin:
   slack-user-id: U0B20G0ET9T
   jira-email: miere@nurturecloud.com
-  github-login: miere
 
 # A dotenv file loaded before the ${VAR} references below are expanded.
 #
@@ -25,6 +30,11 @@ admin:
 # Omitted, `.env` beside this file is used if it exists — in the default setup
 # that is ~/.config/riggs/.env. A file named here that cannot be read is an
 # error. `riggs capabilities` prints whichever path was resolved.
+#
+# NOTE: these values OVERRIDE the ambient environment, which is the opposite of
+# usual dotenv precedence. Murtaugh exports its own SLACK_BOT_TOKEN into every
+# job it spawns, so without this Riggs would post as Murtaugh when scheduled and
+# as itself when run by launchd — and the daemon would never hear the clicks.
 # env-file: ~/.config/murtaugh/.env
 
 # "Ask for Code Review" on a bulk digest row. It drops one message and stops —

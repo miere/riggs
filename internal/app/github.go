@@ -101,19 +101,19 @@ func approverFor(cfg *config.Config) (*pullrequest.Approver, io.Closer, error) {
 // exist. Slack is required because every one of them delivers or is about to;
 // `riggs capabilities` explains an absence.
 func registerGitHubTools(reg *tools.Registry, cfg *config.Config, resolver *slack.Resolver) {
-	login := cfg.Admin.GitHubLogin
-
-	reg.Register(fetchreviews.New(resolver, login,
+	// No default login. Whose reviews a pass fetches is named on the command
+	// that runs it, never resolved from this file at run time.
+	reg.Register(fetchreviews.New(resolver,
 		func(_ context.Context, login string) (fetchreviews.Engine, io.Closer, error) {
 			return engineFor(cfg, login)
 		}))
 
-	reg.Register(bulkreviews.New(resolver, login,
+	reg.Register(bulkreviews.New(resolver,
 		func(_ context.Context, login string, opts pullrequest.BulkOptions) (bulkreviews.Engine, io.Closer, error) {
 			return bulkEngineFor(cfg, login, opts)
 		}))
 
-	reg.Register(parity.New(login,
+	reg.Register(parity.New(
 		func(_ context.Context, login string) (parity.Resolver, io.Closer, error) {
 			return engineFor(cfg, login)
 		}))

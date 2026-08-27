@@ -22,7 +22,7 @@ version: 1
 admin:
   slack-user-id: U0B20G0ET9T
   jira-email: miere@nurturecloud.com
-  github-login: miere
+
 slack:
   profiles:
     default:
@@ -42,9 +42,6 @@ func TestLoadExplicitPath(t *testing.T) {
 	}
 	if cfg.Path != path {
 		t.Errorf("Path = %q, want %q", cfg.Path, path)
-	}
-	if cfg.Admin.GitHubLogin != "miere" {
-		t.Errorf("github-login = %q, want miere", cfg.Admin.GitHubLogin)
 	}
 	p, name, ok := cfg.Profile("")
 	if !ok || name != DefaultProfile {
@@ -155,5 +152,27 @@ func TestProfileLookupMiss(t *testing.T) {
 	}
 	if _, name, ok := cfg.Profile("nc"); !ok || name != "nc" {
 		t.Errorf("Profile(\"nc\") = %q, ok=%v; want the nc profile", name, ok)
+	}
+}
+
+// admin.github-login is retired. A config that still carries it is refused BY
+// NAME, saying what to do instead — rather than by KnownFields, which would
+// report an unrecognised key and leave the reader guessing.
+//
+// Refusing rather than ignoring is the point: silently dropping a setting
+// someone believes is steering the review queue is exactly the trap the removal
+// closes.
+func TestRetiredGitHubLoginIsRefused(t *testing.T) {
+	path := write(t, t.TempDir(), "config.yaml",
+		"admin:\n  slack-user-id: U1\n  github-login: miere\n")
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load accepted a config still carrying admin.github-login")
+	}
+	for _, want := range []string{"admin.github-login", "no longer", "on the command"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
 	}
 }

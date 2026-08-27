@@ -37,12 +37,27 @@ func (c *Config) EnvLoaded() bool { return c.envLoaded }
 //
 // Rules, all of them chosen so a launchd agent and a shell behave the same:
 //
-//   - An already-set variable wins. That is standard dotenv precedence, and it
-//     is what lets an operator override one token for a single run without
-//     editing a file.
+//   - **The file wins over the ambient environment.** This is godotenv's
+//     Overload, not its Load, and it is a deliberate inversion of standard
+//     dotenv precedence.
+//
+//     Riggs is usually started by Murtaugh, whose gateway has already exported
+//     its own SLACK_BOT_TOKEN and friends into the environment every job
+//     inherits. Under standard precedence those would win, so the *same*
+//     profile would resolve to Murtaugh's app when scheduled and to Riggs' own
+//     when started by launchd — one identity for the digest and another for
+//     the daemon listening to it, and every click delivered to an app with no
+//     handler for it. Silently.
+//
+//     Riggs' own dotenv defines Riggs' own identity, whoever spawned the
+//     process. The cost is that overriding a single variable for one run means
+//     editing the file rather than exporting it, which is the right trade when
+//     the alternative fails without saying anything.
+//
 //   - A missing file is not an error. The variables may come from the real
 //     environment, which is exactly the case when Riggs is invoked from
 //     Murtaugh's gateway — and refusing to start there would be a regression.
+//
 //   - An *explicitly named* file that cannot be read IS an error: asking for a
 //     specific file and silently getting none is never what the caller meant,
 //     the same rule --config-file follows.
@@ -63,7 +78,7 @@ func (c *Config) loadEnvFile(configPath string) error {
 		}
 		return fmt.Errorf("env-file %s: %w", path, err)
 	}
-	if err := godotenv.Load(path); err != nil {
+	if err := godotenv.Overload(path); err != nil {
 		return fmt.Errorf("env-file %s: %w", path, err)
 	}
 	c.envLoaded = true

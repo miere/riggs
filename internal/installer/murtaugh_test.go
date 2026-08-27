@@ -82,7 +82,7 @@ func TestEmptyChannelOmitsTheFlag(t *testing.T) {
 // when that is not where Riggs would look anyway.
 func TestConfigFileFlagOnlyWhenNonDefault(t *testing.T) {
 	s := happyScript()
-	s.answers[0] = config.DefaultPath()
+	s.answers[answerConfigPath] = config.DefaultPath()
 	r := newRig(t, s, map[string]bool{"git.pr.bulk": true})
 
 	if err := r.Run(context.Background()); err != nil {
@@ -94,7 +94,7 @@ func TestConfigFileFlagOnlyWhenNonDefault(t *testing.T) {
 	}
 
 	s2 := happyScript()
-	s2.answers[0] = "/opt/riggs/config.yaml"
+	s2.answers[answerConfigPath] = "/opt/riggs/config.yaml"
 	r2 := newRig(t, s2, map[string]bool{"git.pr.bulk": true})
 	if err := r2.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -160,7 +160,7 @@ func TestPreservesExistingCadences(t *testing.T) {
 // install still succeeds.
 func TestEmptyMurtaughPathSkipsRegistration(t *testing.T) {
 	s := happyScript()
-	s.answers[4] = "<empty>"
+	s.answers[answerMurtaughPath] = "<empty>"
 	r := newRig(t, s, map[string]bool{"git.pr.bulk": true})
 
 	if err := r.Run(context.Background()); err != nil {
@@ -284,5 +284,44 @@ func TestOnlyTheDigestAsksForAProfile(t *testing.T) {
 		if strings.Contains(joined(argv), "--slack-profile") {
 			t.Errorf("%s was given a profile flag:\n%v", name, argv)
 		}
+	}
+}
+
+// The job says who it is for. Nothing has to agree with it later: a config edit
+// cannot silently repoint the queue at a different person, and reading the job
+// tells you whose reviews it fetches without looking anywhere else.
+func TestDigestJobNamesTheGitHubUser(t *testing.T) {
+	s := happyScript("C0B29C20Z9S", "riggs")
+	r := newRig(t, s, map[string]bool{"git.pr.bulk": true})
+
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	argv, ok := argvOf(r, "github-review-queue")
+	if !ok {
+		t.Fatal("review job not registered")
+	}
+	// The login binds as the verb flag's value, so it must sit immediately
+	// after it: `git pr --bulk miere`.
+	if !strings.Contains(joined(argv), "--args\x00--bulk\x00--args\x00miere") {
+		t.Errorf("the login is not passed on the command:\n%v", argv)
+	}
+}
+
+// Without a login the job would fetch reviews for nobody, so it is skipped and
+// reported rather than registered to fail every three minutes.
+func TestDigestJobSkippedWithoutALogin(t *testing.T) {
+	s := happyScript("C0B29C20Z9S", "riggs")
+	s.answers[1] = "<empty>" // the GitHub login prompt
+	r := newRig(t, s, map[string]bool{"git.pr.bulk": true})
+
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if _, ok := argvOf(r, "github-review-queue"); ok {
+		t.Error("registered a digest job with no GitHub login")
+	}
+	if !strings.Contains(r.prompt.transcript(), "nobody to fetch reviews for") {
+		t.Errorf("the skip was not explained:\n%s", r.prompt.transcript())
 	}
 }

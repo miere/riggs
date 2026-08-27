@@ -680,6 +680,25 @@ Rules:
   failure every three minutes.
 - The job passes `--config-file` only when the config is not where Riggs would
   look anyway, so the common case stays readable.
+- **The digest job names its GitHub user on the command**, and `admin.github-login`
+  no longer exists. The job says who it is for: a config edit cannot repoint the
+  queue at a different person, and reading the job answers the question without a
+  second lookup. The installer still asks for the handle — it just bakes it into
+  the command instead of persisting it. With none given the job is skipped and
+  reported, not registered to fail every three minutes.
+  A config still carrying the key is **refused at load**, by name, with a message
+  saying what to do instead. Refusing rather than ignoring is the point: silently
+  dropping a setting someone believes is steering the review queue is the very
+  trap the removal closes. The tools have no fallback either — `git.pr.bulk`,
+  `git.pr.fetch-reviews` and `git.pr.check-parity` all require the login as an
+  argument.
+- **The installer collects Riggs' own Slack app**, app-level token included.
+  Riggs does not share Murtaugh's app: a click is delivered to whichever app
+  posted the message, so the daemon can only ever answer buttons on its own.
+  Without an app token the install still completes, and says that the digest's
+  buttons will not respond until one exists.
+- **The Jira tenant is asked for, never guessed** (§13's removal of the default).
+  A config written without it leaves the `jira.*` tools unregistered.
 
 ### 12c. Decommissioning the card job
 
@@ -760,7 +779,14 @@ That default holds even when there is **no config file at all** — the location
 one *would* live at still decides, which is the state a fresh machine and
 `riggs capabilities` are both in.
 
-- An already-set variable wins (standard dotenv precedence).
+- **The file wins over the ambient environment** (`godotenv.Overload`), which
+  inverts standard dotenv precedence on purpose. Murtaugh's gateway exports its
+  own `SLACK_BOT_TOKEN` into every job it spawns, so under normal precedence the
+  *same profile* would resolve to Murtaugh's app when scheduled and to Riggs'
+  own when started by launchd — one identity posting the digest, another
+  listening for its clicks, failing silently. Riggs' dotenv defines Riggs'
+  identity whoever spawned the process. The cost: overriding one variable for a
+  single run means editing the file, not exporting it.
 - A **missing conventional** file is not an error — Riggs is still invoked from
   Murtaugh with the variables already exported, and refusing to start there
   would be a regression.
@@ -789,6 +815,7 @@ one *would* live at still decides, which is the state a fresh machine and
 | 11 | Decommission the per-PR card job, keeping the renderer (§12c) | done |
 | 12 | Pin the default dotenv location; report it (§12b) | done |
 | 13 | `jira.base-url` becomes required configuration; no default tenant | done |
+| 14 | Explicit identity: login on the command (setting removed), own Slack app, dotenv wins | done |
 
 ## 13b. Cutover
 
@@ -858,6 +885,13 @@ Rollback: the previous job and rule definitions are captured under
   hard-code an Atlassian instance, so a machine that configured no tenant
   silently talked to whichever one this source named. With none configured the
   `jira.*` tools are now simply absent (§6), like any other capability gap.
+- **unreleased** — Phase 14. Four corrections to how identity is supplied.
+  The digest job names its GitHub user on the command line, and
+  `admin.github-login` is removed outright — a config that still carries it is
+  refused at load rather than ignored. The installer collects Riggs' own Slack app including
+  the app-level token, and asks for the Jira tenant §13 stopped defaulting.
+  And `env-file` now *overrides* the ambient environment, so Riggs resolves to
+  the same Slack app whether Murtaugh spawned it or launchd did.
 - **unreleased** — Phase 5, the cutover (§13b). Also fixes the installer,
   which built its job command from `cfg job set` — documented as equivalent to
   `jobs define`, but it rejects `--args`.

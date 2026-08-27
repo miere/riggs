@@ -42,7 +42,7 @@ func invoke(t *testing.T, tool *Tool) Report {
 func TestReportsReadyInstallation(t *testing.T) {
 	cfg := &config.Config{
 		Path:  "/tmp/config.yaml",
-		Admin: config.Admin{SlackUserID: "U1", JiraEmail: "m@x", GitHubLogin: "miere"},
+		Admin: config.Admin{SlackUserID: "U1", JiraEmail: "m@x"},
 		Slack: config.Slack{Profiles: map[string]config.Profile{
 			"default": {BotToken: "xoxb", UserToken: "xoxp"},
 		}},
@@ -61,9 +61,6 @@ func TestReportsReadyInstallation(t *testing.T) {
 			t.Errorf("backend %s unavailable (%s), want all ready", b.Name, b.Detail)
 		}
 	}
-	if r.Admin.GitHubLogin != "set" {
-		t.Errorf("admin.github_login = %q, want \"set\"", r.Admin.GitHubLogin)
-	}
 }
 
 // The report never echoes the admin's actual values, so it is safe to paste
@@ -74,9 +71,6 @@ func TestAdminValuesAreNotEchoed(t *testing.T) {
 	rendered := r.String()
 	if strings.Contains(rendered, "U0SECRET") || strings.Contains(rendered, "nurturecloud.com") {
 		t.Errorf("report echoes configured values:\n%s", rendered)
-	}
-	if r.Admin.GitHubLogin != "unset" {
-		t.Errorf("admin.github_login = %q, want \"unset\"", r.Admin.GitHubLogin)
 	}
 }
 
