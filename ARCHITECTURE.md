@@ -336,10 +336,18 @@ Three options render on a live row; two of them are answered by the daemon.
 - **Approve and Merge renders only on a Dependabot-authored pull request.**
 - **A done row keeps only the link.** There is nothing left to approve or ask
   about on a pull request that has been reviewed, merged or closed.
-- **Ask for Code Review drops a message and stops.** Nothing is delegated and no
-  review is started — that is smaller than the `delegate-to-agent` workflow rule
-  it replaces, and deliberately so. Destination is `review-request` in the
-  config: a channel, or a DM when none is named.
+- **Ask for Code Review posts a CARD and stops.** It is the legacy container
+  shape (§12c is why that renderer was kept), with two differences: no overflow
+  — the reviewer is being asked one question, and a menu of alternatives is a
+  worse way to ask it — and approving from it leaves **no comment** on GitHub,
+  because that approval is the reviewer's own and a body would be words they did
+  not write. Riggs then tags the reviewer in the card's own thread, so the card
+  reads as the subject and the ask as the message about it. Nothing is delegated
+  and no review is started. Destination is `review-request` in the config: a
+  channel, or a DM when none is named.
+- **The ask card has its own `action_id`** (`pr_ask_review`), not the legacy
+  card's `approve_only`, so Riggs' dispatch table and Murtaugh's still-live
+  rules never have to agree about a name.
 - **Handlers build their dependencies per click** and close them again. Holding
   a ledger handle and a GitHub client open all day for the seconds a week anyone
   spends clicking would also mean holding them across the reconcile pass that
@@ -389,9 +397,13 @@ Rules:
   router's table can match them exactly.
 - **Only the title is struck through** on a done row. The reference and author
   stay legible, because they are what you read to find the thing again.
-- **Titles are escaped and elided.** A title containing `&` or `<` would
-  otherwise re-open the row's own bold run and garble every row after it; one
+- **Titles are elided at 50 runes**, cut to 47 plus an ellipsis. One
   untruncated title in a list of ten pushes the reference onto a wrap.
+- **The digest has its own icon const**, not the legacy card's. Sharing it would
+  mean a change to one silently re-rendering every card of the other — the same
+  reason the option type is duplicated.
+- **Titles are escaped.** A title containing `&` or `<` would
+  otherwise re-open the row's own bold run and garble every row after it.
 - **An empty digest is deleted, not rendered.** A header with nothing under it
   reads as "nothing needs you" while occupying the space of when something did.
   `Empty()` reports it; §9b acts on it.
@@ -824,6 +836,8 @@ one *would* live at still decides, which is the state a fresh machine and
 | 13 | `jira.base-url` becomes required configuration; no default tenant | done |
 | 14 | Explicit identity: login on the command (setting removed), own Slack app, dotenv wins | done |
 | 15 | Give the launch agent a PATH (§12b) | done |
+| 16 | Digest polish: own icon, 50/47 title | done |
+| 17 | Ask for Code Review posts a card (§7bb) | done |
 
 ## 13b. Cutover
 
@@ -906,6 +920,13 @@ Rollback: the previous job and rule definitions are captured under
   "executable file not found in $PATH" while the connection looked healthy.
   `launchd install` now bakes the installing shell's PATH into the plist and
   warns about any tool it cannot resolve.
+- **unreleased** — Phase 17. "Ask for Code Review" becomes a card (§7bb): the
+  legacy container shape minus the overflow, with an Approve that leaves no
+  comment on GitHub, and the reviewer tagged in the card's own thread with the
+  requester copied in. `review-request.user-id` accepts a handle and resolves it
+  against the workspace; the installer collects and resolves it at setup.
+- **unreleased** — Phase 16. Digest polish: its own icon const, and row titles
+  cut at 50 runes to 47 plus an ellipsis.
 - **unreleased** — Phase 5, the cutover (§13b). Also fixes the installer,
   which built its job command from `cfg job set` — documented as equivalent to
   `jobs define`, but it rejects `--args`.

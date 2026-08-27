@@ -57,6 +57,10 @@ type Installer struct {
 	// person while the job looked unchanged.
 	ghLogin string
 
+	// lookupUser resolves a Slack handle to an id; a seam so the installer can
+	// be driven without a workspace.
+	lookupUser func(ctx context.Context, target slack.Target, handle string) (string, error)
+
 	ghAuth   func(ctx context.Context) (github.Auth, error)
 	newPRs   func(token string) PRLister
 	poster   slack.Poster
@@ -70,11 +74,12 @@ type Installer struct {
 // New builds an Installer with live dependencies.
 func New(p Prompter, opts Options) *Installer {
 	return &Installer{
-		p:      p,
-		opts:   opts,
-		ghAuth: func(ctx context.Context) (github.Auth, error) { return github.AuthFromGH(ctx, nil) },
-		newPRs: func(token string) PRLister { return github.New(token) },
-		poster: slack.NewAPI(),
+		p:          p,
+		opts:       opts,
+		ghAuth:     func(ctx context.Context) (github.Auth, error) { return github.AuthFromGH(ctx, nil) },
+		newPRs:     func(token string) PRLister { return github.New(token) },
+		poster:     slack.NewAPI(),
+		lookupUser: slack.NewAPI().LookupUserID,
 		runCmd: func(ctx context.Context, name string, args ...string) ([]byte, error) {
 			out, errOut, err := github.ExecRunner(ctx, name, args...)
 			return append(out, errOut...), err
@@ -225,7 +230,64 @@ func (i *Installer) gather(ctx context.Context) (*config.Config, error) {
 	cfg.Jira = config.Jira{
 		Email: jiraEmail, Token: jiraToken, BaseURL: strings.TrimSpace(jiraBaseURL)}
 
+	if err := i.gatherReviewRequest(ctx, cfg); err != nil {
+		return nil, err
+	}
+
 	return cfg, nil
+}
+
+// gatherReviewRequest collects where "Ask for Code Review" sends its card and
+// who it tags.
+//
+// The reviewer is RESOLVED here, so the written config holds an id. A handle
+// would otherwise be resolved on every click, and — worse — a handle that
+// matches nobody would not be discovered until someone pressed the button and
+// no message arrived.
+func (i *Installer) gatherReviewRequest(ctx context.Context, cfg *config.Config) error {
+	i.p.Say("")
+	i.p.Say("\"Ask for Code Review\" posts a card and tags a reviewer under it.")
+	i.p.Say("Leave the channel empty to DM the reviewer instead.")
+
+	channel, err := i.p.Ask("  Channel id", "")
+	if err != nil {
+		return err
+	}
+	reviewer, err := i.p.Ask("  Reviewer (@handle or Slack id; empty = you)", "")
+	if err != nil {
+		return err
+	}
+	cfg.ReviewRequest = config.ReviewRequest{Channel: strings.TrimSpace(channel)}
+
+	ref := slack.ParseUserRef(reviewer)
+	switch {
+	case ref.IsID():
+		cfg.ReviewRequest.UserID = ref.ID
+	case ref.Handle != "":
+		id, err := i.resolveUser(ctx, cfg, ref.Handle)
+		if err != nil {
+			// Not fatal: the ask is one action, and refusing to finish an
+			// install over it would be out of proportion. But it is said out
+			// loud, because a handle left in the config resolves on every click
+			// and fails on every click if it is wrong.
+			i.p.Say("    could not resolve @%s: %v", ref.Handle, err)
+			i.p.Say("    storing the handle as written; it is resolved on each ask.")
+			cfg.ReviewRequest.UserID = reviewer
+			return nil
+		}
+		i.p.Say("    @%s is %s", ref.Handle, id)
+		cfg.ReviewRequest.UserID = id
+	}
+	return nil
+}
+
+// resolveUser looks a handle up through the bot token just collected.
+func (i *Installer) resolveUser(ctx context.Context, cfg *config.Config, handle string) (string, error) {
+	p, _, ok := cfg.Profile(config.DefaultProfile)
+	if !ok || strings.TrimSpace(p.BotToken) == "" {
+		return "", fmt.Errorf("no bot token to look it up with")
+	}
+	return i.lookupUser(ctx, slack.Target{BotToken: os.ExpandEnv(p.BotToken)}, handle)
 }
 
 // secret prompts for a credential. An empty answer adopts a ${ENV} reference
@@ -283,6 +345,17 @@ func render(cfg *config.Config) string {
 		fmt.Fprintf(&b, "      user-token: %s\n", yamlValue(p.UserToken))
 	}
 	b.WriteString("\n")
+
+	if cfg.ReviewRequest.Channel != "" || cfg.ReviewRequest.UserID != "" {
+		b.WriteString("review-request:\n")
+		if cfg.ReviewRequest.Channel != "" {
+			fmt.Fprintf(&b, "  channel: %s\n", yamlValue(cfg.ReviewRequest.Channel))
+		}
+		if cfg.ReviewRequest.UserID != "" {
+			fmt.Fprintf(&b, "  user-id: %s\n", yamlValue(cfg.ReviewRequest.UserID))
+		}
+		b.WriteString("\n")
+	}
 
 	if cfg.Jira.Email != "" || cfg.Jira.Token != "" {
 		b.WriteString("jira:\n")

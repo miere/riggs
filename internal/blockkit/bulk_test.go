@@ -203,21 +203,49 @@ func TestEmptyReportsNoRows(t *testing.T) {
 
 func TestTruncateCountsRunes(t *testing.T) {
 	cases := []struct {
-		in    string
-		width int
-		want  string
+		in          string
+		limit, keep int
+		want        string
 	}{
-		{"short", 10, "short"},
-		{"exactly-ten", 11, "exactly-ten"},
-		{"truncate me please", 9, "truncate…"},
-		{"日本語のタイトルです", 4, "日本語…"},
-		{"trailing space  x", 9, "trailing…"},
+		{"short", 10, 8, "short"},
+		{"exactly-ten", 11, 8, "exactly-ten"},
+		{"truncate me please", 9, 8, "truncate…"},
+		{"日本語のタイトルです", 4, 3, "日本語…"},
+		{"trailing space  x", 10, 9, "trailing…"},
 	}
 	for _, tc := range cases {
-		if got := Truncate(tc.in, tc.width); got != tc.want {
-			t.Errorf("Truncate(%q, %d) = %q, want %q", tc.in, tc.width, got, tc.want)
+		if got := Truncate(tc.in, tc.limit, tc.keep); got != tc.want {
+			t.Errorf("Truncate(%q, %d, %d) = %q, want %q", tc.in, tc.limit, tc.keep, got, tc.want)
 		}
 	}
+}
+
+// A row title is left alone up to 50 runes and cut to 47 plus an ellipsis
+// beyond that — so the rendered title never exceeds 48.
+func TestRowTitleIsCutAtFifty(t *testing.T) {
+	exactly50 := strings.Repeat("a", 50)
+	d := sampleDigest()
+	d.Rows[0].Title = exactly50
+	if got := decodeTitle(t, d); got != exactly50 {
+		t.Errorf("a 50-rune title was altered: %q", got)
+	}
+
+	d.Rows[0].Title = strings.Repeat("b", 51)
+	got := decodeTitle(t, d)
+	if want := strings.Repeat("b", 47) + "…"; got != want {
+		t.Errorf("51-rune title = %q, want %q", got, want)
+	}
+	if len([]rune(got)) != 48 {
+		t.Errorf("rendered title is %d runes, want 48", len([]rune(got)))
+	}
+}
+
+// decodeTitle pulls the bold title back out of a rendered row.
+func decodeTitle(t *testing.T, d Digest) string {
+	t.Helper()
+	text := decode(t, d)[1]["text"].(map[string]any)["text"].(string)
+	line := strings.SplitN(text, "\n", 2)[0]
+	return strings.Trim(line, "*~")
 }
 
 // The container card and the digest share the fingerprint rule, and must not

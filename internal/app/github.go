@@ -83,6 +83,25 @@ func bulkEngineFor(cfg *config.Config, login string, opts pullrequest.BulkOption
 	return pullrequest.NewBulkEngine(engine, store, notifier, opts), store, nil
 }
 
+// askerFor assembles the review-request poster for one invocation. It needs
+// GitHub (to render the card) and the ledger (for the summary the queue may
+// already have written).
+func askerFor(cfg *config.Config) (*pullrequest.Asker, io.Closer, error) {
+	store, err := ledger(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	gh, err := githubClient(context.Background(), store)
+	if err != nil {
+		store.Close()
+		return nil, nil, err
+	}
+	api := slack.NewAPI()
+	asker := pullrequest.NewAsker(gh, store, summariser(), api,
+		cfg.ReviewReviewer(), cfg.ReviewRequest.Channel, cfg.ReviewPrompt()).WithResolver(api)
+	return asker, store, nil
+}
+
 // approverFor assembles the approver for one invocation.
 func approverFor(cfg *config.Config) (*pullrequest.Approver, io.Closer, error) {
 	store, err := ledger(cfg)

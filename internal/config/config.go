@@ -164,13 +164,26 @@ type ReviewRequest struct {
 	// UserID is the Slack user tagged in the ask. Empty falls back to the
 	// admin — asking yourself is a defensible default and never silently
 	// tags a stranger.
+	//
+	// An id (`U0B6HK02YBB`), a pasted mention (`<@U0B6HK02YBB>`) or a handle
+	// (`@murtaugh`) are all accepted. A handle is resolved against the
+	// workspace before the ask is posted, because a mention built from one
+	// would render as literal text and notify nobody.
 	UserID string `yaml:"user-id"`
-	// Prompt is the body of the ask. Empty uses DefaultReviewPrompt.
+	// Prompt is the wording of the ask. Empty uses DefaultReviewPrompt.
+	//
+	// `{reviewer}` and `{requester}` are replaced with the corresponding
+	// mentions. A prompt that mentions neither still gets both: the reviewer is
+	// prefixed and the requester appended as `c/c`, because those are the point
+	// of the feature and a wording change must not silently drop them.
 	Prompt string `yaml:"prompt"`
 }
 
-// DefaultReviewPrompt is used when the config names none.
-const DefaultReviewPrompt = "Could you take a look at this pull request when you get a chance?"
+// DefaultReviewPrompt is the ask, used when the config defines none. The
+// requester's `c/c` is appended to whatever prompt is in force:
+//
+//	Hey <@reviewer>, mind to review this Pull Request? c/c <@requester>
+const DefaultReviewPrompt = "Hey {reviewer}, mind to review this Pull Request?"
 
 // ReviewPrompt is the configured prompt, or the default.
 func (c *Config) ReviewPrompt() string {

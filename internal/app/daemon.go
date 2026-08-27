@@ -49,9 +49,27 @@ func (a *Application) runDaemon(ctx context.Context) error {
 func (a *Application) registerInteractions(router *daemon.Router, creds slack.Credentials) {
 	router.Handle(pullrequest.BulkActionID, pullrequest.IntentAskReview,
 		daemon.HandlerFunc(func(ctx context.Context, in slack.Interaction) error {
-			asker := pullrequest.NewAsker(slack.NewAPI(),
-				a.cfg.ReviewReviewer(), a.cfg.ReviewRequest.Channel, a.cfg.ReviewPrompt())
-			_, err := asker.Ask(ctx, in.Item, a.targetFor(creds, in))
+			asker, closer, err := askerFor(a.cfg)
+			if err != nil {
+				return err
+			}
+			defer closer.Close()
+			// in.UserID is whoever clicked: they are copied in on the tag, so
+			// the reviewer can see whose request it is.
+			_, err = asker.Ask(ctx, in.Item, in.UserID, a.targetFor(creds, in))
+			return err
+		}))
+
+	// The ask-review card's own Approve button. Same approver, one difference:
+	// no comment is left on the pull request.
+	router.Handle(pullrequest.AskActionID, pullrequest.IntentApprove,
+		daemon.HandlerFunc(func(ctx context.Context, in slack.Interaction) error {
+			approver, closer, err := approverFor(a.cfg)
+			if err != nil {
+				return err
+			}
+			defer closer.Close()
+			_, err = approver.WithoutReviewBody().Run(ctx, in.Item, false, a.targetFor(creds, in), in.MessageTS)
 			return err
 		}))
 

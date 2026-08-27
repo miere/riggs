@@ -510,3 +510,27 @@ func TestBulkDefaultsToAThreeHourCooldown(t *testing.T) {
 		t.Fatalf("Cooldown = %v, want 3h", got)
 	}
 }
+
+// The digest carries its own icon, not the legacy card's const — the two
+// shapes have separate lifecycles, and sharing it would mean a change to one
+// silently re-rendering every card of the other.
+func TestDigestUsesItsOwnIcon(t *testing.T) {
+	r := newBulkRig(t, bulkGH(bulkPR("o/r#1", time.Hour, "hjed")), BulkOptions{})
+	r.run(t)
+
+	raw, err := json.Marshal(r.slack.Posts()[0].Msg.Blocks)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var blocks []map[string]any
+	if err := json.Unmarshal(raw, &blocks); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	icon := blocks[0]["icon"].(map[string]any)
+	if got := icon["image_url"]; got != bulkIconURL {
+		t.Fatalf("digest icon = %v, want %q", got, bulkIconURL)
+	}
+	if bulkIconURL == iconURL {
+		t.Error("the digest and the legacy card share an icon const")
+	}
+}

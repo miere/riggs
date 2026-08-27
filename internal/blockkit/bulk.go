@@ -78,10 +78,16 @@ type MenuOption struct {
 	URL string
 }
 
-// titleWidth is where a row's title is elided. A digest row is one line in a
-// list of ten, so a full pull-request title would push the reference and author
-// onto a wrap and cost more than it tells you.
-const titleWidth = 80
+// A digest row is one line in a list of ten, so a full pull-request title would
+// push the reference and author onto a wrap and cost more than it tells you.
+//
+// titleLimit is the longest title shown untouched; a longer one is cut to
+// titleKeep runes and given an ellipsis, so the rendered result is never more
+// than titleKeep+1.
+const (
+	titleLimit = 50
+	titleKeep  = 47
+)
 
 // --- wire types -----------------------------------------------------------
 // Ordered structs, so the encoded bytes are stable and the fingerprint means
@@ -144,7 +150,7 @@ func (d Digest) Empty() bool { return len(d.Rows) == 0 }
 // and author stay legible, because they are what you read to find the thing
 // again.
 func (r Row) Text() string {
-	title := "*" + escapeMrkdwn(Truncate(r.Title, titleWidth)) + "*"
+	title := "*" + escapeMrkdwn(Truncate(r.Title, titleLimit, titleKeep)) + "*"
 	if r.Done {
 		title = "~" + title + "~"
 	}
@@ -206,18 +212,24 @@ func (d Digest) Items() []string {
 	return out
 }
 
-// Truncate elides s to at most width runes, ending in a single-character
-// ellipsis. It counts runes, not bytes: a title cut mid-rune renders as a
-// replacement character.
-func Truncate(s string, width int) string {
+// Truncate returns s unchanged when it is at most limit runes, and otherwise
+// cuts it to keep runes plus a single-character ellipsis.
+//
+// It counts runes, not bytes: a title cut mid-rune renders as a replacement
+// character. A trailing space is dropped before the ellipsis, so a cut that
+// lands just after a word does not read as "word …".
+func Truncate(s string, limit, keep int) string {
 	runes := []rune(s)
-	if len(runes) <= width {
+	if len(runes) <= limit {
 		return s
 	}
-	if width <= 1 {
+	if keep <= 0 {
 		return "…"
 	}
-	return strings.TrimRight(string(runes[:width-1]), " ") + "…"
+	if keep > len(runes) {
+		keep = len(runes)
+	}
+	return strings.TrimRight(string(runes[:keep]), " ") + "…"
 }
 
 // escapeMrkdwn neutralises the three characters Slack reads as markup inside a
