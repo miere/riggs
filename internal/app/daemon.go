@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 
 	"github.com/miere/riggs-mcp/internal/daemon"
 	"github.com/miere/riggs-mcp/internal/pullrequest"
@@ -31,7 +32,7 @@ func (a *Application) runDaemon(ctx context.Context) error {
 		return err
 	}
 
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel()}))
 	router := daemon.NewRouter()
 	a.registerInteractions(router, creds)
 
@@ -100,6 +101,28 @@ func (a *Application) targetFor(creds slack.Credentials, in slack.Interaction) s
 		BotToken:    creds.BotToken,
 		Channel:     in.Channel,
 		AdminUserID: a.cfg.Admin.SlackUserID,
+	}
+}
+
+// LogLevelEnv raises or lowers the daemon's log level.
+//
+// It exists because the one time this mattered, the answer was in a Debug line
+// nobody could see: the level was fixed at Info, so a callback the daemon chose
+// to ignore left no trace at all.
+const LogLevelEnv = "RIGGS_LOG_LEVEL"
+
+// logLevel reads that variable. Anything unrecognised is Info, because a typo
+// in a launch agent's environment should not silence the daemon.
+func logLevel() slog.Level {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(LogLevelEnv))) {
+	case "debug":
+		return slog.LevelDebug
+	case "warn", "warning":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
 	}
 }
 

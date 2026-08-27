@@ -3,11 +3,14 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 
 	slackgo "github.com/slack-go/slack"
+	"github.com/slack-go/slack/socketmode"
 
 	"github.com/miere/riggs-mcp/internal/slack"
 )
@@ -144,5 +147,87 @@ func TestRouterDescribesItsRoutes(t *testing.T) {
 
 	if got := r.Describe(); got != "pr_overflow/approve_merge, pr_overflow/ask_review" {
 		t.Fatalf("Describe = %q", got)
+	}
+}
+
+// --- acknowledgement --------------------------------------------------------
+
+// ackRecorder records which envelopes were acknowledged, which is the only
+// thing Slack cares about.
+type ackRecorder struct{ acked []string }
+
+func (a *ackRecorder) Ack(req socketmode.Request, _ ...any) error {
+	a.acked = append(a.acked, req.EnvelopeID)
+	return nil
+}
+
+// Slack marks a control with a ⚠ when it does not get a response to the request
+// it sent. EVERY event carrying a request must therefore be acknowledged,
+// including the ones this daemon deliberately does nothing with — a link button
+// raises an interaction even though Slack itself opens the URL.
+//
+// The real dispatch is exercised, not a stand-in: the bug this guards against
+// was a missing branch, and a re-implementation in the test would have had the
+// same shape as the code and agreed with it.
+func TestEveryRequestIsAcked(t *testing.T) {
+	l := NewSocketListener(slack.Credentials{Profile: "riggs"}, quietLogger())
+	rec := &ackRecorder{}
+	deliver := func(slackgo.InteractionCallback) {}
+
+	events := []socketmode.Event{
+		{Type: socketmode.EventTypeInteractive, Data: overflowCallback("a", "b", "c")},
+		{Type: socketmode.EventTypeHello},
+		{Type: socketmode.EventTypeSlashCommand},
+		// A type this switch has never heard of. It still gets an ack.
+		{Type: socketmode.EventType("something_slack_added_later")},
+		// An interactive event whose payload will not cast: acked before the
+		// decode is even attempted, because Slack is owed an answer either way.
+		{Type: socketmode.EventTypeInteractive, Data: "not a callback"},
+	}
+	for i, ev := range events {
+		ev.Request = &socketmode.Request{EnvelopeID: fmt.Sprintf("env-%d", i)}
+		l.dispatch(rec, ev, deliver)
+	}
+
+	if len(rec.acked) != len(events) {
+		t.Fatalf("acked %v, want all %d events", rec.acked, len(events))
+	}
+}
+
+// An event with no request has nothing to acknowledge, and must not panic
+// reaching for one.
+func TestAnEventWithNoRequestIsNotAcked(t *testing.T) {
+	l := NewSocketListener(slack.Credentials{Profile: "riggs"}, quietLogger())
+	rec := &ackRecorder{}
+
+	l.dispatch(rec, socketmode.Event{Type: socketmode.EventTypeConnected}, func(slackgo.InteractionCallback) {})
+	if len(rec.acked) != 0 {
+		t.Fatalf("acked %v, want nothing", rec.acked)
+	}
+}
+
+// A link button raises an interaction Riggs does nothing with. It must still be
+// delivered and acked, not dropped — the click that started this had no handler
+// AND no log line, so nothing recorded that it had happened.
+func TestALinkButtonClickIsStillDelivered(t *testing.T) {
+	l := NewSocketListener(slack.Credentials{Profile: "riggs"}, quietLogger())
+	rec := &ackRecorder{}
+
+	delivered := 0
+	cb := slackgo.InteractionCallback{Type: slackgo.InteractionTypeBlockActions}
+	cb.ActionCallback.BlockActions = []*slackgo.BlockAction{{ActionID: "pr_ask_open", BlockID: "o/r#7"}}
+
+	l.dispatch(rec, socketmode.Event{
+		Type: socketmode.EventTypeInteractive, Data: cb,
+		Request: &socketmode.Request{EnvelopeID: "env"},
+	}, func(slackgo.InteractionCallback) { delivered++ })
+
+	// dispatch delivers on its own goroutine, so settle before asserting.
+	time.Sleep(50 * time.Millisecond)
+	if delivered != 1 {
+		t.Fatalf("delivered %d, want the link-button click", delivered)
+	}
+	if len(rec.acked) != 1 {
+		t.Fatalf("acked %v, want the click acknowledged", rec.acked)
 	}
 }

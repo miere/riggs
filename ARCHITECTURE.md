@@ -305,8 +305,13 @@ Slack ──ws──► SocketListener ──► Daemon ──► Router ──�
   fingerprint stable, and therefore what makes the ledger's "update only when it
   actually changed" mean anything (§9). A map-backed encoder would quietly
   break it.
-- **Every callback is acked before it is handled**, and handled on its own
-  goroutine. Slack expects an ack within three seconds; approving a pull request
+- **EVERY request is acked, first, whatever it is** — not only the ones the
+  dispatch switch understands. Slack marks a control with a ⚠ when it gets no
+  response, and an earlier version acked only inside the interactive arm with no
+  default, so anything else was dropped in total silence: no ack, so Slack
+  warned; no log line, so nothing recorded it. A link button raises an
+  interaction even though Slack itself opens the URL.
+- **Callbacks are handled on their own goroutine.** Slack expects an ack within three seconds; approving a pull request
   makes several GitHub calls with retries and legitimately takes longer, so
   acking after the work would have Slack re-sending an interaction already being
   acted on.
@@ -316,6 +321,8 @@ Slack ──ws──► SocketListener ──► Daemon ──► Router ──�
 - **The scheduler stays in Murtaugh.** The daemon owns reactions, not timing. So
   a reconcile pass (CLI) and a click (daemon) are separate processes writing the
   same ledger — which is what its WAL and busy timeout were chosen for (§9).
+- **The log level is `$RIGGS_LOG_LEVEL`.** It was fixed at Info, which is how a
+  callback the daemon chose to ignore left no trace at all.
 - **An unroutable click is reported, not an error.** A retired control whose
   message is still in the channel is an ordinary occurrence, and the daemon logs
   what it could not place.
@@ -838,6 +845,7 @@ one *would* live at still decides, which is the state a fresh machine and
 | 15 | Give the launch agent a PATH (§12b) | done |
 | 16 | Digest polish: own icon, 50/47 title | done |
 | 17 | Ask for Code Review posts a card (§7bb) | done |
+| 18 | Acknowledge every socket request (§7b) | done |
 
 ## 13b. Cutover
 
@@ -927,6 +935,12 @@ Rollback: the previous job and rule definitions are captured under
   against the workspace; the installer collects and resolves it at setup.
 - **unreleased** — Phase 16. Digest polish: its own icon const, and row titles
   cut at 50 runes to 47 plus an ellipsis.
+- **unreleased** — Phase 18. The daemon acknowledges every socket request, not
+  just the interactive ones it recognises (§7b). A link button raises an
+  interaction Riggs does nothing with, and dropping it unacked put a ⚠ on the
+  control; the same missing branch meant the click was never logged either.
+  Adds `$RIGGS_LOG_LEVEL`, and an `action_id` on link buttons so their clicks
+  are identifiable rather than blank.
 - **unreleased** — Phase 5, the cutover (§13b). Also fixes the installer,
   which built its job command from `cfg job set` — documented as equivalent to
   `jobs define`, but it rejects `--args`.
