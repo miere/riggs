@@ -1,5 +1,5 @@
-// Package tickets exposes the Jira ticket queue as four verbs:
-// poll, nudge, assign and dismiss.
+// Package tickets exposes the Jira ticket queue as three verbs:
+// poll, assign and dismiss.
 //
 // They are separate registered tools for the same reason the approve pair is:
 // each Murtaugh job or workflow rule names exactly one operation, and nothing
@@ -10,24 +10,15 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/miere/riggs-mcp/internal/slack"
 	"github.com/miere/riggs-mcp/internal/ticket"
 )
 
-// Defaults for the idle nudge, matching the Python's config.
-const (
-	DefaultNudgeAfterHours = 24
-	// minGap stops a manual re-run landing on top of a scheduled one.
-	minGap = time.Hour
-)
-
 // Engine is the seam performing the work.
 type Engine interface {
 	Poll(ctx context.Context, jql string, target slack.Target, dryRun bool) (ticket.Report, error)
-	Nudge(ctx context.Context, after, minGap time.Duration, target slack.Target, dryRun bool) (ticket.Report, error)
 	Assign(ctx context.Context, issueKey, actor string, target slack.Target) (ticket.ActionResult, error)
 	Dismiss(ctx context.Context, issueKey, actor string, target slack.Target) (ticket.ActionResult, error)
 }
@@ -35,12 +26,11 @@ type Engine interface {
 // Factory builds the engine for one invocation.
 type Factory func(ctx context.Context) (Engine, io.Closer, error)
 
-// verb distinguishes the four registrations.
+// verb distinguishes the three registrations.
 type verb int
 
 const (
 	verbPoll verb = iota
-	verbNudge
 	verbAssign
 	verbDismiss
 )
@@ -52,11 +42,8 @@ type Tool struct {
 	verb     verb
 }
 
-// NewPoll, NewNudge, NewAssign and NewDismiss build the four registrations.
+// NewPoll, NewAssign and NewDismiss build the three registrations.
 func NewPoll(r *slack.Resolver, f Factory) *Tool { return &Tool{resolver: r, newer: f, verb: verbPoll} }
-func NewNudge(r *slack.Resolver, f Factory) *Tool {
-	return &Tool{resolver: r, newer: f, verb: verbNudge}
-}
 func NewAssign(r *slack.Resolver, f Factory) *Tool {
 	return &Tool{resolver: r, newer: f, verb: verbAssign}
 }
@@ -67,8 +54,6 @@ func NewDismiss(r *slack.Resolver, f Factory) *Tool {
 // Name is the registry key.
 func (t *Tool) Name() string {
 	switch t.verb {
-	case verbNudge:
-		return "jira.tickets.nudge"
 	case verbAssign:
 		return "jira.tickets.assign"
 	case verbDismiss:
@@ -81,8 +66,6 @@ func (t *Tool) Name() string {
 // Description is the one-line hint shown to MCP clients.
 func (t *Tool) Description() string {
 	switch t.verb {
-	case verbNudge:
-		return "Re-ping the admin on ticket cards that have sat unclaimed too long."
 	case verbAssign:
 		return "Claim a ticket: assign it in Jira, move it to In Progress, and collapse its card."
 	case verbDismiss:
@@ -129,15 +112,6 @@ func (t *Tool) InputSchema() *jsonschema.Schema {
 			Description: "Report what would change without posting or writing.",
 		}
 		required = []string{"query"}
-	case verbNudge:
-		props["after_hours"] = &jsonschema.Schema{
-			Type:        "number",
-			Description: "Idle threshold before a card is nudged. Defaults to 24.",
-		}
-		props["dry_run"] = &jsonschema.Schema{
-			Type:        "boolean",
-			Description: "Report which cards would be nudged without posting.",
-		}
 	case verbAssign, verbDismiss:
 		props["ticket"] = &jsonschema.Schema{
 			Type:        "string",
@@ -192,27 +166,9 @@ func (t *Tool) Invoke(ctx context.Context, args map[string]any) (any, error) {
 	switch t.verb {
 	case verbPoll:
 		return engine.Poll(ctx, jql, target, dryRun)
-	case verbNudge:
-		return engine.Nudge(ctx, nudgeAfter(args), minGap, target, dryRun)
 	case verbAssign:
 		return engine.Assign(ctx, issueKey, actor, target)
 	default:
 		return engine.Dismiss(ctx, issueKey, actor, target)
 	}
-}
-
-// nudgeAfter reads the idle threshold, defaulting to the Python's 24 hours.
-func nudgeAfter(args map[string]any) time.Duration {
-	hours := float64(DefaultNudgeAfterHours)
-	switch v := args["after_hours"].(type) {
-	case float64:
-		if v > 0 {
-			hours = v
-		}
-	case int64:
-		if v > 0 {
-			hours = float64(v)
-		}
-	}
-	return time.Duration(hours * float64(time.Hour))
 }

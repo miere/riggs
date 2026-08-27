@@ -44,7 +44,6 @@ type Outcome struct {
 	Key    string `json:"key"`
 	State  string `json:"state"`
 	Action string `json:"action"`
-	Nudged bool   `json:"nudged,omitempty"`
 	Error  string `json:"error,omitempty"`
 }
 
@@ -65,9 +64,6 @@ func (r Report) String() string {
 	fmt.Fprintf(&b, "%d ticket(s) matched\n", r.Found)
 	for _, o := range r.Outcomes {
 		line := fmt.Sprintf("  %-14s %-10s %s", o.Key, o.State, o.Action)
-		if o.Nudged {
-			line += " +nudged"
-		}
 		if o.Error != "" {
 			line += " ERROR: " + o.Error
 		}
@@ -191,60 +187,6 @@ func (e *Engine) summaryFor(_ context.Context, _ string, issue jira.Issue, _ boo
 
 // BodyParagraphs is how much of a description a ticket card shows.
 const BodyParagraphs = 2
-
-// Nudge re-pings the admin on cards that have sat unclaimed too long.
-//
-// Every candidate is re-checked against Jira first, so a ticket quietly
-// claimed since the last poll gets its card collapsed instead of a bogus ping.
-func (e *Engine) Nudge(ctx context.Context, after, minGap time.Duration, target slack.Target, dryRun bool) (Report, error) {
-	tracked, err := e.store.CardsWithPrefix(ctx, KeyPrefix)
-	if err != nil {
-		return Report{}, err
-	}
-	report := Report{DryRun: dryRun}
-
-	for _, ke := range tracked {
-		if !State(ke.State).Live() {
-			continue
-		}
-		report.Found++
-		issueKey := strings.TrimPrefix(ke.Key, KeyPrefix)
-
-		issue, err := e.jira.Get(ctx, issueKey)
-		if err != nil {
-			report.Outcomes = append(report.Outcomes,
-				Outcome{Key: issueKey, Action: "error", Error: err.Error()})
-			continue
-		}
-		if issue.Claimed(ReadyStatus) {
-			if o := e.collapseHandled(ctx, issueKey, target, dryRun); o != nil {
-				report.Outcomes = append(report.Outcomes, *o)
-			}
-			continue
-		}
-
-		// Age is measured from when the card was advertised, not from any Jira
-		// date: what matters is how long it has been on offer here.
-		idle := e.now().Sub(ke.UpdatedAt)
-		if idle < after {
-			continue
-		}
-		out := Outcome{Key: issueKey, State: string(Pending), Action: "idle"}
-		if dryRun {
-			out.Nudged = true
-			report.Outcomes = append(report.Outcomes, out)
-			continue
-		}
-		sent, err := e.notifier.Thread(ctx, ke.Key, target,
-			NudgeText(e.admin.SlackUserID, issueKey, idle), notify.MinGap(nudgeLatch, minGap))
-		if err != nil {
-			out.Error = err.Error()
-		}
-		out.Nudged = sent
-		report.Outcomes = append(report.Outcomes, out)
-	}
-	return report, nil
-}
 
 // ActionResult reports a button click's outcome.
 type ActionResult struct {

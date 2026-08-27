@@ -9,7 +9,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/miere/riggs-mcp/internal/blockkit"
 	"github.com/miere/riggs-mcp/internal/jira"
@@ -17,9 +16,6 @@ import (
 
 // KeyPrefix namespaces this domain's cards in the ledger.
 const KeyPrefix = "jira.ticket:"
-
-// nudgeLatch rate-limits the idle ping.
-const nudgeLatch = "nudge"
 
 // ReadyStatus is the status a ticket must be in to be up for grabs. A ticket
 // that leaves it has been handled, whoever did it.
@@ -115,24 +111,6 @@ func AvailableText(browseURL string) string {
 // UnavailableText is the notification text once a ticket is claimed.
 func UnavailableText(browseURL string) string {
 	return "Ticket " + browseURL + " is not available for implementation anymore"
-}
-
-// NudgeText is the threaded idle ping.
-func NudgeText(slackUserID, issueKey string, idle time.Duration) string {
-	span := "a while"
-	if days := int(idle.Hours() / 24); days >= 1 {
-		span = fmt.Sprintf("%d day%s", days, plural(days))
-	}
-	return fmt.Sprintf("<@%s> :hourglass_flowing_sand: *%s* has been sitting in *%s* "+
-		"unclaimed for %s - still up for grabs if you (or anyone) can pick it up.",
-		slackUserID, issueKey, ReadyStatus, span)
-}
-
-func plural(n int) string {
-	if n == 1 {
-		return ""
-	}
-	return "s"
 }
 
 // AssignedText and DismissedText are the threaded confirmations.
