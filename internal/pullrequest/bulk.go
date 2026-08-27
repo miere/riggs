@@ -488,19 +488,19 @@ func (c candidate) row() blockkit.Row {
 		Done:     c.Done,
 		ActionID: BulkActionID,
 		Options: []blockkit.MenuOption{
-			{Text: "⧉  Open on Browser", Value: IntentOpenBrowser, URL: c.URL},
+			{Text: blockkit.MarkerOpen + "  Open on Browser", Value: IntentOpenBrowser, URL: c.URL},
 		},
 	}
 	if c.Done {
 		return row
 	}
 	row.Options = append(row.Options,
-		blockkit.MenuOption{Text: "✎  Ask for Code Review", Value: IntentAskReview})
+		blockkit.MenuOption{Text: blockkit.MarkerAsk + "  Ask for Code Review", Value: IntentAskReview})
 	// Approve is deliberately absent: it is specified but not implemented, and
 	// a button that silently does nothing is worse than one that is not there.
 	if c.Dependabot {
 		row.Options = append(row.Options,
-			blockkit.MenuOption{Text: "✓  Approve and Merge", Value: IntentApproveMerge})
+			blockkit.MenuOption{Text: blockkit.MarkerDone + "  Approve and Merge", Value: IntentApproveMerge})
 	}
 	return row
 }
