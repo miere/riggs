@@ -415,6 +415,58 @@ Rules:
   reads as "nothing needs you" while occupying the space of when something did.
   `Empty()` reports it; §9b acts on it.
 
+## 7d. GitHub Markdown → Slack mrkdwn
+
+`internal/slackmd` translates GitHub-flavoured Markdown into Slack's mrkdwn. It
+is a shared component on purpose: the pull-request card body needs it now, the
+Home tab's release notes will, and Jira descriptions are the same problem in
+different clothing.
+
+The two dialects look alike and are not, and text moved across without
+translation does not fail — it renders wrong, quietly.
+
+| GitHub | Slack | Why it matters |
+| --- | --- | --- |
+| `**bold**` | `*bold*` | a single `*` means the **opposite** thing in each |
+| `*italic*` | `_italic_` | copying emphasis across turns bold into italic |
+| `~~struck~~` | `~struck~` | one tilde, not two |
+| `## Heading` | `*Heading*` | mrkdwn has no heading; a `#` renders literally |
+| `[t](url)` | `t [N]` | links do not render on every surface these strings reach |
+| ` ```kotlin ` | ` ``` ` | Slack prints the language as text in the block |
+| `- item` | `•  item` | mrkdwn renders no list markup |
+
+Rules:
+
+- **Bold is parked behind a NUL sentinel before italics are touched.** In the
+  obvious order `**x**` becomes `*x*`, and the italic rule then matches its own
+  predecessor's output and turns every bold run into an italic one. This is the
+  single easiest thing to get wrong here.
+- **Images are taken before links.** An image is a link with a `!` in front, so
+  the link pattern would claim it and leave a stray exclamation mark.
+- **Suppressed links are recorded, not dropped.** `Result.Links` carries them,
+  and `WithFootnotes()` prints the list — release notes want it, a two-line card
+  body does not.
+- **Code fences pass through untouched** apart from the fence and escaping.
+  Emphasis inside a code block is not emphasis.
+- **`&`, `<`, `>` are escaped**, because Slack reads them as markup.
+- **It is a simplified converter, not a Markdown implementation.** One line at a
+  time, no nested structure. That is enough for a description or a release note,
+  and stopping there is what keeps it readable in one sitting.
+
+### Card bodies
+
+A pull-request card shows the first two paragraphs of the description, converted
+— **not** an LLM summary. That call cost ~8.6s on the click path with a human
+waiting, bound the card to a local `claude` binary being present and
+authenticated, and returned non-deterministic text, so the same card rendered
+differently on two passes and could not be honestly fingerprinted. A description
+is also not obviously improved by being summarised: the author wrote it to
+explain the change.
+
+An HTML comment (the template nobody deletes) and a badges-only paragraph are
+skipped rather than counted, because both are routinely the first thing in a
+body and neither says anything.
+
 ## 8. GitHub access
 
 Riggs talks to GitHub's **REST** API over its own HTTP client, with ETag
@@ -860,6 +912,7 @@ one *would* live at still decides, which is the state a fresh machine and
 | 17 | Ask for Code Review posts a card (§7bb) | done |
 | 18 | Acknowledge every socket request (§7b) | done |
 | 19 | Complete the row on approval; report failures in-thread (§9b) | done |
+| 20 | slackmd converter; card bodies from the description (§7d) | done |
 
 ## 13b. Cutover
 
@@ -960,6 +1013,11 @@ Rollback: the previous job and rule definitions are captured under
   row's title, author and URL so a post rebuilds from the ledger alone — which
   also fixes a latent bug: a row the pass could not refetch used to collapse to
   its bare reference with a dead link.
+- **unreleased** — Phase 20. `internal/slackmd` (§7d): a shared GitHub-Markdown
+  to Slack-mrkdwn converter. The pull-request card body becomes the first two
+  paragraphs of the description, converted — replacing the `claude -p` summary,
+  which cost ~8.6s on the click path, bound the card to a local binary, and was
+  non-deterministic.
 - **unreleased** — Phase 5, the cutover (§13b). Also fixes the installer,
   which built its job command from `cfg job set` — documented as equivalent to
   `jobs define`, but it rejects `--args`.

@@ -35,7 +35,7 @@ func askPR() github.Detail {
 func newAsker(t *testing.T, fake *slacktest.Fake, channel string) (*Asker, *detailer) {
 	t.Helper()
 	d := &detailer{detail: askPR()}
-	return NewAsker(d, nil, &stubSummariser{}, fake, "U0B6HK02YBB", channel, "please take a look"), d
+	return NewAsker(d, nil, fake, "U0B6HK02YBB", channel, "please take a look"), d
 }
 
 // blocksOf decodes a posted message's blocks.
@@ -272,7 +272,7 @@ func TestAskWithNoChannelDMsTheReviewer(t *testing.T) {
 func TestAskRequiresAReviewer(t *testing.T) {
 	fake := slacktest.New()
 	d := &detailer{detail: askPR()}
-	_, err := NewAsker(d, nil, &stubSummariser{}, fake, "", "C1", "p").
+	_, err := NewAsker(d, nil, fake, "", "C1", "p").
 		Ask(context.Background(), "o/r#7", "U0B20G0ET9T", target)
 	if err == nil {
 		t.Fatal("Ask succeeded with no reviewer configured")
@@ -297,7 +297,7 @@ func TestAskRejectsABadRef(t *testing.T) {
 func TestAskFailsClosedWhenGitHubDoes(t *testing.T) {
 	fake := slacktest.New()
 	d := &detailer{err: errors.New("404")}
-	_, err := NewAsker(d, nil, &stubSummariser{}, fake, "U0B6HK02YBB", "C1", "p").
+	_, err := NewAsker(d, nil, fake, "U0B6HK02YBB", "C1", "p").
 		Ask(context.Background(), "o/r#7", "U0B20G0ET9T", target)
 	if err == nil {
 		t.Fatal("Ask succeeded despite a failed GitHub read")
@@ -389,7 +389,7 @@ func TestAskTagTextGuaranteesBothMentions(t *testing.T) {
 func TestAskResolvesAConfiguredHandle(t *testing.T) {
 	fake := slacktest.New()
 	d := &detailer{detail: askPR()}
-	asker := NewAsker(d, nil, &stubSummariser{}, fake, "@murtaugh", "C1", "").
+	asker := NewAsker(d, nil, fake, "@murtaugh", "C1", "").
 		WithResolver(fakeResolver{"murtaugh": "U0B6HK02YBB"})
 
 	res, err := asker.Ask(context.Background(), "o/r#7", "U0B20G0ET9T", target)
@@ -409,7 +409,7 @@ func TestAskResolvesAConfiguredHandle(t *testing.T) {
 func TestAskFailsClosedOnAnUnresolvableHandle(t *testing.T) {
 	fake := slacktest.New()
 	d := &detailer{detail: askPR()}
-	asker := NewAsker(d, nil, &stubSummariser{}, fake, "@nobody", "C1", "").
+	asker := NewAsker(d, nil, fake, "@nobody", "C1", "").
 		WithResolver(fakeResolver{})
 
 	if _, err := asker.Ask(context.Background(), "o/r#7", "U0B20G0ET9T", target); err == nil {
@@ -428,4 +428,48 @@ func (f fakeResolver) LookupUserID(_ context.Context, _ slack.Target, handle str
 		return id, nil
 	}
 	return "", errors.New("no such member")
+}
+
+// The body is the author's own description, not a generated summary of it.
+func TestBodyIsTheDescriptionExcerpt(t *testing.T) {
+	d := askPR()
+	d.Body = "## Summary\n\nThis **fixes** the [thing](https://x.test/t).\n\n" +
+		"Second paragraph.\n\nThird paragraph nobody sees."
+
+	got := Body(d)
+	if strings.Contains(got, "Third paragraph") {
+		t.Errorf("Body took more than two paragraphs: %q", got)
+	}
+	if !strings.Contains(got, "*fixes*") {
+		t.Errorf("body was not converted to Slack mrkdwn: %q", got)
+	}
+	if strings.Contains(got, "##") {
+		t.Errorf("a Markdown heading survived: %q", got)
+	}
+}
+
+// A card with no body renders no section at all, which reads as though
+// something failed.
+func TestBodyFallsBackToTheTitle(t *testing.T) {
+	d := askPR()
+	for _, body := range []string{"", "   \n\n  ", "<!-- just the template -->"} {
+		d.Body = body
+		if got := Body(d); got != d.Title {
+			t.Errorf("Body(%q) = %q, want the title", body, got)
+		}
+	}
+}
+
+// Deterministic — the other half of why this replaced an LLM call. A body that
+// changes between renders cannot be fingerprinted, so the ledger would rewrite
+// the card on every pass.
+func TestBodyIsDeterministic(t *testing.T) {
+	d := askPR()
+	d.Body = "**a** [b](https://c.test)\n\nsecond"
+	first := Body(d)
+	for i := 0; i < 20; i++ {
+		if got := Body(d); got != first {
+			t.Fatalf("run %d differed: %q vs %q", i, got, first)
+		}
+	}
 }
