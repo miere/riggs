@@ -64,3 +64,20 @@ slack:
     # A second workspace, selected with --slack-profile nc.
     # nc:
     #   bot-token: ${SLACK_NC_BOT_TOKEN}
+
+# Atlassian. All three are REQUIRED for the jira.* tools to be registered at
+# all, and all three may be ${ENV} references — they fall back to the
+# ATLASSIAN_* variables Murtaugh's .env already exports, so an existing machine
+# needs nothing re-provisioned.
+#
+# base-url has no default. Riggs will not guess a tenant: a misconfigured
+# machine quietly reading and assigning tickets on somebody else's Jira is worse
+# than one that reads none. Without it the jira.* tools are simply absent, and
+# `riggs capabilities` says so.
+#
+# It must be an absolute http(s) URL — a bare hostname is rejected at load
+# rather than failing later as a puzzling bad request.
+jira:
+  email: ${ATLASSIAN_JIRA_EMAIL}
+  token: ${ATLASSIAN_JIRA_TOKEN}
+  base-url: ${ATLASSIAN_BASE_URL}

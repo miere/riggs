@@ -191,18 +191,32 @@ func (t *Tool) backends() []Backend {
 	out := []Backend{t.binary("gh", "the GitHub token comes from the authenticated gh CLI"),
 		t.binary("claude", "card summaries shell out to `claude -p`")}
 
-	email := t.getenv("ATLASSIAN_JIRA_EMAIL")
-	token := t.getenv("ATLASSIAN_JIRA_TOKEN")
-	jira := Backend{Name: "jira", Available: email != "" && token != ""}
-	switch {
-	case jira.Available:
-		jira.Detail = "ATLASSIAN_JIRA_EMAIL and ATLASSIAN_JIRA_TOKEN are set"
-	case email == "" && token == "":
-		jira.Detail = "set ATLASSIAN_JIRA_EMAIL and ATLASSIAN_JIRA_TOKEN"
-	case email == "":
-		jira.Detail = "set ATLASSIAN_JIRA_EMAIL"
-	default:
-		jira.Detail = "set ATLASSIAN_JIRA_TOKEN"
+	email := t.getenv(config.JiraEmailEnv)
+	token := t.getenv(config.JiraTokenEnv)
+	// The tenant resolves config-first, mirroring Config.JiraBaseURL. It is
+	// reported alongside the credentials because there is no default: an
+	// unconfigured tenant disables Jira exactly as a missing token does, and
+	// "which Jira?" is not a question the error at call time can answer.
+	baseURL := strings.TrimSpace(t.cfg.Jira.BaseURL)
+	if baseURL == "" {
+		baseURL = strings.TrimSpace(t.getenv(config.JiraBaseURLEnv))
+	}
+
+	jira := Backend{Name: "jira", Available: email != "" && token != "" && baseURL != ""}
+	var missing []string
+	if email == "" {
+		missing = append(missing, config.JiraEmailEnv)
+	}
+	if token == "" {
+		missing = append(missing, config.JiraTokenEnv)
+	}
+	if baseURL == "" {
+		missing = append(missing, "jira.base-url (or "+config.JiraBaseURLEnv+")")
+	}
+	if jira.Available {
+		jira.Detail = "tenant " + baseURL
+	} else {
+		jira.Detail = "set " + strings.Join(missing, ", ")
 	}
 	return append(out, jira)
 }

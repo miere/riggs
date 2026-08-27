@@ -24,6 +24,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -90,28 +91,54 @@ type Admin struct {
 	GitHubLogin string `yaml:"github-login"`
 }
 
-// Jira holds the Atlassian credentials. Both may be ${ENV} references, and
-// both fall back to the ATLASSIAN_JIRA_* variables Murtaugh's .env already
+// Jira holds the Atlassian settings. All three may be ${ENV} references, and
+// all three fall back to the ATLASSIAN_* variables Murtaugh's .env already
 // exports — so an existing machine needs nothing re-provisioned, and a fresh
 // one can be configured entirely by the installer.
 type Jira struct {
 	Email string `yaml:"email"`
 	Token string `yaml:"token"`
-	// BaseURL overrides the Atlassian tenant. Empty uses the default.
+	// BaseURL overrides the Atlassian tenant. Empty falls back to
+	// $ATLASSIAN_BASE_URL and then to the client's default, so the tenant is
+	// never *required* — it is only ever a correction.
 	BaseURL string `yaml:"base-url"`
 }
+
+// Environment variables the Jira settings fall back to. They are the names
+// Murtaugh's .env already exports, so an existing machine needs nothing
+// re-provisioned.
+const (
+	JiraEmailEnv   = "ATLASSIAN_JIRA_EMAIL"
+	JiraTokenEnv   = "ATLASSIAN_JIRA_TOKEN"
+	JiraBaseURLEnv = "ATLASSIAN_BASE_URL"
+)
 
 // JiraCredentials returns the effective email and token, preferring the config
 // file and falling back to the environment.
 func (c *Config) JiraCredentials() (email, token string) {
 	email, token = c.Jira.Email, c.Jira.Token
 	if email == "" {
-		email = os.Getenv("ATLASSIAN_JIRA_EMAIL")
+		email = os.Getenv(JiraEmailEnv)
 	}
 	if token == "" {
-		token = os.Getenv("ATLASSIAN_JIRA_TOKEN")
+		token = os.Getenv(JiraTokenEnv)
 	}
 	return email, token
+}
+
+// JiraBaseURL returns the effective tenant, on the same precedence as the
+// credentials: the config file, then the environment, then empty — which leaves
+// the client to apply its own default.
+//
+// It falls back to the environment for consistency, not necessity. The two
+// settings beside it do, the variable is already exported on every machine that
+// runs this, and a tenant that resolves differently from the credentials that
+// authenticate against it is a confusing way to fail.
+func (c *Config) JiraBaseURL() string {
+	if url := strings.TrimSpace(c.Jira.BaseURL); url != "" {
+		return url
+	}
+	return strings.TrimSpace(os.Getenv(JiraBaseURLEnv))
 }
 
 // ReviewRequest configures the "Ask for Code Review" action: where the ask is
@@ -272,6 +299,10 @@ func (c *Config) DBPath() string { return c.dbPath }
 func (c *Config) expand() {
 	c.Jira.Email = os.ExpandEnv(c.Jira.Email)
 	c.Jira.Token = os.ExpandEnv(c.Jira.Token)
+	// The tenant is expanded too. It was omitted originally, which made
+	// `base-url: ${ATLASSIAN_BASE_URL}` resolve to that string *literally* —
+	// every Jira request then went to "${ATLASSIAN_BASE_URL}/rest/api/3/...".
+	c.Jira.BaseURL = os.ExpandEnv(c.Jira.BaseURL)
 	for name, p := range c.Slack.Profiles {
 		p.BotToken = os.ExpandEnv(p.BotToken)
 		p.UserToken = os.ExpandEnv(p.UserToken)
@@ -293,10 +324,28 @@ func (c *Config) validate() error {
 			problems = append(problems, "slack.profiles has an empty profile name")
 		}
 	}
+	// A tenant that is not an absolute http(s) URL produces requests to a
+	// nonsense address and a failure that names neither this setting nor this
+	// file. `vmxproperty.atlassian.net` with no scheme is the likely typo, and
+	// an unexpanded ${VAR} the likely accident.
+	if url := strings.TrimSpace(c.Jira.BaseURL); url != "" && !isAbsoluteHTTPURL(url) {
+		problems = append(problems,
+			fmt.Sprintf("jira.base-url %q is not an absolute http(s) URL (e.g. https://example.atlassian.net)", url))
+	}
 	if len(problems) == 0 {
 		return nil
 	}
 	return errors.New(strings.Join(problems, "; "))
+}
+
+// isAbsoluteHTTPURL reports whether s is a parseable absolute http(s) URL with
+// a host.
+func isAbsoluteHTTPURL(s string) bool {
+	u, err := url.Parse(s)
+	if err != nil {
+		return false
+	}
+	return (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
 }
 
 // Profile returns the named Slack profile, falling back to DefaultProfile when

@@ -20,7 +20,7 @@ func engineForTickets(cfg *config.Config) (*ticket.Engine, io.Closer, error) {
 		return nil, nil, err
 	}
 	email, token := cfg.JiraCredentials()
-	client := jira.New(cfg.Jira.BaseURL, email, token)
+	client := jira.New(cfg.JiraBaseURL(), email, token)
 	notifier := notify.New(store, slack.NewAPI())
 	engine := ticket.NewEngine(client, store, notifier, summariser(), ticket.Admin{
 		SlackUserID: cfg.Admin.SlackUserID,
@@ -31,12 +31,16 @@ func engineForTickets(cfg *config.Config) (*ticket.Engine, io.Closer, error) {
 
 // registerJiraTools wires the ticket verbs, when Jira is configured.
 //
-// Unlike the GitHub tools, these are gated on a credential Riggs holds itself:
-// with no token every call would fail identically, so the tools are simply
-// absent and `riggs capabilities` says why.
+// Unlike the GitHub tools, these are gated on what Riggs holds itself: with no
+// token — or no tenant to point it at — every call would fail identically, so
+// the tools are simply absent and `riggs capabilities` says why.
+//
+// The tenant counts as configuration, not as a default. Registering these
+// against a baked-in Atlassian instance would mean a misconfigured machine
+// quietly reading and assigning tickets on somebody else's Jira.
 func registerJiraTools(reg *tools.Registry, cfg *config.Config, resolver *slack.Resolver) {
 	email, token := cfg.JiraCredentials()
-	if email == "" || token == "" {
+	if email == "" || token == "" || cfg.JiraBaseURL() == "" {
 		return
 	}
 	factory := func(context.Context) (tickets.Engine, io.Closer, error) {

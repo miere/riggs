@@ -35,12 +35,28 @@ func server(t *testing.T, log *[]seen, status int, response string) (*Client, fu
 // Missing credentials disable the feature with a clear message rather than
 // producing a confusing 401 at the API.
 func TestUnconfiguredIsTyped(t *testing.T) {
-	_, err := New("", "", "").Search(context.Background(), "project = NYX", 1)
+	_, err := New("https://example.atlassian.net", "", "").Search(context.Background(), "project = NYX", 1)
 	if !errors.Is(err, ErrNotConfigured) {
 		t.Fatalf("err = %v, want ErrNotConfigured", err)
 	}
 	if !strings.Contains(err.Error(), "ATLASSIAN_JIRA_EMAIL") {
 		t.Errorf("err = %q, want it to name the settings that would fix it", err)
+	}
+}
+
+// There is no default tenant. A client with credentials but nowhere to point
+// them must refuse rather than reach for a baked-in Atlassian instance — a
+// misconfigured machine reading somebody else's Jira is worse than one that
+// does not read any.
+func TestNoTenantIsTyped(t *testing.T) {
+	_, err := New("", "m@x", "tok").Search(context.Background(), "project = NYX", 1)
+	if !errors.Is(err, ErrNotConfigured) {
+		t.Fatalf("err = %v, want ErrNotConfigured", err)
+	}
+	for _, want := range []string{"base-url", "no default tenant"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %q, want it to mention %q", err, want)
+		}
 	}
 }
 
