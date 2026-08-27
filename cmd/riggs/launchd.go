@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/miere/riggs-mcp/internal/config"
 	"github.com/miere/riggs-mcp/internal/launchd"
@@ -48,6 +49,13 @@ func runLaunchd(ctx context.Context, args []string, configPath string) error {
 		}
 		fmt.Printf("Installed %s\n", manager.PlistPath())
 		fmt.Printf("Logs: %s\n", manager.LogDir())
+		// Reported here rather than discovered on the first click, from a log
+		// nobody is watching.
+		if missing := manager.MissingTools(); len(missing) > 0 {
+			fmt.Printf("\nWARNING: not on the agent's PATH: %s\n", strings.Join(missing, ", "))
+			fmt.Printf("The daemon will connect, then fail on the first click that needs them.\n")
+			fmt.Printf("Re-run this from a shell where they resolve.\n")
+		}
 		return nil
 
 	case "uninstall":

@@ -46,6 +46,18 @@ type Options struct {
 	ConfigPath string
 	// Profile is passed as --slack-profile. Empty leaves it to the default.
 	Profile string
+	// Path is the PATH the agent runs with.
+	//
+	// A launch agent inherits nothing, and launchd's default PATH is
+	// /usr/bin:/bin:/usr/sbin:/sbin — which contains no Homebrew and no
+	// ~/.local/bin. Riggs shells out to `gh` for its GitHub token and to
+	// `claude` for card summaries, so without this the daemon connects
+	// perfectly and then fails on the first click with "executable file not
+	// found in $PATH".
+	//
+	// Empty captures the PATH of whatever ran `riggs launchd install`, which is
+	// a shell that could find this binary and can almost certainly find the rest.
+	Path string
 	// HomeDir overrides the user's home; tests set it.
 	HomeDir string
 	// UID is the user id the agent is bootstrapped for. Zero takes the current
@@ -63,6 +75,9 @@ type Manager struct {
 func New(runner Runner, opts Options) *Manager {
 	if runner == nil {
 		runner = ExecRunner{}
+	}
+	if opts.Path == "" {
+		opts.Path = os.Getenv("PATH")
 	}
 	if opts.HomeDir == "" {
 		opts.HomeDir, _ = os.UserHomeDir()
@@ -149,6 +164,36 @@ func (m *Manager) Uninstall(ctx context.Context) error {
 		return fmt.Errorf("launchd: removing %s: %w", m.PlistPath(), err)
 	}
 	return nil
+}
+
+// MissingTools reports which of the executables the daemon shells out to are
+// not resolvable on the PATH the agent will run with.
+//
+// It is checked at install time because the alternative is finding out on the
+// first click, from a log nobody is watching — which is exactly how the PATH
+// gap was discovered.
+func (m *Manager) MissingTools() []string {
+	var missing []string
+	for _, name := range []string{"gh", "claude"} {
+		if !onPath(name, m.opts.Path) {
+			missing = append(missing, name)
+		}
+	}
+	return missing
+}
+
+// onPath reports whether name resolves to an executable on the given PATH.
+func onPath(name, path string) bool {
+	for _, dir := range filepath.SplitList(path) {
+		if dir == "" {
+			continue
+		}
+		info, err := os.Stat(filepath.Join(dir, name))
+		if err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // Status reports what launchd knows about the agent.
@@ -242,6 +287,12 @@ func (m *Manager) Plist() ([]byte, error) {
 	// respawns as fast as launchd can fork it.
 	b.WriteString("\t<key>ThrottleInterval</key>\n\t<integer>10</integer>\n")
 	b.WriteString("\t<key>ProcessType</key>\n\t<string>Background</string>\n")
+
+	if m.opts.Path != "" {
+		b.WriteString("\t<key>EnvironmentVariables</key>\n\t<dict>\n")
+		b.WriteString("\t\t<key>PATH</key>\n\t\t<string>" + escape(m.opts.Path) + "</string>\n")
+		b.WriteString("\t</dict>\n")
+	}
 
 	writeString(&b, "StandardOutPath", filepath.Join(m.LogDir(), "daemon.log"))
 	writeString(&b, "StandardErrorPath", filepath.Join(m.LogDir(), "daemon.err.log"))

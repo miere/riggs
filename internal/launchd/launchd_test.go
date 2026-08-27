@@ -299,3 +299,52 @@ func TestPathsLiveUnderTheHomeDirectory(t *testing.T) {
 		t.Errorf("LogDir = %q, want %q", got, want)
 	}
 }
+
+// A launch agent inherits nothing, and launchd's default PATH has no Homebrew
+// and no ~/.local/bin. Riggs shells out to `gh` for its GitHub token, so
+// without this the daemon connects perfectly and then fails on the first click
+// with "executable file not found in $PATH" — which is exactly what happened.
+func TestPlistCarriesAPath(t *testing.T) {
+	m := newManager(t, newFakeRunner(), Options{Path: "/opt/homebrew/bin:/usr/bin"})
+	got := string(mustPlist(t, m))
+
+	if !strings.Contains(got, "<key>EnvironmentVariables</key>") {
+		t.Fatalf("plist sets no environment:\n%s", got)
+	}
+	if !strings.Contains(got, "<string>/opt/homebrew/bin:/usr/bin</string>") {
+		t.Errorf("plist does not carry the PATH:\n%s", got)
+	}
+}
+
+func TestMissingToolsReportsWhatIsUnreachable(t *testing.T) {
+	dir := t.TempDir()
+	// A `gh` the agent can reach, and no `claude` anywhere.
+	if err := os.WriteFile(filepath.Join(dir, "gh"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	m := newManager(t, newFakeRunner(), Options{Path: dir})
+
+	missing := m.MissingTools()
+	if len(missing) != 1 || missing[0] != "claude" {
+		t.Fatalf("MissingTools = %v, want [claude]", missing)
+	}
+}
+
+// A non-executable file of the right name is not a usable tool.
+func TestMissingToolsIgnoresNonExecutables(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "gh"), []byte("not executable"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	m := newManager(t, newFakeRunner(), Options{Path: dir})
+
+	found := false
+	for _, name := range m.MissingTools() {
+		if name == "gh" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("a non-executable gh was treated as usable")
+	}
+}
