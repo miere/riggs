@@ -31,6 +31,14 @@ type job struct {
 	Timeout  string
 	// What describes the job in the prompt.
 	What string
+	// NeedsLogin puts the reviewer handle on the command, as the verb flag's
+	// value.
+	//
+	// The job then says who it is for. Nothing has to agree with it later: a
+	// config edit cannot silently repoint the queue at a different person, and
+	// reading the job tells you whose reviews it fetches without going and
+	// looking somewhere else.
+	NeedsLogin bool
 	// AskProfile makes the installer ask which Slack profile the job posts
 	// through, and pass it as --slack-profile.
 	//
@@ -57,6 +65,7 @@ var jobs = []job{
 		Args:  []string{"git", "pr", "--bulk"},
 		Every: "3m", Timeout: "2m",
 		What:       "PR review digest",
+		NeedsLogin: true,
 		AskProfile: true,
 	},
 	{
@@ -125,6 +134,11 @@ func (i *Installer) wireMurtaugh(ctx context.Context, cfg *config.Config, config
 				return err
 			}
 		}
+		if j.NeedsLogin && i.ghLogin == "" {
+			skipped = append(skipped,
+				fmt.Sprintf("%s (no GitHub login was given, so there is nobody to fetch reviews for)", j.Name))
+			continue
+		}
 		args := i.jobArgs(j, strings.TrimSpace(channel), strings.TrimSpace(profile), configPath)
 		if err := i.setJob(ctx, bin, j, args); err != nil {
 			return err
@@ -151,6 +165,11 @@ func (i *Installer) wireMurtaugh(ctx context.Context, cfg *config.Config, config
 // points Riggs at it.
 func (i *Installer) jobArgs(j job, channel, profile, configPath string) []string {
 	args := append([]string{}, j.Args...)
+	// Immediately after the verb, because that is where a verb flag's value
+	// binds: `git pr --bulk <user>`.
+	if j.NeedsLogin {
+		args = append(args, i.ghLogin)
+	}
 	if channel != "" {
 		args = append(args, "--slack-channel", channel)
 	}

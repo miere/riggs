@@ -123,6 +123,14 @@ func (p prLister) ReviewRequested(context.Context, string, int) ([]github.PullRe
 
 // happyScript answers the whole flow: config path, identity, secrets, then the
 // Murtaugh path and one channel per installable job.
+// Indices into happyScript's answer list. Named because they are positional:
+// adding a prompt shifts everything after it, and a silently shifted index
+// makes a test assert against the wrong question.
+const (
+	answerConfigPath   = 0
+	answerMurtaughPath = 5
+)
+
 func happyScript(extra ...string) *script {
 	return &script{
 		answers: append([]string{
@@ -130,9 +138,11 @@ func happyScript(extra ...string) *script {
 			"miere",                                // github login
 			"U0B20G0ET9T",                          // slack user id
 			"miere@nurturecloud.com",               // jira email
+			"https://example.atlassian.net",        // jira tenant
 			"/home/m/.config/murtaugh/config.yaml", // murtaugh config
 		}, extra...),
-		secrets:  []string{"xoxb-real-bot-token", "", "jira-api-token"},
+		// bot, app, user, jira — in prompt order.
+		secrets:  []string{"xoxb-real-bot-token", "xapp-real-app-token", "", "jira-api-token"},
 		confirms: []bool{true}, // send the test message
 	}
 }
@@ -155,7 +165,6 @@ func TestHappyPathWritesConfig(t *testing.T) {
 	}
 	for _, want := range []string{
 		`slack-user-id: "U0B20G0ET9T"`,
-		`github-login: "miere"`,
 		`bot-token: "xoxb-real-bot-token"`,
 		`email: "miere@nurturecloud.com"`,
 		`token: "jira-api-token"`,
@@ -179,7 +188,7 @@ func TestWrittenConfigIsLoadable(t *testing.T) {
 
 	dir := t.TempDir()
 	path := dir + "/config.yaml"
-	s.answers[0] = path
+	s.answers[answerConfigPath] = path
 	r.Installer.writeCfg = func(p string, data []byte) error { return os.WriteFile(p, data, 0o600) }
 
 	if err := r.Run(context.Background()); err != nil {
@@ -341,5 +350,52 @@ func TestSmokeTestDMsTheAdmin(t *testing.T) {
 	}
 	if !strings.Contains(call.Msg.Text, "o/r") && !strings.Contains(call.Msg.Text, "u") {
 		t.Errorf("fallback text = %q, want it to name the PR", call.Msg.Text)
+	}
+}
+
+// loadWritten runs the installer against a real file and loads it back, which
+// is the only assertion that proves a setting survives the whole round trip.
+func loadWritten(t *testing.T, s *script) *config.Config {
+	t.Helper()
+	s.confirms = []bool{false} // skip the test message
+	r := newRig(t, s, nil)
+
+	path := t.TempDir() + "/config.yaml"
+	s.answers[answerConfigPath] = path
+	r.Installer.writeCfg = func(p string, data []byte) error { return os.WriteFile(p, data, 0o600) }
+
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("the installer wrote a config it cannot load: %v", err)
+	}
+	return cfg
+}
+
+// Riggs installs its OWN Slack app, so the app-level token the daemon needs is
+// collected and written like any other credential. Without it every interactive
+// control Riggs renders is dead.
+func TestWritesTheAppToken(t *testing.T) {
+	cfg := loadWritten(t, happyScript())
+
+	p, _, ok := cfg.Profile(config.DefaultProfile)
+	if !ok {
+		t.Fatal("no default profile was written")
+	}
+	if p.AppToken == "" {
+		t.Error("app-token did not survive the round trip")
+	}
+	if p.BotToken == "" {
+		t.Error("bot-token did not survive the round trip")
+	}
+}
+
+// There is no default tenant, so a written config that omits it would leave the
+// jira.* tools permanently unregistered.
+func TestWritesTheJiraTenant(t *testing.T) {
+	if got := loadWritten(t, happyScript()).JiraBaseURL(); got != "https://example.atlassian.net" {
+		t.Fatalf("JiraBaseURL = %q", got)
 	}
 }

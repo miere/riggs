@@ -30,13 +30,12 @@ type Factory func(ctx context.Context, login string) (Resolver, io.Closer, error
 
 // Tool is `git.pr.check-parity`.
 type Tool struct {
-	newer        Factory
-	defaultLogin string
+	newer Factory
 }
 
 // New builds the tool.
-func New(defaultLogin string, newer Factory) *Tool {
-	return &Tool{newer: newer, defaultLogin: defaultLogin}
+func New(newer Factory) *Tool {
+	return &Tool{newer: newer}
 }
 
 // Name is the registry key; on the CLI, `riggs git pr --check-parity <path>`.
@@ -61,7 +60,7 @@ func (t *Tool) InputSchema() *jsonschema.Schema {
 			},
 			"user": {
 				Type:        "string",
-				Description: "GitHub login to derive against. Defaults to admin.github-login.",
+				Description: "GitHub login to derive against. Required.",
 			},
 			"limit": {
 				Type:        "integer",
@@ -148,10 +147,7 @@ func (t *Tool) Invoke(ctx context.Context, args map[string]any) (any, error) {
 	}
 	login, _ := args["user"].(string)
 	if login == "" {
-		login = t.defaultLogin
-	}
-	if login == "" {
-		return nil, fmt.Errorf("no GitHub login: pass one, or set admin.github-login")
+		return nil, fmt.Errorf("no GitHub login: pass one, e.g. `riggs git pr --check-parity <user>`")
 	}
 	limit := 0
 	switch v := args["limit"].(type) {

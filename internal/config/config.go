@@ -87,8 +87,18 @@ type Admin struct {
 	SlackUserID string `yaml:"slack-user-id"`
 	// JiraEmail is the account tickets are assigned to.
 	JiraEmail string `yaml:"jira-email"`
-	// GitHubLogin is the reviewer handle the PR mirror watches by default.
-	GitHubLogin string `yaml:"github-login"`
+
+	// RetiredGitHubLogin is not a setting. It is parsed only so a config that
+	// still carries `github-login` can be refused BY NAME, with a message
+	// saying what to do instead — rather than by KnownFields, which would
+	// report an unrecognised key and leave the reader guessing.
+	//
+	// The reviewer handle is now passed on the command that fetches reviews
+	// (`riggs git pr --bulk <user>`). It lived here, resolved at run time, which
+	// meant an edit to this file could silently repoint the review queue at a
+	// different person while the scheduled job looked entirely unchanged. Whose
+	// reviews a job fetches should be legible in the job.
+	RetiredGitHubLogin string `yaml:"github-login"`
 }
 
 // Jira holds the Atlassian settings. All three may be ${ENV} references, and
@@ -98,9 +108,9 @@ type Admin struct {
 type Jira struct {
 	Email string `yaml:"email"`
 	Token string `yaml:"token"`
-	// BaseURL overrides the Atlassian tenant. Empty falls back to
-	// $ATLASSIAN_BASE_URL and then to the client's default, so the tenant is
-	// never *required* — it is only ever a correction.
+	// BaseURL is the Atlassian tenant. Empty falls back to $ATLASSIAN_BASE_URL;
+	// with neither set there is no tenant and the jira.* tools are not
+	// registered at all. There is deliberately no default — see jira.New.
 	BaseURL string `yaml:"base-url"`
 }
 
@@ -328,6 +338,10 @@ func (c *Config) validate() error {
 	// nonsense address and a failure that names neither this setting nor this
 	// file. `vmxproperty.atlassian.net` with no scheme is the likely typo, and
 	// an unexpanded ${VAR} the likely accident.
+	if strings.TrimSpace(c.Admin.RetiredGitHubLogin) != "" {
+		problems = append(problems,
+			"admin.github-login is no longer a setting: remove it, and pass the login on the command instead (e.g. `riggs git pr --bulk <user>`)")
+	}
 	if url := strings.TrimSpace(c.Jira.BaseURL); url != "" && !isAbsoluteHTTPURL(url) {
 		problems = append(problems,
 			fmt.Sprintf("jira.base-url %q is not an absolute http(s) URL (e.g. https://example.atlassian.net)", url))

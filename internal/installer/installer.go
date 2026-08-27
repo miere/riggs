@@ -51,6 +51,12 @@ type Installer struct {
 	p    Prompter
 	opts Options
 
+	// ghLogin is the reviewer handle answered during gather. It is baked into
+	// the review job's command and deliberately NOT written to the config:
+	// storing it there is what let an edit repoint the queue at a different
+	// person while the job looked unchanged.
+	ghLogin string
+
 	ghAuth   func(ctx context.Context) (github.Auth, error)
 	newPRs   func(token string) PRLister
 	poster   slack.Poster
@@ -152,6 +158,7 @@ func (i *Installer) gather(ctx context.Context) (*config.Config, error) {
 
 	i.p.Say("")
 	i.p.Say("Who is Riggs acting for?")
+	i.p.Say("  (the GitHub login goes on the job's command line, not into the config)")
 	login, err := i.p.Ask("  GitHub login", ghLogin)
 	if err != nil {
 		return nil, err
@@ -167,10 +174,13 @@ func (i *Installer) gather(ctx context.Context) (*config.Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	cfg.Admin = config.Admin{GitHubLogin: login, SlackUserID: slackID, JiraEmail: jiraEmail}
+	i.ghLogin = strings.TrimSpace(login)
+	cfg.Admin = config.Admin{SlackUserID: slackID, JiraEmail: jiraEmail}
 
 	i.p.Say("")
-	i.p.Say("Slack credentials for the \"default\" profile.")
+	i.p.Say("Slack credentials for the \"default\" profile — Riggs' OWN app.")
+	i.p.Say("Not a shared one: clicks are delivered to whichever app posted the")
+	i.p.Say("message, so the daemon can only answer buttons on its own messages.")
 	i.p.Say("Paste a token, or ${ENV_VAR} to reference the environment instead.")
 	bot, err := i.secret("  Bot token (xoxb-)", "SLACK_BOT_TOKEN")
 	if err != nil {
@@ -179,11 +189,24 @@ func (i *Installer) gather(ctx context.Context) (*config.Config, error) {
 	if bot == "" {
 		return nil, errors.New("a bot token is required: without it nothing can be posted")
 	}
+	// The app-level token is what `riggs daemon` opens Socket Mode with. It is
+	// optional here so an install can finish without one, but every interactive
+	// control Riggs renders is dead until it exists — so the absence is called
+	// out rather than passed over.
+	app, err := i.secret("  App token (xapp-, for `riggs daemon`)", "SLACK_APP_TOKEN")
+	if err != nil {
+		return nil, err
+	}
+	if app == "" {
+		i.p.Say("    no app token: `riggs daemon` cannot start, so the digest's")
+		i.p.Say("    buttons will not respond until one is configured.")
+	}
 	user, err := i.secret("  User token (xoxp-, optional)", "SLACK_USER_TOKEN")
 	if err != nil {
 		return nil, err
 	}
-	cfg.Slack.Profiles[config.DefaultProfile] = config.Profile{BotToken: bot, UserToken: user}
+	cfg.Slack.Profiles[config.DefaultProfile] = config.Profile{
+		BotToken: bot, AppToken: app, UserToken: user}
 
 	i.p.Say("")
 	i.p.Say("Jira credentials (used by the ticket jobs).")
@@ -191,7 +214,16 @@ func (i *Installer) gather(ctx context.Context) (*config.Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	cfg.Jira = config.Jira{Email: jiraEmail, Token: jiraToken}
+	// Asked for, never guessed. Riggs has no default tenant: a machine that
+	// silently read and assigned tickets on somebody else's Jira would be worse
+	// than one that read none.
+	jiraBaseURL, err := i.p.Ask("  Tenant URL (e.g. https://example.atlassian.net)",
+		i.getenv(config.JiraBaseURLEnv))
+	if err != nil {
+		return nil, err
+	}
+	cfg.Jira = config.Jira{
+		Email: jiraEmail, Token: jiraToken, BaseURL: strings.TrimSpace(jiraBaseURL)}
 
 	return cfg, nil
 }
@@ -238,12 +270,15 @@ func render(cfg *config.Config) string {
 	b.WriteString("admin:\n")
 	fmt.Fprintf(&b, "  slack-user-id: %s\n", yamlValue(cfg.Admin.SlackUserID))
 	fmt.Fprintf(&b, "  jira-email: %s\n", yamlValue(cfg.Admin.JiraEmail))
-	fmt.Fprintf(&b, "  github-login: %s\n\n", yamlValue(cfg.Admin.GitHubLogin))
+	b.WriteString("\n")
 
 	b.WriteString("slack:\n  profiles:\n")
 	p := cfg.Slack.Profiles[config.DefaultProfile]
 	b.WriteString("    default:\n")
 	fmt.Fprintf(&b, "      bot-token: %s\n", yamlValue(p.BotToken))
+	if p.AppToken != "" {
+		fmt.Fprintf(&b, "      app-token: %s\n", yamlValue(p.AppToken))
+	}
 	if p.UserToken != "" {
 		fmt.Fprintf(&b, "      user-token: %s\n", yamlValue(p.UserToken))
 	}
@@ -254,6 +289,11 @@ func render(cfg *config.Config) string {
 		fmt.Fprintf(&b, "  email: %s\n", yamlValue(cfg.Jira.Email))
 		if cfg.Jira.Token != "" {
 			fmt.Fprintf(&b, "  token: %s\n", yamlValue(cfg.Jira.Token))
+		}
+		// There is no default tenant, so a config without this line leaves the
+		// jira.* tools unregistered.
+		if cfg.Jira.BaseURL != "" {
+			fmt.Fprintf(&b, "  base-url: %s\n", yamlValue(cfg.Jira.BaseURL))
 		}
 	}
 	return b.String()
@@ -301,7 +341,7 @@ func (i *Installer) smokeTest(ctx context.Context, cfg *config.Config) error {
 	if err != nil {
 		return blockedError{fmt.Errorf("test message failed: %w", err)}
 	}
-	login := cfg.Admin.GitHubLogin
+	login := i.ghLogin
 	if login == "" {
 		login = auth.Login
 	}

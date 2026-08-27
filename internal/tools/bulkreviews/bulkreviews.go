@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -30,14 +31,13 @@ type Factory func(ctx context.Context, login string, opts pullrequest.BulkOption
 
 // Tool is `git.pr.bulk`.
 type Tool struct {
-	resolver     *slack.Resolver
-	newer        Factory
-	defaultLogin string
+	resolver *slack.Resolver
+	newer    Factory
 }
 
 // New builds the tool.
-func New(resolver *slack.Resolver, defaultLogin string, newer Factory) *Tool {
-	return &Tool{resolver: resolver, newer: newer, defaultLogin: defaultLogin}
+func New(resolver *slack.Resolver, newer Factory) *Tool {
+	return &Tool{resolver: resolver, newer: newer}
 }
 
 // Name is the registry key. On the CLI this is spelled `riggs git pr --bulk`.
@@ -58,7 +58,7 @@ func (t *Tool) InputSchema() *jsonschema.Schema {
 		Properties: map[string]*jsonschema.Schema{
 			"user": {
 				Type:        "string",
-				Description: "GitHub login whose review requests are delivered. Defaults to admin.github-login.",
+				Description: "GitHub login whose review requests are delivered. Required.",
 			},
 			"dry_run": {
 				Type:        "boolean",
@@ -87,11 +87,11 @@ func (t *Tool) InputSchema() *jsonschema.Schema {
 // Invoke runs one digest pass.
 func (t *Tool) Invoke(ctx context.Context, args map[string]any) (any, error) {
 	login, _ := args["user"].(string)
-	if login == "" {
-		login = t.defaultLogin
-	}
-	if login == "" {
-		return nil, fmt.Errorf("no GitHub login: pass one, or set admin.github-login")
+	if strings.TrimSpace(login) == "" {
+		// Deliberately no fallback. It used to read admin.github-login, which
+		// meant a config edit could repoint the queue at a different person
+		// while the job that fetches it looked unchanged.
+		return nil, fmt.Errorf("no GitHub login: pass one, e.g. `riggs git pr %s <user>`", "--bulk")
 	}
 	dryRun, _ := args["dry_run"].(bool)
 	profile, _ := args["slack_profile"].(string)

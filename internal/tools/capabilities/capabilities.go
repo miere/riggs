@@ -125,7 +125,6 @@ type Ledger struct {
 type Admin struct {
 	SlackUserID string `json:"slack_user_id"`
 	JiraEmail   string `json:"jira_email"`
-	GitHubLogin string `json:"github_login"`
 }
 
 // Profile is one configured Slack account's readiness.
@@ -155,7 +154,6 @@ func (t *Tool) Invoke(context.Context, map[string]any) (any, error) {
 		Admin: Admin{
 			SlackUserID: set(t.cfg.Admin.SlackUserID),
 			JiraEmail:   set(t.cfg.Admin.JiraEmail),
-			GitHubLogin: set(t.cfg.Admin.GitHubLogin),
 		},
 		Slack:    t.slackProfiles(),
 		Backends: t.backends(),
@@ -258,8 +256,8 @@ func (r Report) String() string {
 	default:
 		fmt.Fprintf(&b, "ledger: %s (not created yet)\n", r.Ledger.Path)
 	}
-	fmt.Fprintf(&b, "\nadmin:\n  slack-user-id: %s\n  jira-email:    %s\n  github-login:  %s\n",
-		r.Admin.SlackUserID, r.Admin.JiraEmail, r.Admin.GitHubLogin)
+	fmt.Fprintf(&b, "\nadmin:\n  slack-user-id: %s\n  jira-email:    %s\n",
+		r.Admin.SlackUserID, r.Admin.JiraEmail)
 
 	b.WriteString("\nslack profiles:\n")
 	if len(r.Slack) == 0 {

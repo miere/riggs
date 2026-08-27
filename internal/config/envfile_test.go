@@ -48,24 +48,45 @@ slack:
 	}
 }
 
-// Standard dotenv precedence: an already-set variable wins, so an operator can
-// override one token for a single run without editing a file.
-func TestRealEnvironmentBeatsTheFile(t *testing.T) {
-	t.Setenv("TEST_RIGGS_BOT", "xoxb-from-env")
+// Riggs' own dotenv wins over the ambient environment — a deliberate inversion
+// of standard dotenv precedence.
+//
+// The scenario it exists for: Murtaugh's gateway exports its own
+// SLACK_BOT_TOKEN into the environment every job it spawns inherits. Under
+// standard precedence the *same* profile would resolve to Murtaugh's app when
+// scheduled and to Riggs' own when started by launchd — one identity posting
+// the digest and another listening for its clicks, failing silently.
+func TestTheFileBeatsTheAmbientEnvironment(t *testing.T) {
+	t.Setenv("TEST_RIGGS_BOT", "xoxb-murtaughs-app")
 	path := writeConfig(t, `
 slack:
   profiles:
     riggs:
       bot-token: ${TEST_RIGGS_BOT}
-`, "TEST_RIGGS_BOT=xoxb-from-file\n")
+`, "TEST_RIGGS_BOT=xoxb-riggs-own-app\n")
 
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	p, _, _ := cfg.Profile("riggs")
-	if p.BotToken != "xoxb-from-env" {
-		t.Fatalf("BotToken = %q, want the ambient value", p.BotToken)
+	if p.BotToken != "xoxb-riggs-own-app" {
+		t.Fatalf("BotToken = %q, want Riggs' own .env to win", p.BotToken)
+	}
+}
+
+// The inversion must hold for the process environment too, not just for the
+// config's ${VAR} expansion — anything Riggs shells out to should see the same
+// values the config resolved from.
+func TestOverloadReachesTheProcessEnvironment(t *testing.T) {
+	t.Setenv("TEST_RIGGS_OVERLOAD", "from-env")
+	path := writeConfig(t, "admin:\n  slack-user-id: U1\n", "TEST_RIGGS_OVERLOAD=from-file\n")
+
+	if _, err := Load(path); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := os.Getenv("TEST_RIGGS_OVERLOAD"); got != "from-file" {
+		t.Fatalf("os.Getenv = %q, want the file value", got)
 	}
 }
 
