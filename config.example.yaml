@@ -47,6 +47,24 @@ admin:
 #   user-id: U0B20G0ET9T
 #   prompt: Could you take a look at this pull request when you get a chance?
 
+# "Ask for AI Assistance" on a Jira digest row. Same shape, same guarantee, and
+# deliberately SEPARATE settings: one asks a human to review code that exists,
+# the other asks somebody to look at work that does not. They end up pointed at
+# different channels and different people, and sharing a setting would mean
+# changing one silently moved the other. Neither is ever defaulted from the
+# other — an unset value here falls back to the admin, not to review-request.
+# ai-assistance:
+#   # Where the ask is posted. Omitted, it is DMed to the tagged user.
+#   channel: C0B29C20Z9S
+#   # Who is tagged. Omitted, the admin is.
+#   user-id: U0B20G0ET9T
+#   # {user} and {requester} are replaced with the corresponding mentions. A
+#   # prompt that mentions neither still gets both: the recipient is prefixed
+#   # and the requester appended as `c/c`, because those are the point of the
+#   # feature and a wording change must not silently drop them. The default
+#   # below places both itself, so it gets neither addition.
+#   prompt: "{user}, {requester} needs your help check if this ticket is actionable as it is"
+
 # The Slack accounts Riggs may deliver through. A tool picks one with
 # --slack-profile; with none given, the profile named "default" is used, and a
 # missing "default" is an error rather than a silent no-op.

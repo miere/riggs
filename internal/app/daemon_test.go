@@ -7,6 +7,7 @@ import (
 	"github.com/miere/riggs-mcp/internal/daemon"
 	"github.com/miere/riggs-mcp/internal/pullrequest"
 	"github.com/miere/riggs-mcp/internal/slack"
+	"github.com/miere/riggs-mcp/internal/ticket"
 )
 
 // Every control Riggs renders that is meant to do something, and nothing else.
@@ -19,10 +20,14 @@ func TestDaemonRegistersTheDigestActions(t *testing.T) {
 	a.registerInteractions(router, slack.Credentials{Profile: "riggs"})
 
 	got := router.Routes()
+	// Sorted, as Routes() reports them.
 	want := []string{
+		// The ticket digest rows' menu. "Assign to Me" is absent because it is
+		// not rendered: the verb exists, the option deliberately does not.
+		ticket.BulkActionID + "/" + ticket.IntentAskAssist,
 		// The ask-review card's Approve, which leaves no comment.
 		pullrequest.AskActionID + "/" + pullrequest.IntentApprove,
-		// The digest rows' menu.
+		// The pull-request digest rows' menu.
 		pullrequest.BulkActionID + "/" + pullrequest.IntentApproveMerge,
 		pullrequest.BulkActionID + "/" + pullrequest.IntentAskReview,
 	}

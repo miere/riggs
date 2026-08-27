@@ -233,6 +233,9 @@ func (i *Installer) gather(ctx context.Context) (*config.Config, error) {
 	if err := i.gatherReviewRequest(ctx, cfg); err != nil {
 		return nil, err
 	}
+	if err := i.gatherAIAssistance(ctx, cfg); err != nil {
+		return nil, err
+	}
 
 	return cfg, nil
 }
@@ -277,6 +280,47 @@ func (i *Installer) gatherReviewRequest(ctx context.Context, cfg *config.Config)
 		}
 		i.p.Say("    @%s is %s", ref.Handle, id)
 		cfg.ReviewRequest.UserID = id
+	}
+	return nil
+}
+
+// gatherAIAssistance collects where "Ask for AI Assistance" sends its card and
+// who it tags.
+//
+// Asked separately from the review request, and never defaulted from it. The
+// two look identical and answer different questions — one asks a human to
+// review code that exists, the other asks somebody to look at work that does
+// not — so they end up pointed at different channels and different people, and
+// a shared answer would mean changing one silently moved the other.
+func (i *Installer) gatherAIAssistance(ctx context.Context, cfg *config.Config) error {
+	i.p.Say("")
+	i.p.Say("\"Ask for AI Assistance\" does the same for a Jira ticket, and is")
+	i.p.Say("configured separately. Leave the channel empty to DM the person instead.")
+
+	channel, err := i.p.Ask("  Channel id", "")
+	if err != nil {
+		return err
+	}
+	who, err := i.p.Ask("  Person to tag (@handle or Slack id; empty = you)", "")
+	if err != nil {
+		return err
+	}
+	cfg.AIAssistance = config.AIAssistance{Channel: strings.TrimSpace(channel)}
+
+	ref := slack.ParseUserRef(who)
+	switch {
+	case ref.IsID():
+		cfg.AIAssistance.UserID = ref.ID
+	case ref.Handle != "":
+		id, err := i.resolveUser(ctx, cfg, ref.Handle)
+		if err != nil {
+			i.p.Say("    could not resolve @%s: %v", ref.Handle, err)
+			i.p.Say("    storing the handle as written; it is resolved on each ask.")
+			cfg.AIAssistance.UserID = who
+			return nil
+		}
+		i.p.Say("    @%s is %s", ref.Handle, id)
+		cfg.AIAssistance.UserID = id
 	}
 	return nil
 }
@@ -346,6 +390,15 @@ func render(cfg *config.Config) string {
 	}
 	b.WriteString("\n")
 
+	if cfg.AIAssistance.Channel != "" || cfg.AIAssistance.UserID != "" {
+		b.WriteString("ai-assistance:\n")
+		if cfg.AIAssistance.Channel != "" {
+			fmt.Fprintf(&b, "  channel: %s\n", yamlValue(cfg.AIAssistance.Channel))
+		}
+		if cfg.AIAssistance.UserID != "" {
+			fmt.Fprintf(&b, "  user-id: %s\n", yamlValue(cfg.AIAssistance.UserID))
+		}
+	}
 	if cfg.ReviewRequest.Channel != "" || cfg.ReviewRequest.UserID != "" {
 		b.WriteString("review-request:\n")
 		if cfg.ReviewRequest.Channel != "" {

@@ -50,6 +50,7 @@ type Config struct {
 	Slack         Slack         `yaml:"slack"`
 	Jira          Jira          `yaml:"jira"`
 	ReviewRequest ReviewRequest `yaml:"review-request"`
+	AIAssistance  AIAssistance  `yaml:"ai-assistance"`
 
 	// EnvFile is a dotenv file loaded before ${VAR} references are expanded.
 	//
@@ -197,6 +198,56 @@ func (c *Config) ReviewPrompt() string {
 // ReviewReviewer is the Slack user the ask tags, falling back to the admin.
 func (c *Config) ReviewReviewer() string {
 	if id := strings.TrimSpace(c.ReviewRequest.UserID); id != "" {
+		return id
+	}
+	return c.Admin.SlackUserID
+}
+
+// AIAssistance configures the "Ask for AI Assistance" action on a ticket row:
+// where the ask is posted, who is tagged in it, and what it says.
+//
+// It is a SEPARATE section from ReviewRequest, deliberately, and the two are
+// never defaulted from one another. They look identical today and answer
+// different questions — one asks a human to review code that exists, the other
+// asks somebody to pick up work that does not — so they will be pointed at
+// different channels and different people, and a shared setting would mean
+// changing one silently moved the other.
+type AIAssistance struct {
+	// Channel is where the ask is posted. Empty DMs the tagged user.
+	Channel string `yaml:"channel"`
+	// UserID is the Slack user tagged in the ask. Empty falls back to the
+	// admin — asking yourself is a defensible default and never silently tags a
+	// stranger.
+	//
+	// An id, a pasted mention or a handle are all accepted, on the same rules as
+	// review-request.user-id.
+	UserID string `yaml:"user-id"`
+	// Prompt is the wording of the ask. Empty uses DefaultAssistPrompt.
+	//
+	// `{user}` and `{requester}` are replaced with the corresponding mentions.
+	// A prompt that mentions neither still gets both (see internal/ask).
+	Prompt string `yaml:"prompt"`
+}
+
+// DefaultAssistPrompt is the ask, used when the config defines none:
+//
+//	<@user>, <@requester> needs your help check if this ticket is actionable as it is
+//
+// It places both mentions itself, so nothing is prefixed and no `c/c` is
+// appended — the guarantee in internal/ask only adds what the wording left out.
+const DefaultAssistPrompt = "{user}, {requester} needs your help check if this ticket is actionable as it is"
+
+// AssistPrompt is the configured prompt, or the default.
+func (c *Config) AssistPrompt() string {
+	if strings.TrimSpace(c.AIAssistance.Prompt) == "" {
+		return DefaultAssistPrompt
+	}
+	return c.AIAssistance.Prompt
+}
+
+// AssistUser is the Slack user a ticket ask tags, falling back to the admin.
+func (c *Config) AssistUser() string {
+	if id := strings.TrimSpace(c.AIAssistance.UserID); id != "" {
 		return id
 	}
 	return c.Admin.SlackUserID

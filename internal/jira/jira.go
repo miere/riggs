@@ -72,14 +72,17 @@ func (c *Client) BrowseURL(key string) string { return c.baseURL + "/browse/" + 
 
 // Issue is the subset of a ticket the cards need.
 type Issue struct {
-	Key         string    `json:"key"`
-	Summary     string    `json:"summary"`
-	Description string    `json:"description"`
-	Status      string    `json:"status"`
-	Assignee    string    `json:"assignee"`
-	Reporter    string    `json:"reporter"`
-	Parent      string    `json:"parent,omitempty"`
-	Updated     time.Time `json:"updated"`
+	Key         string `json:"key"`
+	Summary     string `json:"summary"`
+	Description string `json:"description"`
+	Status      string `json:"status"`
+	Assignee    string `json:"assignee"`
+	Reporter    string `json:"reporter"`
+	Parent      string `json:"parent,omitempty"`
+	// Created orders the bulk digest: FIFO is by how long the ticket has been
+	// waiting, not by when Riggs first saw it.
+	Created time.Time `json:"created"`
+	Updated time.Time `json:"updated"`
 }
 
 // Claimed reports whether the ticket is no longer up for grabs — assigned, or
@@ -100,7 +103,7 @@ func (c *Client) Search(ctx context.Context, jql string, max int) ([]Issue, erro
 	body := map[string]any{
 		"jql":        jql,
 		"maxResults": max,
-		"fields":     []string{"summary", "status", "assignee", "reporter", "parent", "updated", "description"},
+		"fields":     []string{"summary", "status", "assignee", "reporter", "parent", "created", "updated", "description"},
 	}
 	var payload struct {
 		Issues []rawIssue `json:"issues"`
@@ -119,7 +122,7 @@ func (c *Client) Search(ctx context.Context, jql string, max int) ([]Issue, erro
 func (c *Client) Get(ctx context.Context, key string) (Issue, error) {
 	var raw rawIssue
 	path := "/rest/api/3/issue/" + key +
-		"?fields=summary,description,updated,assignee,reporter,status,parent"
+		"?fields=summary,description,created,updated,assignee,reporter,status,parent"
 	if err := c.call(ctx, http.MethodGet, path, nil, &raw); err != nil {
 		return Issue{}, err
 	}
@@ -132,6 +135,7 @@ type rawIssue struct {
 	Fields struct {
 		Summary     string          `json:"summary"`
 		Description json.RawMessage `json:"description"`
+		Created     string          `json:"created"`
 		Updated     string          `json:"updated"`
 		Assignee    *struct {
 			DisplayName string `json:"displayName"`
@@ -164,9 +168,8 @@ func (r rawIssue) issue() Issue {
 	}
 	i.Description = ADFToText(r.Fields.Description)
 	// Jira stamps "2026-08-09T10:11:12.000+1000".
-	if t, err := time.Parse("2006-01-02T15:04:05.000-0700", r.Fields.Updated); err == nil {
-		i.Updated = t
-	}
+	i.Created = parseStamp(r.Fields.Created)
+	i.Updated = parseStamp(r.Fields.Updated)
 	return i
 }
 
@@ -344,4 +347,16 @@ func FormatUpdated(t time.Time) string {
 	}
 	return fmt.Sprintf("%s %d, %d at %d:%02d %s",
 		t.Format("Jan"), t.Day(), t.Year(), hour, t.Minute(), t.Format("PM"))
+}
+
+// parseStamp reads Jira's timestamp format. An unparseable or absent value
+// yields the zero time, which every caller already treats as "unknown" — a
+// ticket with no readable date sorts first under FIFO, which is the safe end of
+// the queue to be at.
+func parseStamp(s string) time.Time {
+	t, err := time.Parse("2006-01-02T15:04:05.000-0700", s)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
 }

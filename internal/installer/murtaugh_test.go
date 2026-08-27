@@ -119,19 +119,19 @@ func TestSkipsJobsWhoseToolIsNotBuilt(t *testing.T) {
 		t.Error("registered a job whose tool does not exist")
 	}
 	transcript := r.prompt.transcript()
-	for _, want := range []string{"quick-coding-tasks-poll", "jira.tickets.poll", "not built yet"} {
+	for _, want := range []string{"quick-coding-tasks-poll", "jira.tickets.bulk", "not built yet"} {
 		if !strings.Contains(transcript, want) {
 			t.Errorf("the skip was not explained (%q missing):\n%s", want, transcript)
 		}
 	}
 }
 
-// The cadences are carried over unchanged, so a migration does not also change
+// Cadences are carried over unchanged, so a migration does not also change
 // behaviour.
 func TestPreservesExistingCadences(t *testing.T) {
-	s := happyScript("", "", "")
+	s := happyScript("", "", "", "")
 	r := newRig(t, s, map[string]bool{
-		"git.pr.bulk": true, "jira.tickets.poll": true})
+		"git.pr.bulk": true, "jira.tickets.bulk": true})
 
 	if err := r.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -265,24 +265,58 @@ func TestDigestJobCarriesTheSlackProfile(t *testing.T) {
 	}
 }
 
-// Only the digest asks; the ticket jobs are posted by whatever profile is
-// already the default, and adding a prompt to each would be noise.
-func TestOnlyTheDigestAsksForAProfile(t *testing.T) {
-	s := happyScript("", "", "")
-	r := newRig(t, s, map[string]bool{
-		"git.pr.bulk": true, "jira.tickets.poll": true})
+// Every digest is asked which profile to post as, and it is not cosmetic: a
+// click is delivered to the app that POSTED the message, so a digest sent
+// through the wrong profile renders controls Riggs' daemon never hears about.
+func TestBothDigestsAskForAProfile(t *testing.T) {
+	s := happyScript("C0B24F579T4", "riggs", "C0B29C20Z9S", "riggs")
+	r := newRig(t, s, map[string]bool{"git.pr.bulk": true, "jira.tickets.bulk": true})
 
 	if err := r.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	for _, name := range []string{"quick-coding-tasks-poll"} {
+	for _, name := range []string{"github-review-queue", "quick-coding-tasks-poll"} {
 		argv, ok := argvOf(r, name)
 		if !ok {
 			t.Fatalf("%s not registered", name)
 		}
-		if strings.Contains(joined(argv), "--slack-profile") {
-			t.Errorf("%s was given a profile flag:\n%v", name, argv)
+		if !strings.Contains(joined(argv), "--slack-profile\x00--args\x00riggs") {
+			t.Errorf("%s was not given the profile:\n%v", name, argv)
 		}
+	}
+}
+
+// The ticket digest is registered with its JQL on the command, the same way the
+// pull-request digest carries its login: reading the job tells you which queue
+// it mirrors without going and looking somewhere else.
+func TestTicketDigestJobNamesItsQuery(t *testing.T) {
+	s := happyScript("", "", "", "")
+	r := newRig(t, s, map[string]bool{"jira.tickets.bulk": true})
+
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	argv, ok := argvOf(r, "quick-coding-tasks-poll")
+	if !ok {
+		t.Fatal("quick-coding-tasks-poll was not registered")
+	}
+	if !strings.Contains(joined(argv), "--bulk\x00--args\x00"+defaultTicketJQL) {
+		t.Errorf("want --bulk followed by the JQL:\n%v", argv)
+	}
+}
+
+// The idle nudge is deliberately not registered beside the digest: the rolling
+// re-post IS the reminder, and scheduling both would nudge twice for one ticket.
+func TestNudgeIsNotScheduledBesideTheDigest(t *testing.T) {
+	s := happyScript("", "", "", "")
+	r := newRig(t, s, map[string]bool{
+		"git.pr.bulk": true, "jira.tickets.bulk": true, "jira.tickets.nudge": true})
+
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if _, ok := argvOf(r, "quick-coding-tasks-nudge"); ok {
+		t.Error("the nudge was scheduled alongside the digest")
 	}
 }
 

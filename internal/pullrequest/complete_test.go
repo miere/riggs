@@ -27,7 +27,7 @@ func newCompleterRig(t *testing.T) *completerRig {
 	r.run(t)
 	r.slack.Reset()
 
-	c := NewCompleter(r.store, r.bulk.notifier, r.slack).
+	c := NewCompleter(r.store, r.notifier, r.slack).
 		WithClock(func() time.Time { return r.clock })
 	return &completerRig{bulkRig: r, completer: c}
 }
@@ -215,8 +215,8 @@ func TestCompleteDeletesAPostThatEmpties(t *testing.T) {
 	if err := r.store.DeleteItem(context.Background(), BulkItemPrefix+"o/r#1"); err != nil {
 		t.Fatalf("DeleteItem: %v", err)
 	}
-	c := NewCompleter(r.store, r.bulk.notifier, r.slack)
-	if err := c.rebuild(context.Background(), BulkPostPrefix+"1", target); err != nil {
+	c := NewCompleter(r.store, r.notifier, r.slack)
+	if err := c.rebuilder.Rebuild(context.Background(), BulkPostPrefix+"1", target); err != nil {
 		t.Fatalf("rebuild: %v", err)
 	}
 

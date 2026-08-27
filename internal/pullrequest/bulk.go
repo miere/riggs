@@ -3,22 +3,25 @@ package pullrequest
 import (
 	"context"
 	"fmt"
-	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/miere/riggs-mcp/internal/blockkit"
+	"github.com/miere/riggs-mcp/internal/bulk"
 	"github.com/miere/riggs-mcp/internal/notify"
-	"github.com/miere/riggs-mcp/internal/slack"
 )
 
 // The bulk digest: one message carrying up to N pull requests, rather than one
 // self-updating card per pull request.
 //
+// The rotation itself — cooldown, FIFO, cap-and-hold, purge, rebuild — lives in
+// internal/bulk, because the ticket queue needs precisely the same five rules
+// and none of the same rendering. What stays here is what is actually about
+// pull requests: which ones a pass is responsible for, and what a row says.
+//
 // The card loop (reconcile.go) is untouched and still runs. This is a second,
-// independent consumer of the same GitHub reads and the same ledger database.
+// independent consumer of the same GitHub reads and the same ledger.
 
 const (
 	// BulkStream groups this domain's digest items in the ledger.
@@ -48,6 +51,10 @@ const DefaultCooldown = 3 * time.Hour
 const DefaultMaxItems = 10
 
 // MaxItemsEnv overrides that cap.
+//
+// It is the pull-request digest's own variable. The ticket digest has a
+// separate one: the two queues are configured independently, so raising one
+// cap must not silently raise the other.
 const MaxItemsEnv = "RIGGS_BULK_MAX_ITEMS"
 
 // bulkTitle and bulkSubtitle head every digest.
@@ -72,7 +79,7 @@ type BulkOptions struct {
 // resolved fills in the blanks from the environment and the defaults.
 func (o BulkOptions) resolved() BulkOptions {
 	if o.MaxItems <= 0 {
-		o.MaxItems = maxItemsFromEnv()
+		o.MaxItems = bulk.MaxItemsFromEnv(MaxItemsEnv, DefaultMaxItems)
 	}
 	if o.Cooldown <= 0 {
 		o.Cooldown = DefaultCooldown
@@ -80,331 +87,101 @@ func (o BulkOptions) resolved() BulkOptions {
 	return o
 }
 
-// maxItemsFromEnv reads the cap, falling back to the default. A value that is
-// not a positive integer is ignored rather than fatal: a typo in a job's
-// environment should not stop the queue being delivered.
-func maxItemsFromEnv() int {
-	if n, err := strconv.Atoi(strings.TrimSpace(os.Getenv(MaxItemsEnv))); err == nil && n > 0 {
-		return n
-	}
-	return DefaultMaxItems
-}
+// BulkReport is the result of one digest pass.
+type BulkReport = bulk.Report
 
 // BulkEngine reconciles the digest.
 type BulkEngine struct {
-	engine   *Engine
-	store    *notify.Store
-	notifier *notify.Notifier
-	now      func() time.Time
-	opts     BulkOptions
+	*bulk.Engine
 }
 
 // NewBulkEngine builds the digest reconciler over the card engine's GitHub
 // reads and the shared ledger.
 func NewBulkEngine(e *Engine, store *notify.Store, n *notify.Notifier, opts BulkOptions) *BulkEngine {
-	return &BulkEngine{engine: e, store: store, notifier: n, now: time.Now, opts: opts.resolved()}
+	opts = opts.resolved()
+	return &BulkEngine{Engine: bulk.New(
+		bulkDomain{engine: e}, store, n,
+		bulk.Options{MaxItems: opts.MaxItems, Cooldown: opts.Cooldown},
+	)}
 }
 
 // WithClock overrides the clock; intended for tests.
 func (b *BulkEngine) WithClock(now func() time.Time) *BulkEngine {
-	b.now = now
+	b.Engine.WithClock(now)
 	return b
 }
 
-// candidate is one pull request as the digest needs it.
-type candidate struct {
-	Ref       string
-	Title     string
-	Author    string
-	URL       string
-	CreatedAt time.Time
-	Status    string
-	// Done marks a row that is struck through — reviewed, merged, closed or
-	// otherwise no longer actionable.
-	Done bool
-	// Dependabot gates the approve-and-merge option.
-	Dependabot bool
-}
+// bulkDomain is the pull-request half of a digest: what the items are, and how
+// a row draws.
+type bulkDomain struct{ engine *Engine }
 
-// BulkReport is the result of one digest pass.
-type BulkReport struct {
-	Considered int      `json:"considered"`
-	Posted     []string `json:"posted,omitempty"`
-	Held       []string `json:"held,omitempty"`
-	Purged     []string `json:"purged,omitempty"`
-	Updated    []string `json:"updated_posts,omitempty"`
-	Deleted    []string `json:"deleted_posts,omitempty"`
-	DryRun     bool     `json:"dry_run"`
-}
+// The ledger identity of this digest family.
+func (bulkDomain) Stream() string     { return BulkStream }
+func (bulkDomain) PostPrefix() string { return BulkPostPrefix }
+func (bulkDomain) ItemPrefix() string { return BulkItemPrefix }
+func (bulkDomain) Noun() string       { return "pull request" }
 
-// String renders the report for a human.
-func (r BulkReport) String() string {
-	var b strings.Builder
-	if r.DryRun {
-		b.WriteString("[dry run] ")
-	}
-	fmt.Fprintf(&b, "considered %d pull request(s)\n", r.Considered)
-	line := func(label string, refs []string) {
-		if len(refs) > 0 {
-			fmt.Fprintf(&b, "  %-9s %s\n", label, strings.Join(refs, ", "))
-		}
-	}
-	line("posted", r.Posted)
-	line("held", r.Held)
-	line("purged", r.Purged)
-	line("updated", r.Updated)
-	line("deleted", r.Deleted)
-	return strings.TrimRight(b.String(), "\n")
-}
-
-// Run performs one digest pass.
-//
-// The rules, in the order they are applied to each pull request:
-//
-//   - untracked and actionable        -> a candidate to join the next digest
-//   - untracked and not actionable    -> ignored; nothing is announced that was
-//     never worth announcing (the same
-//     dead-on-arrival rule as the card loop)
-//   - tracked, within cooldown        -> stays where it is; its row is
-//     refreshed in place
-//   - tracked, cooled, still open     -> moves: removed from its old post and
-//     included in the new one
-//   - tracked, cooled, done           -> purged; a struck-through row does not
-//     rotate into a fresh digest
-//
-// Anything past its cooldown that misses the cap stays exactly where it is and
-// leads the queue next pass — it is never removed without somewhere to go.
-//
-// Every existing post is then rebuilt from the items that remain in it. That is
-// idempotent by construction: the fingerprint gate means a rebuild that changes
-// nothing makes no Slack call, so running a pass twice costs two GitHub reads
-// and no writes.
-func (b *BulkEngine) Run(ctx context.Context, target slack.Target, dryRun bool) (BulkReport, error) {
-	now := b.now()
-
-	tracked, err := b.store.ItemsInStream(ctx, BulkStream)
-	if err != nil {
-		return BulkReport{}, err
-	}
-	trackedByRef := make(map[string]notify.KeyedItem, len(tracked))
-	for _, it := range tracked {
-		trackedByRef[strings.TrimPrefix(it.Key, BulkItemPrefix)] = it
-	}
-
-	candidates, err := b.candidates(ctx, trackedByRef)
-	if err != nil {
-		return BulkReport{}, err
-	}
-	report := BulkReport{Considered: len(candidates), DryRun: dryRun}
-
-	// Partition against the ledger.
-	var joining []candidate
-	staying := map[string]candidate{}
-	purged := map[string]bool{}
-
-	for _, c := range candidates {
-		item, isTracked := trackedByRef[c.Ref]
-		switch {
-		case !isTracked:
-			if !c.Done {
-				joining = append(joining, c)
-			}
-		case !item.Cooled(now, b.opts.Cooldown):
-			staying[c.Ref] = c
-		case c.Done:
-			purged[c.Ref] = true
-			report.Purged = append(report.Purged, c.Ref)
-		default:
-			joining = append(joining, c)
-		}
-	}
-
-	// A tracked item GitHub no longer reports at all cannot be refreshed. It is
-	// held until its cooldown expires and then purged, so a deleted repository
-	// or a lost permission cannot pin a row in place forever.
-	for ref, item := range trackedByRef {
-		if _, seen := staying[ref]; seen {
-			continue
-		}
-		if containsRef(joining, ref) || purged[ref] {
-			continue
-		}
-		if item.Cooled(now, b.opts.Cooldown) {
-			purged[ref] = true
-			report.Purged = append(report.Purged, ref)
-		} else {
-			staying[ref] = candidate{Ref: ref, Title: ref, Status: item.Status, Done: item.Done}
-		}
-	}
-
-	// Oldest first: the queue is FIFO by pull request age, not by when Riggs
-	// happened to notice it.
-	sort.SliceStable(joining, func(i, j int) bool {
-		return joining[i].CreatedAt.Before(joining[j].CreatedAt)
-	})
-
-	selected := joining
-	if len(selected) > b.opts.MaxItems {
-		// The ones that miss the cap keep their current home and lead the queue
-		// next pass. They are deliberately NOT removed from it: a row taken out
-		// with nowhere to go would simply vanish.
-		for _, c := range selected[b.opts.MaxItems:] {
-			if _, isTracked := trackedByRef[c.Ref]; isTracked {
-				staying[c.Ref] = c
-				report.Held = append(report.Held, c.Ref)
-			}
-		}
-		selected = selected[:b.opts.MaxItems]
-	}
-	for _, c := range selected {
-		report.Posted = append(report.Posted, c.Ref)
-	}
-
-	if dryRun {
-		sortAll(&report)
-		return report, nil
-	}
-
-	moving := map[string]bool{}
-	for _, c := range selected {
-		moving[c.Ref] = true
-	}
-	if err := b.rebuildPosts(ctx, target, tracked, staying, moving, purged, &report); err != nil {
-		return report, err
-	}
-	if err := b.postDigest(ctx, target, selected, now); err != nil {
-		return report, err
-	}
-
-	sortAll(&report)
-	return report, nil
-}
-
-// rebuildPosts rewrites every existing digest from the items that remain in it,
-// deleting the ones that empty out.
-func (b *BulkEngine) rebuildPosts(ctx context.Context, target slack.Target,
-	tracked []notify.KeyedItem, staying map[string]candidate,
-	moving, purged map[string]bool, report *BulkReport) error {
-
-	postKeys, byPost := notify.GroupByPost(tracked)
-
-	for _, postKey := range postKeys {
-		var rows []blockkit.Row
-		var keep []notify.KeyedItem
-
-		for _, it := range byPost[postKey] {
-			ref := strings.TrimPrefix(it.Key, BulkItemPrefix)
-			if moving[ref] || purged[ref] {
-				continue
-			}
-			c, ok := staying[ref]
-			if !ok {
-				// Neither moving, purged nor refreshed: render it from the
-				// ledger, which holds everything the row needs.
-				c = itemCandidate(ref, it.Item)
-			}
-			rows = append(rows, c.row())
-			keep = append(keep, it)
-		}
-
-		// Forget the rows that left this post before it is rewritten, so a
-		// failure part-way cannot leave an item pointing at a message it is no
-		// longer in.
-		for _, it := range byPost[postKey] {
-			ref := strings.TrimPrefix(it.Key, BulkItemPrefix)
-			if purged[ref] {
-				if err := b.store.DeleteItem(ctx, it.Key); err != nil {
-					return err
-				}
-			}
-		}
-
-		if len(rows) == 0 {
-			if err := b.notifier.DeleteDigest(ctx, postKey, target); err != nil {
-				return err
-			}
-			report.Deleted = append(report.Deleted, postKey)
-			continue
-		}
-
-		digest := blockkit.Digest{
-			Title: bulkTitle, Subtitle: bulkSubtitle,
-			IconURL: bulkIconURL, IconAlt: "GitHub", Rows: rows,
-		}
-		outcome, err := b.notifier.UpdateDigest(ctx, postKey, target, digest, bulkFallback(rows))
-		if err != nil {
-			return err
-		}
-		if outcome == notify.Updated {
-			report.Updated = append(report.Updated, postKey)
-		}
-		// Re-record positions so a later rebuild preserves what the reader sees.
-		for i, it := range keep {
-			ref := strings.TrimPrefix(it.Key, BulkItemPrefix)
-			updated := it.Item
-			updated.Position = i
-			if c, ok := staying[ref]; ok {
-				updated.Status, updated.Done = c.Status, c.Done
-				updated.Title, updated.Author, updated.URL = c.Title, c.Author, c.URL
-			}
-			updated.UpdatedAt = b.now()
-			if err := b.store.SaveItem(ctx, it.Key, updated); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-// postDigest posts the new digest and records its membership.
-func (b *BulkEngine) postDigest(ctx context.Context, target slack.Target, selected []candidate, now time.Time) error {
-	if len(selected) == 0 {
-		return nil
-	}
-	rows := make([]blockkit.Row, 0, len(selected))
-	for _, c := range selected {
-		rows = append(rows, c.row())
-	}
-
-	postKey, err := b.store.NextPostKey(ctx, BulkPostPrefix)
-	if err != nil {
-		return err
-	}
-	digest := blockkit.Digest{
+// Header heads every digest this domain posts.
+func (bulkDomain) Header() bulk.Header {
+	return bulk.Header{
 		Title: bulkTitle, Subtitle: bulkSubtitle,
-		IconURL: bulkIconURL, IconAlt: "GitHub", Rows: rows,
+		IconURL: bulkIconURL, IconAlt: "GitHub",
 	}
-	if _, err := b.notifier.PostDigest(ctx, postKey, target, digest, bulkFallback(rows)); err != nil {
-		return err
-	}
-
-	for i, c := range selected {
-		if err := b.store.SaveItem(ctx, BulkItemPrefix+c.Ref, notify.Item{
-			Stream:   BulkStream,
-			PostKey:  postKey,
-			Position: i,
-			Title:    c.Title,
-			Author:   c.Author,
-			URL:      c.URL,
-			Status:   c.Status,
-			Done:     c.Done,
-			// The cooldown anchor moves only here — on entry to a NEW post.
-			PostedAt:  now,
-			UpdatedAt: now,
-		}); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
-// candidates resolves every pull request this pass is responsible for:
+// Fallback is the notification text: what Slack shows in the sidebar, where
+// blocks are not rendered at all.
+func (bulkDomain) Fallback(rows []blockkit.Row) string { return bulkFallback(rows) }
+
+// Row renders one pull request as a digest row.
+//
+// A done row keeps only the link: there is nothing left to approve or ask about
+// on a pull request that has been reviewed, merged or closed.
+func (bulkDomain) Row(c bulk.Candidate) blockkit.Row {
+	row := blockkit.Row{
+		BlockID:  c.ID,
+		Title:    c.Title,
+		Meta:     rowMeta(c.ID, c.Author),
+		Done:     c.Done,
+		ActionID: BulkActionID,
+		Options: []blockkit.MenuOption{
+			{Text: blockkit.MarkerOpen + "  Open on Browser", Value: IntentOpenBrowser, URL: c.URL},
+		},
+	}
+	if c.Done {
+		return row
+	}
+	row.Options = append(row.Options,
+		blockkit.MenuOption{Text: blockkit.MarkerAsk + "  Ask for Code Review", Value: IntentAskReview})
+	// Approve is deliberately absent: it is specified but not implemented, and
+	// a button that silently does nothing is worse than one that is not there.
+	//
+	// Approve and Merge is offered only on a Dependabot pull request, and is
+	// derived from the author rather than stored: the ledger records what the
+	// row says, not what it is allowed to offer.
+	if IsDependabot(c.Author) {
+		row.Options = append(row.Options,
+			blockkit.MenuOption{Text: blockkit.MarkerDone + "  Approve and Merge", Value: IntentApproveMerge})
+	}
+	return row
+}
+
+// rowMeta is the row's second line: the reference, and who wrote it.
+func rowMeta(ref, author string) string {
+	if author == "" {
+		return "_" + ref + "_"
+	}
+	return fmt.Sprintf("_%s_ by `@%s`", ref, author)
+}
+
+// Candidates resolves every pull request this pass is responsible for:
 //
 //	(we are a direct requested reviewer) ∪ (already in the digest)
-func (b *BulkEngine) candidates(ctx context.Context, tracked map[string]notify.KeyedItem) ([]candidate, error) {
+func (d bulkDomain) Candidates(ctx context.Context, tracked map[string]notify.KeyedItem) ([]bulk.Candidate, error) {
+	e := d.engine
 	seen := map[string]bool{}
 
-	prs, err := b.engine.gh.ReviewRequested(ctx, b.engine.login, searchLimit)
+	prs, err := e.gh.ReviewRequested(ctx, e.login, searchLimit)
 	if err != nil {
 		return nil, fmt.Errorf("discovering review requests: %w", err)
 	}
@@ -423,94 +200,41 @@ func (b *BulkEngine) candidates(ctx context.Context, tracked map[string]notify.K
 	}
 	sort.Strings(refs)
 
-	out := make([]candidate, 0, len(refs))
+	out := make([]bulk.Candidate, 0, len(refs))
 	for _, ref := range refs {
 		repo, number, err := SplitRef(ref)
 		if err != nil {
 			continue
 		}
-		d, err := b.engine.gh.PullRequestDetail(ctx, repo, number)
+		detail, err := e.gh.PullRequestDetail(ctx, repo, number)
 		if err != nil {
 			// A read that failed this pass must not look like a pull request
 			// that disappeared, so it is simply skipped and retried next time.
 			continue
 		}
-		if d.Draft {
+		if detail.Draft {
 			continue
 		}
 		_, isTracked := tracked[ref]
-		if !d.Requested(b.engine.login) && !isTracked {
+		if !detail.Requested(e.login) && !isTracked {
 			// A team-only request nobody adopted.
 			continue
 		}
-		r, err := b.engine.resolveFrom(ctx, d, isTracked)
+		r, err := e.resolveFrom(ctx, detail, isTracked)
 		if err != nil {
 			continue
 		}
 
-		c := candidate{
-			Ref: ref, Title: d.Title, Author: d.Author, URL: d.URL,
+		c := bulk.Candidate{
+			ID: ref, Title: detail.Title, Author: detail.Author, URL: detail.URL,
 			Status: r.State.Token(), Done: !r.State.Reviewable,
-			Dependabot: IsDependabot(d.Author),
 		}
-		if d.CreatedAt != nil {
-			c.CreatedAt = *d.CreatedAt
+		if detail.CreatedAt != nil {
+			c.CreatedAt = *detail.CreatedAt
 		}
 		out = append(out, c)
 	}
 	return out, nil
-}
-
-// itemCandidate rebuilds a row from what the ledger recorded, for a pass that
-// has no fresh upstream read of it.
-func itemCandidate(ref string, it notify.Item) candidate {
-	c := candidate{
-		Ref: ref, Title: it.Title, Author: it.Author, URL: it.URL,
-		Status: it.Status, Done: it.Done, Dependabot: IsDependabot(it.Author),
-	}
-	if c.Title == "" {
-		// Pre-dates the stored columns. The reference is a poor title but it is
-		// never a wrong one.
-		c.Title = ref
-	}
-	return c
-}
-
-// row renders one candidate as a digest row.
-//
-// A done row keeps only the link: there is nothing left to approve or ask about
-// on a pull request that has been reviewed, merged or closed.
-func (c candidate) row() blockkit.Row {
-	row := blockkit.Row{
-		BlockID:  c.Ref,
-		Title:    c.Title,
-		Meta:     c.meta(),
-		Done:     c.Done,
-		ActionID: BulkActionID,
-		Options: []blockkit.MenuOption{
-			{Text: blockkit.MarkerOpen + "  Open on Browser", Value: IntentOpenBrowser, URL: c.URL},
-		},
-	}
-	if c.Done {
-		return row
-	}
-	row.Options = append(row.Options,
-		blockkit.MenuOption{Text: blockkit.MarkerAsk + "  Ask for Code Review", Value: IntentAskReview})
-	// Approve is deliberately absent: it is specified but not implemented, and
-	// a button that silently does nothing is worse than one that is not there.
-	if c.Dependabot {
-		row.Options = append(row.Options,
-			blockkit.MenuOption{Text: blockkit.MarkerDone + "  Approve and Merge", Value: IntentApproveMerge})
-	}
-	return row
-}
-
-// meta is the row's second line: the reference, and who wrote it.
-func (c candidate) meta() string {
-	if c.Author == "" {
-		return "_" + c.Ref + "_"
-	}
-	return fmt.Sprintf("_%s_ by `@%s`", c.Ref, c.Author)
 }
 
 // IsDependabot reports whether a login is Dependabot's. GitHub reports the app
@@ -535,20 +259,9 @@ func bulkFallback(rows []blockkit.Row) string {
 	return fmt.Sprintf("You have %d pull requests waiting for review.", open)
 }
 
-// containsRef reports whether ref is among the candidates.
-func containsRef(cs []candidate, ref string) bool {
-	for _, c := range cs {
-		if c.Ref == ref {
-			return true
-		}
-	}
-	return false
-}
+// bulkRenderer is the draw-only half, for callers with no upstream client —
+// the completer, which rebuilds a message from the ledger after a click.
+func bulkRenderer() bulk.Renderer { return bulkDomain{} }
 
-// sortAll makes the report deterministic, so a test (and a human diffing two
-// runs) sees a stable order.
-func sortAll(r *BulkReport) {
-	for _, s := range [][]string{r.Posted, r.Held, r.Purged, r.Updated, r.Deleted} {
-		sort.Strings(s)
-	}
-}
+// Guard: the domain must satisfy both halves of the contract.
+var _ bulk.Domain = bulkDomain{}

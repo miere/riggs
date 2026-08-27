@@ -3,11 +3,10 @@ package pullrequest
 import (
 	"context"
 	"fmt"
-	"sort"
-	"strings"
 	"time"
 
 	"github.com/miere/riggs-mcp/internal/blockkit"
+	"github.com/miere/riggs-mcp/internal/bulk"
 	"github.com/miere/riggs-mcp/internal/notify"
 	"github.com/miere/riggs-mcp/internal/slack"
 )
@@ -30,6 +29,10 @@ type Completer struct {
 	store    *notify.Store
 	notifier *notify.Notifier
 	poster   slack.Poster
+	// rebuilder redraws the digest a completed row lives in. It is the draw-only
+	// half of the rotation engine, which is precisely what this path needs: no
+	// upstream client, every row from the ledger.
+	rebuilder *bulk.Rebuilder
 	// gh re-reads the pull request when an ask card has to be redrawn. Only
 	// then: the digest renders from the ledger alone, and this stays nil in the
 	// tests that exercise it.
@@ -39,7 +42,11 @@ type Completer struct {
 
 // NewCompleter builds the completer.
 func NewCompleter(store *notify.Store, n *notify.Notifier, poster slack.Poster) *Completer {
-	return &Completer{store: store, notifier: n, poster: poster, now: time.Now}
+	return &Completer{
+		store: store, notifier: n, poster: poster,
+		rebuilder: bulk.NewRebuilder(bulkRenderer(), store, n),
+		now:       time.Now,
+	}
 }
 
 // WithDetailer supplies the read used to redraw an ask card.
@@ -51,6 +58,7 @@ func (c *Completer) WithDetailer(gh Detailer) *Completer {
 // WithClock overrides the clock; intended for tests.
 func (c *Completer) WithClock(now func() time.Time) *Completer {
 	c.now = now
+	c.rebuilder.WithClock(now)
 	return c
 }
 
@@ -77,7 +85,7 @@ func (c *Completer) Complete(ctx context.Context, ref, status string, target sla
 	if err := c.store.SaveItem(ctx, key, item); err != nil {
 		return false, err
 	}
-	if err := c.rebuild(ctx, item.PostKey, target); err != nil {
+	if err := c.rebuilder.Rebuild(ctx, item.PostKey, target); err != nil {
 		return true, err
 	}
 	return true, nil
@@ -150,42 +158,4 @@ func (c *Completer) Fail(ctx context.Context, ref, message string, target slack.
 		return false, fmt.Errorf("reporting the failure for %s: %w", ref, err)
 	}
 	return true, nil
-}
-
-// rebuild rewrites one digest from the items the ledger says are in it.
-//
-// Every row is rendered from stored data, so striking one through cannot
-// disturb the others — which is exactly what would have happened before the row
-// data was recorded, when an unrefreshed row collapsed to its bare reference.
-func (c *Completer) rebuild(ctx context.Context, postKey string, target slack.Target) error {
-	all, err := c.store.ItemsInStream(ctx, BulkStream)
-	if err != nil {
-		return err
-	}
-
-	var members []notify.KeyedItem
-	for _, it := range all {
-		if it.PostKey == postKey {
-			members = append(members, it)
-		}
-	}
-	sort.SliceStable(members, func(i, j int) bool { return members[i].Position < members[j].Position })
-
-	if len(members) == 0 {
-		// Nothing left to show. An empty digest is deleted, not blanked (§7c).
-		return c.notifier.DeleteDigest(ctx, postKey, target)
-	}
-
-	rows := make([]blockkit.Row, 0, len(members))
-	for _, it := range members {
-		ref := strings.TrimPrefix(it.Key, BulkItemPrefix)
-		rows = append(rows, itemCandidate(ref, it.Item).row())
-	}
-
-	digest := blockkit.Digest{
-		Title: bulkTitle, Subtitle: bulkSubtitle,
-		IconURL: bulkIconURL, IconAlt: "GitHub", Rows: rows,
-	}
-	_, err = c.notifier.UpdateDigest(ctx, postKey, target, digest, bulkFallback(rows))
-	return err
 }

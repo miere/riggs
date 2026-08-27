@@ -105,5 +105,18 @@ func (f *Fake) Posts() []Call {
 	return out
 }
 
+// Updates returns only the update calls. The symmetric counterpart to Posts:
+// a digest that is rewritten in place makes one of these and no post at all,
+// and telling the two apart is most of what a rotation test asserts.
+func (f *Fake) Updates() []Call {
+	var out []Call
+	for _, c := range f.Calls {
+		if c.Kind == "update" {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 // Reset forgets recorded calls, keeping the scripted errors.
 func (f *Fake) Reset() { f.Calls = nil }

@@ -22,7 +22,13 @@ type bulkRig struct {
 	gh    *fakeGH
 	slack *slacktest.Fake
 	store *notify.Store
-	clock time.Time
+	// notifier and engine are kept so a test can rebuild the digest engine with
+	// different options against the SAME ledger — the state lives there, not in
+	// the engine, so a rebuilt engine picks up exactly where the last one left
+	// off.
+	notifier *notify.Notifier
+	engine   *Engine
+	clock    time.Time
 }
 
 var epoch = time.Date(2026, 8, 26, 9, 0, 0, 0, time.UTC)
@@ -39,9 +45,15 @@ func newBulkRig(t *testing.T, gh *fakeGH, opts BulkOptions) *bulkRig {
 	notifier := notify.New(store, fake)
 	engine := NewEngine(gh, store, notifier, "miere", "U1")
 
-	r := &bulkRig{gh: gh, slack: fake, store: store, clock: epoch}
+	r := &bulkRig{gh: gh, slack: fake, store: store, notifier: notifier, engine: engine, clock: epoch}
 	r.bulk = NewBulkEngine(engine, store, notifier, opts).WithClock(func() time.Time { return r.clock })
 	return r
+}
+
+// reopen rebuilds the digest engine with new options over the same ledger.
+func (r *bulkRig) reopen(opts BulkOptions) {
+	r.bulk = NewBulkEngine(r.engine, r.store, r.notifier, opts).
+		WithClock(func() time.Time { return r.clock })
 }
 
 // run performs one pass and fails the test on error.
@@ -342,7 +354,7 @@ func TestBulkHoldsWhatMissesTheCap(t *testing.T) {
 	r.slack.Reset()
 
 	// Both have cooled, but only one may move.
-	r.bulk.opts.MaxItems = 1
+	r.reopen(BulkOptions{MaxItems: 1})
 	r.advance(DefaultCooldown + time.Minute)
 	report := r.run(t)
 

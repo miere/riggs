@@ -14,6 +14,7 @@ import (
 	"github.com/miere/riggs-mcp/internal/launchd"
 	"github.com/miere/riggs-mcp/internal/pullrequest"
 	"github.com/miere/riggs-mcp/internal/slack"
+	"github.com/miere/riggs-mcp/internal/ticket"
 	"github.com/miere/riggs-mcp/internal/updates"
 	"github.com/miere/riggs-mcp/internal/version"
 )
@@ -152,10 +153,29 @@ func (a *Application) registerInteractions(router *daemon.Router, creds slack.Cr
 			return a.settle(ctx, creds, in, result, err, pullrequest.ReasonMerged)
 		}))
 
-	// IntentOpenBrowser is deliberately unregistered. Slack opens the link
-	// itself; the interaction it also sends has nothing to do, and a handler
-	// that exists only to return nil is worse than the router's own "no handler"
-	// log line.
+	// The ticket digest's only verb. It reaches a different person, in a
+	// different channel, with different wording — all of which come from
+	// `ai-assistance`, never from the pull-request queue's `review-request`.
+	//
+	// "Assign to Me" is deliberately unregistered, because it is deliberately
+	// not rendered (§7bb). The verb behind it exists; the option does not.
+	router.Handle(ticket.BulkActionID, ticket.IntentAskAssist,
+		daemon.HandlerFunc(func(ctx context.Context, in slack.Interaction) error {
+			asker, closer, err := assistAskerFor(a.cfg)
+			if err != nil {
+				return err
+			}
+			defer closer.Close()
+			// in.UserID is whoever clicked: they are copied in on the tag, so
+			// the recipient can see whose request it is.
+			_, err = asker.Ask(ctx, in.Item, in.UserID, a.targetFor(creds, in))
+			return err
+		}))
+
+	// IntentOpenBrowser is deliberately unregistered, on both digests. Slack
+	// opens the link itself; the interaction it also sends has nothing to do,
+	// and a handler that exists only to return nil is worse than the router's
+	// own "no handler" log line.
 }
 
 // settle records what an approval did to the digest.
