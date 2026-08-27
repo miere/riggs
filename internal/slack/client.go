@@ -114,6 +114,32 @@ func (a *API) Post(ctx context.Context, target Target, msg Message) (Ref, error)
 	return Ref{Channel: firstNonEmpty(out.Channel, channel), TS: out.TS}, nil
 }
 
+// PostEphemeral sends a message only userID can see.
+//
+// It returns no Ref on purpose: an ephemeral message has a `message_ts` that
+// cannot be updated, deleted or replied to, so recording one would invite a
+// caller to try. Nothing about it goes in the ledger either — it is a remark to
+// one person, not a card with a life of its own.
+//
+// This is what a failed click reports through. The alternative, a real message,
+// puts one person's mistyped intent in front of a whole channel and leaves it
+// there; the alternative to *that* is the daemon log, which is where this
+// started.
+func (a *API) PostEphemeral(ctx context.Context, target Target, userID string, msg Message) error {
+	channel, err := a.channelFor(ctx, target)
+	if err != nil {
+		return err
+	}
+	body := map[string]any{"channel": channel, "user": userID, "text": msg.Text}
+	if msg.Blocks != nil {
+		body["blocks"] = msg.Blocks
+	}
+	if msg.ThreadTS != "" {
+		body["thread_ts"] = msg.ThreadTS
+	}
+	return a.call(ctx, target.BotToken, "chat.postEphemeral", body, nil)
+}
+
 // Update replaces a message in place.
 func (a *API) Update(ctx context.Context, target Target, ref Ref, msg Message) error {
 	body := map[string]any{"channel": ref.Channel, "ts": ref.TS, "text": msg.Text}

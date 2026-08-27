@@ -204,7 +204,9 @@ func (p *Publisher) Update(ctx context.Context, userID string) error {
 		// The panel is redrawn either way: the button still applies, and a
 		// Home tab frozen mid-click reads as a button that did nothing.
 		p.republish(ctx, userID)
-		return err
+		// Marked: p.say has already put this in front of the admin, and the
+		// daemon would otherwise DM them the same news a second time.
+		return slack.Reported(err)
 	}
 	p.deps.Logger.Info("app home update installed",
 		"user", userID, "tag", result.Tag, "path", result.Path, "backup", result.BackupPath)
@@ -227,7 +229,7 @@ func (p *Publisher) Update(ctx context.Context, userID string) error {
 		p.say(ctx, fmt.Sprintf("%s %s is installed, but the restart failed: %v. Restart Riggs to run it.",
 			blockkit.MarkerWarning, result.Tag, err))
 		p.republish(ctx, userID)
-		return err
+		return slack.Reported(err)
 	}
 	// No republish on the success path: this process is on its way out, and the
 	// view it would publish is the OLD version's. The restarted daemon
@@ -255,7 +257,7 @@ func (p *Publisher) Restart(ctx context.Context, userID string) error {
 		p.deps.Logger.Warn("app home restart requested but none is configured", "user", userID)
 		p.say(ctx, fmt.Sprintf("%s Riggs has no supervisor configured, so it cannot restart itself.",
 			blockkit.MarkerWarning))
-		return fmt.Errorf("apphome: no restart configured")
+		return slack.Reported(fmt.Errorf("apphome: no restart configured"))
 	}
 
 	// Said BEFORE the restart, not after: after, this process is gone.
@@ -266,7 +268,7 @@ func (p *Publisher) Restart(ctx context.Context, userID string) error {
 		p.deps.Logger.Error("app home restart failed", "user", userID, "error", err)
 		p.say(ctx, fmt.Sprintf("%s Restart failed: %v. Riggs is still running the old process.",
 			blockkit.MarkerFailed, err))
-		return err
+		return slack.Reported(err)
 	}
 	return nil
 }

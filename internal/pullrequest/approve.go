@@ -279,8 +279,12 @@ func loginOr(login string) string {
 // fail records and announces a failure. The error is returned as part of the
 // result rather than as a Go error so the CLI still prints the sentence that
 // was posted to Slack.
+//
+// It is marked as reported, because a.say has just put it in the thread the
+// click came from. Without the mark the daemon would tell the clicker a second
+// time, in a second place, about a failure they are already looking at.
 func (a *Approver) fail(ctx context.Context, r ApproveResult, target slack.Target, channel, thread, msg string) (ApproveResult, error) {
 	r.Message, r.Error = msg, msg
 	a.say(ctx, target, channel, thread, msg)
-	return r, fmt.Errorf("%s", msg)
+	return r, slack.Reported(fmt.Errorf("%s", msg))
 }

@@ -47,7 +47,46 @@ func (a *Application) runDaemon(ctx context.Context) error {
 	a.registerHomeInteractions(router, home)
 
 	listener := daemon.NewSocketListener(creds, logger)
-	return daemon.New(listener, router, creds.Profile, logger).WithAppHome(home).Run(ctx)
+	return daemon.New(listener, router, creds.Profile, logger).
+		WithAppHome(home).
+		WithReporter(&clickReporter{api: slack.NewAPI(), creds: creds}).
+		Run(ctx)
+}
+
+// clickReporter tells whoever clicked that their click failed.
+//
+// It is the backstop under the handlers that announce their own failures, not a
+// replacement for them: those name the pull request and the verb, and land in
+// the thread the row is in. This one knows only that something failed, so it
+// says so to one person and gets out of the way. What it guarantees is the part
+// that was missing — that no click is silent, including from a handler nobody
+// has taught to speak yet.
+type clickReporter struct {
+	api   *slack.API
+	creds slack.Credentials
+}
+
+// ReportFailure posts the cause where the click came from.
+//
+// Ephemeral in a channel: the failure is one person's to see, and a real
+// message would leave it in front of everyone permanently. A Home tab click has
+// no channel at all — the surface is private already — so it falls back to a DM,
+// which is the only way to reach that user about it.
+func (r *clickReporter) ReportFailure(ctx context.Context, in slack.Interaction, cause error) error {
+	text := fmt.Sprintf("%s That did not work — %v", blockkit.MarkerFailed, cause)
+	msg := slack.Message{Text: text, Blocks: blockkit.ContextBlocks(text)}
+
+	target := slack.Target{Profile: r.creds.Profile, BotToken: r.creds.BotToken}
+	if in.Channel == "" {
+		target.AdminUserID = in.UserID
+		_, err := r.api.Post(ctx, target, msg)
+		return err
+	}
+	target.Channel = in.Channel
+	// Threaded when the click came from a message, so the answer sits under the
+	// card or digest it is about rather than at the bottom of the channel.
+	msg.ThreadTS = in.MessageTS
+	return r.api.PostEphemeral(ctx, target, in.UserID, msg)
 }
 
 // appHome assembles the Home tab publisher.
@@ -123,7 +162,13 @@ func (a *Application) registerInteractions(router *daemon.Router, creds slack.Cr
 			defer closer.Close()
 			// in.UserID is whoever clicked: they are copied in on the tag, so
 			// the reviewer can see whose request it is.
-			_, err = asker.Ask(ctx, in.Item, in.UserID, a.targetFor(creds, in))
+			//
+			// The failure thread is the digest's, because the card this posts
+			// goes somewhere the clicker cannot see — so a silent failure and a
+			// delivered request look the same from where they are standing.
+			_, err = asker.
+				WithFailureThread(in.Channel, in.MessageTS).
+				Ask(ctx, in.Item, in.UserID, a.targetFor(creds, in))
 			return err
 		}))
 

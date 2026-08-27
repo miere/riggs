@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/miere/riggs-mcp/internal/blockkit"
 	"github.com/miere/riggs-mcp/internal/config"
 	"github.com/miere/riggs-mcp/internal/github"
 	"github.com/miere/riggs-mcp/internal/notify"
@@ -321,6 +322,106 @@ func TestAskFailsClosedWhenGitHubDoes(t *testing.T) {
 	}
 	if len(fake.Calls) != 0 {
 		t.Fatal("Ask posted a card it could not render")
+	}
+}
+
+// --- announcing a failure ---------------------------------------------------
+
+// The card this action posts goes somewhere the clicker cannot see — another
+// channel, or a DM to the reviewer — so a request that died on the way and one
+// that was delivered look identical from the digest. That is the whole reason
+// this failure has to be announced.
+func TestAFailedAskIsAnnouncedUnderTheDigestRow(t *testing.T) {
+	fake := slacktest.New()
+	d := &detailer{err: errors.New("404")}
+	store, n := askerStore(t, fake)
+
+	_, err := NewAsker(d, store, n, fake, "U0B6HK02YBB", "C-reviews", "p").
+		WithFailureThread("C-digest", "1700000000.000100").
+		Ask(context.Background(), "o/r#7", "U0B20G0ET9T", target)
+	if err == nil {
+		t.Fatal("Ask succeeded despite a failed GitHub read")
+	}
+
+	posts := fake.Posts()
+	if len(posts) != 1 {
+		t.Fatalf("posted %d message(s), want 1 announcement", len(posts))
+	}
+	got := posts[0]
+	if got.Target.Channel != "C-digest" {
+		t.Errorf("announced in %q, want the digest's channel", got.Target.Channel)
+	}
+	if got.Msg.ThreadTS != "1700000000.000100" {
+		t.Errorf("announced at top level, want the digest row's thread: %q", got.Msg.ThreadTS)
+	}
+	for _, want := range []string{blockkit.MarkerFailed, "o/r#7", "404"} {
+		if !strings.Contains(got.Msg.Text, want) {
+			t.Errorf("announcement %q does not mention %q", got.Msg.Text, want)
+		}
+	}
+	// Marked, so the daemon does not tell them a second time somewhere else.
+	if !slack.WasReported(err) {
+		t.Error("the announced failure was not marked as reported")
+	}
+}
+
+// A CLI ask has a terminal to fail into. Posting a card about it would put a
+// message in a channel nobody was looking at on behalf of somebody who is
+// already reading the error.
+func TestACLIAskAnnouncesNothing(t *testing.T) {
+	fake := slacktest.New()
+	d := &detailer{err: errors.New("404")}
+	store, n := askerStore(t, fake)
+
+	_, err := NewAsker(d, store, n, fake, "U0B6HK02YBB", "C-reviews", "p").
+		Ask(context.Background(), "o/r#7", "U0B20G0ET9T", target)
+	if err == nil {
+		t.Fatal("Ask succeeded despite a failed GitHub read")
+	}
+	if len(fake.Calls) != 0 {
+		t.Fatalf("announced a failure with no thread to announce into: %v", fake.Calls)
+	}
+	if slack.WasReported(err) {
+		t.Error("an unannounced failure claimed to have been reported")
+	}
+}
+
+// If the announcement itself cannot be posted, the daemon's own reporter is the
+// only thing left that can reach the user — so the error must not claim to have
+// been handled.
+func TestAnAnnouncementThatFailsLeavesTheErrorUnreported(t *testing.T) {
+	fake := slacktest.New()
+	fake.PostErr = errors.New("slack is down")
+	d := &detailer{err: errors.New("404")}
+	store, n := askerStore(t, fake)
+
+	_, err := NewAsker(d, store, n, fake, "U0B6HK02YBB", "C-reviews", "p").
+		WithFailureThread("C-digest", "1700000000.000100").
+		Ask(context.Background(), "o/r#7", "U0B20G0ET9T", target)
+	if err == nil {
+		t.Fatal("Ask succeeded despite a failed GitHub read")
+	}
+	if slack.WasReported(err) {
+		t.Error("an announcement that failed to post still marked the error reported")
+	}
+	if !strings.Contains(err.Error(), "404") {
+		t.Errorf("the original cause was lost: %v", err)
+	}
+}
+
+// A successful ask announces nothing: the card is the answer.
+func TestASuccessfulAskAnnouncesNoFailure(t *testing.T) {
+	fake := slacktest.New()
+	asker, _ := newAsker(t, fake, "C-reviews")
+
+	if _, err := asker.WithFailureThread("C-digest", "1700000000.000100").
+		Ask(context.Background(), "o/r#7", "U0B20G0ET9T", target); err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	for _, c := range fake.Posts() {
+		if strings.Contains(c.Msg.Text, blockkit.MarkerFailed) {
+			t.Errorf("a successful ask announced a failure: %q", c.Msg.Text)
+		}
 	}
 }
 
