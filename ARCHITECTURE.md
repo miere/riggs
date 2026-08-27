@@ -184,6 +184,9 @@ internal/
   github/                        # REST client, ETag cache (§8)
   jira/                          # external seam
   slackmd/                       # GitHub Markdown -> Slack mrkdwn (§7d)
+  apphome/                       # the App Home tab and its Update button (§7e)
+  updates/                       # release lookup + binary self-update (§7e)
+  version/                       # the build version, stamped by the release workflow
 ```
 
 Rules:
@@ -498,6 +501,139 @@ explain the change.
 An HTML comment (the template nobody deletes) and a badges-only paragraph are
 skipped rather than counted, because both are routinely the first thing in a
 body and neither says anything.
+
+## 7e. The App Home tab
+
+`internal/apphome` renders the one surface Riggs has that is about *Riggs*
+rather than about somebody's pull requests, and `internal/updates` is what makes
+its single control mean anything.
+
+The view, top to bottom: the portrait, the running version, and then — behind a
+divider — the latest release's notes with an **Update** button beside them.
+
+### The audience split is the design
+
+Everyone in the workspace can open the app and see the portrait and the version.
+**Everything from the divider onwards is the admin's alone.** A non-admin is not
+shown a greyed-out button; they are shown nothing, because a control you cannot
+use is worse than one that was never there — it invites a click and then
+explains why it will not work.
+
+The gate is `admin.slack-user-id`. An **unset** admin matches *nobody*, not
+everybody: the other reading of an empty setting hands a binary swap to the whole
+workspace.
+
+It is also why the release lookup runs for the admin only. For everyone else it
+is not merely wasted work — it is a GitHub request per curious colleague, against
+a 60-an-hour unauthenticated quota, for a section they will never be shown.
+
+### Versioning
+
+Riggs versions itself the way Murtaugh does, and for the same reason this tab
+needs: **a pushed tag is the release**. `.github/workflows/release.yml` stamps
+the tag into `internal/version.Version` via ldflags and publishes one asset per
+platform, named `riggs-<tag>-<goos>-<goarch>`.
+
+That name is a **contract** between the workflow and `updates.AssetName`, which
+is the function the Update button looks up. It lives in one place because a
+mismatch produces a release that installs on nobody's machine — and nothing
+fails until somebody clicks.
+
+The release job re-reads the built binary's own `version` output before
+publishing. It catches the single mistake the workflow can make unaided: an
+ldflags path that no longer matches the package, which builds perfectly and
+reports `dev` forever.
+
+### A dev build must always be able to take the latest stable
+
+This is the **one place Riggs deliberately diverges from Murtaugh**. Murtaugh
+refuses to update a `dev` binary, on the grounds that overwriting a local
+checkout would surprise the developer. Riggs is specified the other way, and the
+reason is situational rather than philosophical: the daemon under launchd is
+routinely running a binary built from a working tree, so refusing it would remove
+the button precisely on the machine that needs it.
+
+So a running version that is not a release — `dev`, or the bare VCS revision
+`version.String()` falls back to — counts as *behind* any published release.
+Two real versions are still compared by semver, and an older tag is never
+offered: that is a re-tagged or yanked release, and a silent downgrade is worse
+than doing nothing.
+
+### The notes are converted, not copied
+
+The release body is GitHub-flavoured Markdown and the Home tab is Slack mrkdwn.
+It goes through `internal/slackmd` (§7d) — the same converter the card bodies
+use, reused rather than re-implemented — so headings flatten to a bold line,
+`**bold**` becomes `*bold*` rather than an italic run, a fence loses its language
+tag, and links become `text [N]`.
+
+Footnotes **are** appended here and deliberately are not on a digest row. Release
+notes are read on purpose, and a note whose every "see the PR" has been flattened
+to "see [4]" with no list to resolve it against has lost the thing it pointed at.
+A two-line card excerpt is read at a glance and would be buried by the same list.
+The release's own page is appended last, because the one link a reader reliably
+wants is never in the body.
+
+### Publishing
+
+`app_home_opened` arrives over the **Events API**, not as an interaction, so the
+daemon's `Listener` delivers into a `Handlers` struct with a field for each. They
+are genuinely different kinds: a click is routed by `(action_id, intent)`, while
+this is a user simply looking at the app, with no control and no message behind
+it. The same event also fires for the *messages* tab, which is a DM being read
+and has nothing to publish.
+
+The rendered view is fingerprinted and a publish that would change nothing is
+skipped. `app_home_opened` fires on every glance at the app, and republishing an
+identical view is a Slack call bought for nothing.
+
+### The Update button
+
+Its `action_id`/value pair is `home_update`/`update` — **bare tokens**, like every
+other control Riggs renders, so the daemon's routing table can match them exactly
+(§7b). The release tag is deliberately *not* the value. It would make the value
+vary, which a table cannot match on, and a Home tab published on Tuesday and
+clicked on Friday would install Tuesday's idea of the latest release. The handler
+re-resolves what to install at click time.
+
+The admin gate is re-checked in the handler. The button is only ever rendered for
+the admin, but an `action_id` and a value are just strings in a payload, and this
+one replaces a binary.
+
+The swap is **staged, verified, then renamed**:
+
+1. the asset is written beside the target and made executable;
+2. it is run once (`riggs version`) to prove it is a working Riggs — a truncated
+   download, an HTML error page or the wrong architecture all fail here, with the
+   original still in place and the daemon still running it;
+3. the old binary is **copied** aside as `.backup` (not renamed — renaming the
+   running binary out of the way is legal on Unix and leaves the daemon running
+   from a path that no longer holds what it says it does);
+4. the new file is renamed over it, within one directory, so there is no window
+   in which the path does not resolve.
+
+A symlinked binary has its **target** replaced; renaming over the link turns it
+into a regular file and silently strands anything else pointing at the target.
+
+Then `launchctl kickstart -k` — not "exit and trust `KeepAlive`", even though the
+plist sets it. Exiting is a request that the agent be restarted *if* someone is
+watching; a Riggs started by hand for an afternoon's debugging would simply
+vanish. Asking launchd directly also means it can *say* when launchd is not in
+charge, and the admin is told to restart it themselves rather than waiting for a
+daemon that is never coming back.
+
+The outcome is DMed to the admin, because the interesting half of it lands after
+this process has gone. On the success path the tab is deliberately **not**
+republished: the view this process would draw is the old version's, and the
+restarted daemon publishes the new one on the next open.
+
+### Slack app configuration
+
+The Home tab is not code alone. The app at api.slack.com needs **App Home → Home
+Tab enabled** and an **`app_home_opened` event subscription**, plus the
+`views.publish` capability the bot token already carries. Without them the daemon
+runs perfectly and the tab stays empty, with nothing in the log to say why —
+because the event never arrives.
 
 ## 8. GitHub access
 
@@ -948,6 +1084,7 @@ one *would* live at still decides, which is the state a fresh machine and
 | 21 | Ticket bodies too; `internal/ai` decommissioned | done |
 | 22 | Track and settle the ask-review card (§7bb) | done |
 | 23 | Text-presentation glyphs, enforced by a source scan | done |
+| 24 | The App Home tab, versioning, and self-update (§7e) | done |
 
 ## 13b. Cutover
 
@@ -973,6 +1110,19 @@ Rollback: the previous job and rule definitions are captured under
 `/tmp/riggs-cutover-backup/` and can be restored with the same commands.
 
 ## 14. Change log
+
+- **unreleased** — Phase 24. The App Home tab (§7e). Riggs gains a version
+  (`internal/version`, stamped by a tagged release), a release lookup
+  (`internal/updates`) and a Home surface (`internal/apphome`) that shows the
+  portrait and the running version to everyone, and the latest release's notes
+  plus an Update button to the admin alone. The daemon grows its first Events
+  API subscription, so `Listener` now delivers into a `Handlers` struct rather
+  than a bare interaction callback. `internal/slackmd` is reused for the notes —
+  with footnotes, unlike a card excerpt. Two GitHub Actions workflows arrive
+  with it: CI (fmt, vet, build, `-race`) and a tag-triggered release that
+  publishes the four platform binaries the Update button downloads. Diverges
+  from Murtaugh on one rule, deliberately: a `dev` build IS offered the latest
+  stable, because the launchd daemon routinely runs one.
 
 - **unreleased** — Phase 6. Riggs gets its own Slack app and its own inbound
   half: `riggs daemon` (§7b), a Socket Mode listener and an

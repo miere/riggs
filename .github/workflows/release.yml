@@ -1,0 +1,102 @@
+name: Release riggs binaries
+
+# Riggs versions itself the way Murtaugh does: a pushed tag IS the release. The
+# tag name is stamped into the binary via ldflags, so `riggs version` and the
+# App Home tab report the same string the release is published under — which is
+# the whole premise of the Home tab's update check, since it compares the two.
+on:
+  push:
+    tags:
+      - '*'
+
+permissions:
+  contents: write
+
+# Never cancel a release in flight: a half-uploaded set of assets is a release
+# whose Update button fails on exactly one architecture.
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            goos: linux
+            goarch: amd64
+          - runner: ubuntu-latest
+            goos: linux
+            goarch: arm64
+          - runner: macos-latest
+            goos: darwin
+            goarch: amd64
+          - runner: macos-latest
+            goos: darwin
+            goarch: arm64
+
+    env:
+      BINARY_NAME: riggs
+      TAG_NAME: ${{ github.ref_name }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build binary
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p dist
+          # This name is a CONTRACT with internal/updates.AssetName, which is
+          # what the Home tab's Update button looks up. Changing it here without
+          # changing it there produces a release that installs on nobody's
+          # machine.
+          asset_name="${BINARY_NAME}-${TAG_NAME}-${{ matrix.goos }}-${{ matrix.goarch }}"
+
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CGO_ENABLED=0 \
+            go build -trimpath \
+              -ldflags="-s -w -X github.com/miere/riggs-mcp/internal/version.Version=${TAG_NAME}" \
+              -o "dist/${asset_name}" ./cmd/riggs
+
+          chmod +x "dist/${asset_name}"
+          echo "ASSET_PATH=dist/${asset_name}" >> "$GITHUB_ENV"
+
+      # The staged binary is asked its version before it is published. It is the
+      # same probe the updater runs after downloading, and it catches the one
+      # mistake this workflow can make on its own: an ldflags path that no
+      # longer matches the package, which builds cleanly and reports "dev"
+      # forever.
+      #
+      # Only on the legs whose binary this runner can actually execute — the
+      # cross-compiled ones would fail on `exec format error`, which is not a
+      # release problem.
+      - name: Verify the stamped version
+        if: (matrix.goos == 'linux' && matrix.goarch == 'amd64') || (matrix.goos == 'darwin' && matrix.goarch == 'arm64')
+        shell: bash
+        run: |
+          set -euo pipefail
+          got="$("${ASSET_PATH}" version)"
+          if [ "$got" != "${TAG_NAME}" ]; then
+            echo "::error::built binary reports version '${got}', expected '${TAG_NAME}'"
+            exit 1
+          fi
+          echo "version stamp OK: ${got}"
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG_NAME }}
+          files: ${{ env.ASSET_PATH }}
+          overwrite_files: true

@@ -1,0 +1,54 @@
+name: CI
+
+# Gate every pull request on the same checks that run locally: formatting, vet,
+# a clean build, and the race-enabled test suite. Also runs on pushes to main so
+# the trunk is always known-green even when a change lands without a PR.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A new push to a PR supersedes the previous run; cancel the stale one so we do
+# not pay for checks on commits the author has already replaced.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Format, vet, build & test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify gofmt formatting
+        run: |
+          set -euo pipefail
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::The following files are not gofmt-formatted. Run 'gofmt -w .':"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      # Nothing here needs a network or a credential: the Slack, GitHub and Jira
+      # clients are all driven through their HTTP seams, and `gh` is behind a
+      # Runner. A test that reached out would fail here, which is the point.
+      - name: Test (race detector)
+        run: go test -race ./...
