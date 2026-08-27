@@ -26,6 +26,16 @@ type Item struct {
 	// Position is the item's index within that message, so a rebuild preserves
 	// the order the reader last saw.
 	Position int
+	// Title, Author and URL are what the row renders.
+	//
+	// They live here so a post can be rebuilt from the ledger ALONE. Every
+	// rebuild used to need a fresh upstream read for every row in the message,
+	// and any row it could not refetch degraded to its bare reference with a
+	// dead link. Acting on one item — striking it through when its approval
+	// lands — would otherwise have wrecked every other row beside it.
+	Title  string
+	Author string
+	URL    string
 	// Status is the opaque domain label for what the row last said. The ledger
 	// never interprets it.
 	Status string
@@ -58,7 +68,7 @@ func (i Item) Cooled(now time.Time, cooldown time.Duration) bool {
 // Item returns the tracked item for key, if there is one.
 func (s *Store) Item(ctx context.Context, key string) (Item, bool, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT stream, post_key, position, status, done, posted_at, updated_at
+		`SELECT stream, post_key, position, title, author, url, status, done, posted_at, updated_at
 		   FROM items WHERE key = ?`, key)
 	it, err := scanItem(row)
 	if err == sql.ErrNoRows {
@@ -73,14 +83,16 @@ func (s *Store) Item(ctx context.Context, key string) (Item, bool, error) {
 // SaveItem inserts or replaces the tracked item for key.
 func (s *Store) SaveItem(ctx context.Context, key string, it Item) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO items (key, stream, post_key, position, status, done, posted_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO items (key, stream, post_key, position, title, author, url, status, done, posted_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(key) DO UPDATE SET
 		   stream = excluded.stream, post_key = excluded.post_key,
-		   position = excluded.position, status = excluded.status,
+		   position = excluded.position, title = excluded.title,
+		   author = excluded.author, url = excluded.url, status = excluded.status,
 		   done = excluded.done, posted_at = excluded.posted_at,
 		   updated_at = excluded.updated_at`,
-		key, it.Stream, it.PostKey, it.Position, it.Status, boolToInt(it.Done),
+		key, it.Stream, it.PostKey, it.Position, it.Title, it.Author, it.URL,
+		it.Status, boolToInt(it.Done),
 		it.PostedAt.UTC().Format(time.RFC3339), it.UpdatedAt.UTC().Format(time.RFC3339))
 	if err != nil {
 		return fmt.Errorf("notify: saving item %s: %w", key, err)
@@ -101,7 +113,7 @@ func (s *Store) DeleteItem(ctx context.Context, key string) error {
 // several messages gets each one's rows already in reading order.
 func (s *Store) ItemsInStream(ctx context.Context, stream string) ([]KeyedItem, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT key, stream, post_key, position, status, done, posted_at, updated_at
+		`SELECT key, stream, post_key, position, title, author, url, status, done, posted_at, updated_at
 		   FROM items WHERE stream = ? ORDER BY post_key, position`, stream)
 	if err != nil {
 		return nil, fmt.Errorf("notify: listing items in %s: %w", stream, err)
@@ -114,7 +126,8 @@ func (s *Store) ItemsInStream(ctx context.Context, stream string) ([]KeyedItem, 
 		var it Item
 		var done int
 		var postedAt, updatedAt string
-		if err := rows.Scan(&key, &it.Stream, &it.PostKey, &it.Position, &it.Status,
+		if err := rows.Scan(&key, &it.Stream, &it.PostKey, &it.Position,
+			&it.Title, &it.Author, &it.URL, &it.Status,
 			&done, &postedAt, &updatedAt); err != nil {
 			return nil, fmt.Errorf("notify: scanning items in %s: %w", stream, err)
 		}
@@ -181,7 +194,8 @@ func scanItem(row *sql.Row) (Item, error) {
 	var it Item
 	var done int
 	var postedAt, updatedAt string
-	if err := row.Scan(&it.Stream, &it.PostKey, &it.Position, &it.Status,
+	if err := row.Scan(&it.Stream, &it.PostKey, &it.Position,
+		&it.Title, &it.Author, &it.URL, &it.Status,
 		&done, &postedAt, &updatedAt); err != nil {
 		return Item{}, err
 	}

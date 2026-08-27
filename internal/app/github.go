@@ -102,6 +102,17 @@ func askerFor(cfg *config.Config) (*pullrequest.Asker, io.Closer, error) {
 	return asker, store, nil
 }
 
+// completerFor assembles the digest completer. It needs no GitHub client: every
+// row renders from the ledger (§9b).
+func completerFor(cfg *config.Config) (*pullrequest.Completer, io.Closer, error) {
+	store, err := ledger(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	api := slack.NewAPI()
+	return pullrequest.NewCompleter(store, notify.New(store, api), api), store, nil
+}
+
 // approverFor assembles the approver for one invocation.
 func approverFor(cfg *config.Config) (*pullrequest.Approver, io.Closer, error) {
 	store, err := ledger(cfg)

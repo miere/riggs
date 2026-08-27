@@ -299,9 +299,9 @@ func (b *BulkEngine) rebuildPosts(ctx context.Context, target slack.Target,
 			}
 			c, ok := staying[ref]
 			if !ok {
-				// Neither moving, purged nor refreshed: leave it exactly as the
-				// ledger last recorded it.
-				c = candidate{Ref: ref, Title: ref, Status: it.Status, Done: it.Done}
+				// Neither moving, purged nor refreshed: render it from the
+				// ledger, which holds everything the row needs.
+				c = itemCandidate(ref, it.Item)
 			}
 			rows = append(rows, c.row())
 			keep = append(keep, it)
@@ -345,6 +345,7 @@ func (b *BulkEngine) rebuildPosts(ctx context.Context, target slack.Target,
 			updated.Position = i
 			if c, ok := staying[ref]; ok {
 				updated.Status, updated.Done = c.Status, c.Done
+				updated.Title, updated.Author, updated.URL = c.Title, c.Author, c.URL
 			}
 			updated.UpdatedAt = b.now()
 			if err := b.store.SaveItem(ctx, it.Key, updated); err != nil {
@@ -382,6 +383,9 @@ func (b *BulkEngine) postDigest(ctx context.Context, target slack.Target, select
 			Stream:   BulkStream,
 			PostKey:  postKey,
 			Position: i,
+			Title:    c.Title,
+			Author:   c.Author,
+			URL:      c.URL,
 			Status:   c.Status,
 			Done:     c.Done,
 			// The cooldown anchor moves only here — on entry to a NEW post.
@@ -455,6 +459,21 @@ func (b *BulkEngine) candidates(ctx context.Context, tracked map[string]notify.K
 		out = append(out, c)
 	}
 	return out, nil
+}
+
+// itemCandidate rebuilds a row from what the ledger recorded, for a pass that
+// has no fresh upstream read of it.
+func itemCandidate(ref string, it notify.Item) candidate {
+	c := candidate{
+		Ref: ref, Title: it.Title, Author: it.Author, URL: it.URL,
+		Status: it.Status, Done: it.Done, Dependabot: IsDependabot(it.Author),
+	}
+	if c.Title == "" {
+		// Pre-dates the stored columns. The reference is a poor title but it is
+		// never a wrong one.
+		c.Title = ref
+	}
+	return c
 }
 
 // row renders one candidate as a digest row.

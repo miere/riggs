@@ -140,6 +140,12 @@ func (s *Store) migrate(ctx context.Context) error {
 	// means this ledger already has it.
 	for _, alter := range []string{
 		`ALTER TABLE cards ADD COLUMN state TEXT NOT NULL DEFAULT ''`,
+		// A digest row must be renderable from the ledger alone. Without these
+		// a rebuild that had no fresh upstream read fell back to the bare
+		// reference — losing the title and, worse, the link.
+		`ALTER TABLE items ADD COLUMN title TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE items ADD COLUMN author TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE items ADD COLUMN url TEXT NOT NULL DEFAULT ''`,
 	} {
 		if _, err := s.db.ExecContext(ctx, alter); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			return fmt.Errorf("notify: %s: %w", alter, err)
