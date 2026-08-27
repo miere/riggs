@@ -11,6 +11,14 @@ import (
 	"github.com/miere/riggs-mcp/internal/slack"
 )
 
+// acker is the acknowledgement half of socketmode.Client, extracted so dispatch
+// can be driven in a test. The rule it enforces — ack everything — is the kind
+// that is broken by a MISSING branch, which is only catchable by exercising the
+// real function.
+type acker interface {
+	Ack(req socketmode.Request, payload ...any) error
+}
+
 // SocketListener is the live Socket Mode connection.
 //
 // This is the one place Riggs uses slack-go, and it uses it inbound only.
@@ -73,7 +81,26 @@ func (l *SocketListener) Listen(ctx context.Context, deliver func(slackgo.Intera
 }
 
 // dispatch acknowledges one socket event and hands the interactive ones on.
-func (l *SocketListener) dispatch(client *socketmode.Client, ev socketmode.Event, deliver func(slackgo.InteractionCallback)) {
+//
+// The acknowledgement comes FIRST, and for every event that carries a request —
+// not only the ones this switch understands.
+//
+// Slack expects a response to each request it sends down the socket, and marks
+// the control with a ⚠ when it does not get one. An earlier version acked only
+// inside the interactive branch, with no default arm, so any event slack-go
+// classified as anything else was dropped in total silence: no ack, so Slack
+// warned; and no log line, so nothing recorded that it had happened. A link
+// button, whose interaction Riggs deliberately does nothing with, still needs
+// answering.
+func (l *SocketListener) dispatch(ack acker, ev socketmode.Event, deliver func(slackgo.InteractionCallback)) {
+	if ev.Request != nil {
+		// A failed ack is worth seeing but changes nothing: Slack will not be
+		// told twice, and the work still needs doing.
+		if err := ack.Ack(*ev.Request); err != nil {
+			l.logger.Warn("could not acknowledge a socket request", "type", string(ev.Type), "error", err)
+		}
+	}
+
 	switch ev.Type {
 	case socketmode.EventTypeConnecting:
 		l.logger.Info("connecting to Slack", "profile", l.creds.Profile)
@@ -91,9 +118,17 @@ func (l *SocketListener) dispatch(client *socketmode.Client, ev socketmode.Event
 			l.logger.Warn("interactive event carried an unexpected payload")
 			return
 		}
-		if ev.Request != nil {
-			client.Ack(*ev.Request)
-		}
 		go deliver(cb)
+
+	case socketmode.EventTypeHello, socketmode.EventTypeDisconnect,
+		socketmode.EventTypeEventsAPI, socketmode.EventTypeSlashCommand:
+		// Known, and not this daemon's business. Acked above; named here so
+		// they do not reach the default arm and read as a surprise.
+		l.logger.Debug("ignoring socket event", "type", string(ev.Type))
+
+	default:
+		// Anything else is acked and reported. A silent default is how the
+		// missing ack went unnoticed.
+		l.logger.Info("unhandled socket event", "type", string(ev.Type), "acked", ev.Request != nil)
 	}
 }

@@ -65,11 +65,17 @@ type Button struct {
 	Primary  bool
 }
 
-// LinkButton opens a URL. It has no action_id, so clicking it raises no
-// interaction — which is why "Open in Browser" costs nothing to handle.
+// LinkButton opens a URL.
+//
+// Slack still delivers an interaction for it — the belief that it does not was
+// wrong, and cost a ⚠ on every click until the daemon started acking
+// unconditionally. ActionID is optional and exists so the click is
+// *identifiable* in the log; without one it arrives with an empty action_id,
+// indistinguishable from a malformed payload.
 type LinkButton struct {
-	Text string
-	URL  string
+	ActionID string
+	Text     string
+	URL      string
 }
 
 // Overflow is the "…" menu. Each option's value is a bare intent token so a
@@ -169,7 +175,7 @@ func (b Button) marshal() any {
 }
 
 func (b LinkButton) marshal() any {
-	return buttonElem{Type: "button", URL: b.URL, Text: plainEmoji(b.Text)}
+	return buttonElem{Type: "button", ActionID: b.ActionID, URL: b.URL, Text: plainEmoji(b.Text)}
 }
 
 func (o Overflow) marshal() any {

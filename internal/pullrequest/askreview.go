@@ -35,6 +35,10 @@ const (
 	// cards, answered by Riggs' daemon, and giving them their own id keeps the
 	// two dispatch tables from ever having to agree.
 	AskActionID = "pr_ask_review"
+	// AskOpenActionID names the link button. No handler is registered for it —
+	// Slack opens the URL itself — but it is named so the interaction it
+	// nevertheless raises is identifiable in the daemon's log.
+	AskOpenActionID = "pr_ask_open"
 	// IntentApprove is the bare token the approve button carries.
 	//
 	// Bare, because the router matches it exactly (§7b). The pull request
@@ -229,7 +233,9 @@ func AskCard(d github.Detail, summary string) blockkit.Card {
 		ActionsBlockID: ref,
 		Actions: []blockkit.Element{
 			blockkit.Button{ActionID: AskActionID, Text: "Approve", Value: IntentApprove, Primary: true},
-			blockkit.LinkButton{Text: "Open in Browser", URL: d.URL},
+			// Named so the click is identifiable in the log. Nothing routes it:
+			// Slack opens the link itself.
+			blockkit.LinkButton{ActionID: AskOpenActionID, Text: "Open in Browser", URL: d.URL},
 		},
 	}
 }
