@@ -224,3 +224,105 @@ func TestCompleteDeletesAPostThatEmpties(t *testing.T) {
 		t.Fatalf("calls = %v, want the emptied post deleted", r.slack.Kinds())
 	}
 }
+
+// --- settling the ask card --------------------------------------------------
+
+// settleRig posts an ask card, so Settle has one to act on.
+func settleRig(t *testing.T) (*Completer, *slacktest.Fake, *detailer) {
+	t.Helper()
+	fake := slacktest.New()
+	store, n := askerStore(t, fake)
+	d := &detailer{detail: askPR()}
+
+	asker := NewAsker(d, store, n, fake, "U0B6HK02YBB", "C-reviews", "please review")
+	if _, err := asker.Ask(context.Background(), "o/r#7", "U0B20G0ET9T", target); err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	fake.Reset()
+
+	return NewCompleter(store, n, fake).WithDetailer(d), fake, d
+}
+
+func TestSettleCollapsesTheAskCard(t *testing.T) {
+	c, fake, _ := settleRig(t)
+
+	settled, err := c.Settle(context.Background(), "o/r#7", "Approved", target)
+	if err != nil {
+		t.Fatalf("Settle: %v", err)
+	}
+	if !settled {
+		t.Fatal("Settle reported nothing to do for a tracked ask card")
+	}
+
+	kinds := fake.Kinds()
+	if len(kinds) != 1 || kinds[0] != "update" {
+		t.Fatalf("calls = %v, want one in-place update", kinds)
+	}
+
+	raw, err := json.Marshal(fake.Calls[0].Msg.Blocks)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var blocks []map[string]any
+	if err := json.Unmarshal(raw, &blocks); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if blocks[0]["default_collapsed"] != true {
+		t.Error("the card was not collapsed")
+	}
+	if strings.Contains(string(raw), `"value":"`+IntentApprove+`"`) {
+		t.Error("Approve survived the settle")
+	}
+}
+
+// A pull request that was never asked about has no card to collapse, which is
+// not an error: the approval still happened.
+func TestSettleIgnoresAnUnaskedRef(t *testing.T) {
+	c, fake, _ := settleRig(t)
+
+	settled, err := c.Settle(context.Background(), "o/r#999", "Approved", target)
+	if err != nil {
+		t.Fatalf("Settle: %v", err)
+	}
+	if settled {
+		t.Error("Settle claimed to have collapsed a card that does not exist")
+	}
+	if len(fake.Calls) != 0 {
+		t.Fatalf("calls = %v, want none", fake.Kinds())
+	}
+}
+
+func TestSettleIsIdempotent(t *testing.T) {
+	c, fake, _ := settleRig(t)
+
+	for i := 0; i < 2; i++ {
+		if _, err := c.Settle(context.Background(), "o/r#7", "Approved", target); err != nil {
+			t.Fatalf("Settle %d: %v", i, err)
+		}
+	}
+	updates := 0
+	for _, k := range fake.Kinds() {
+		if k == "update" {
+			updates++
+		}
+	}
+	if updates != 1 {
+		t.Fatalf("made %d updates over two settles, want 1", updates)
+	}
+}
+
+// Settling needs a read of the pull request. Without one it says so rather than
+// drawing a card from whatever it happens to have.
+func TestSettleNeedsADetailer(t *testing.T) {
+	fake := slacktest.New()
+	store, n := askerStore(t, fake)
+	d := &detailer{detail: askPR()}
+	asker := NewAsker(d, store, n, fake, "U0B6HK02YBB", "C1", "p")
+	if _, err := asker.Ask(context.Background(), "o/r#7", "U0B20G0ET9T", target); err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+
+	if _, err := NewCompleter(store, n, fake).Settle(context.Background(), "o/r#7", "Approved", target); err == nil {
+		t.Fatal("Settle succeeded with nothing wired to read the pull request")
+	}
+}

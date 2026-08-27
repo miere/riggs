@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/miere/riggs-mcp/internal/ai"
 	"github.com/miere/riggs-mcp/internal/github"
 	"github.com/miere/riggs-mcp/internal/notify"
 	"github.com/miere/riggs-mcp/internal/slack"
@@ -37,10 +36,9 @@ type Source interface {
 // Engine reconciles the review queue: it decides what each card should say and
 // keeps Slack in step.
 type Engine struct {
-	gh         Source
-	store      *notify.Store
-	notifier   *notify.Notifier
-	summariser ai.Summariser
+	gh       Source
+	store    *notify.Store
+	notifier *notify.Notifier
 	// login is the GitHub handle whose review requests are mirrored.
 	login string
 	// slackUserID is who gets tagged in-thread.
@@ -48,8 +46,8 @@ type Engine struct {
 }
 
 // NewEngine builds the reconciler.
-func NewEngine(gh Source, store *notify.Store, n *notify.Notifier, s ai.Summariser, login, slackUserID string) *Engine {
-	return &Engine{gh: gh, store: store, notifier: n, summariser: s, login: login, slackUserID: slackUserID}
+func NewEngine(gh Source, store *notify.Store, n *notify.Notifier, login, slackUserID string) *Engine {
+	return &Engine{gh: gh, store: store, notifier: n, login: login, slackUserID: slackUserID}
 }
 
 // Token renders the state as the ledger's opaque label: "reviewable", or the
@@ -351,31 +349,11 @@ func (e *Engine) reconcile(ctx context.Context, ref string, target slack.Target,
 	return &out
 }
 
-// summaryFor returns the card body, computing it only when a reviewable card
-// has none cached — exactly when the Python does. A collapsed card keeps the
-// summary it already had rather than paying for one it will barely show.
-func (e *Engine) summaryFor(ctx context.Context, key string, r Resolved, dryRun bool) (string, error) {
-	cached, ok, err := e.store.Summary(ctx, key)
-	if err != nil {
-		return "", err
-	}
-	if ok || !r.State.Reviewable {
-		return cached, nil
-	}
-	// A dry run must be cheap as well as harmless: summarising shells out to
-	// `claude -p` per pull request, which turns a preview into minutes of work
-	// for a value nobody acts on. The title stands in.
-	if dryRun {
-		return r.Detail.Title, nil
-	}
-	summary, sErr := e.summariser.Summarise(ctx, r.Detail.Title, r.Detail.Body)
-	// A summary failure has already degraded to the title; cache that too, so
-	// a broken claude does not re-invoke on every tick.
-	if err := e.store.SaveSummary(ctx, key, summary, timeNow()); err != nil {
-		return summary, err
-	}
-	_ = sErr // degradation is not a reconcile failure
-	return summary, nil
+// summaryFor returns the card body: the opening of the description, converted
+// (§7d). Pure — there is nothing left that a preview would be expensive to do,
+// so the dry-run special case and the cache both went with the LLM call.
+func (e *Engine) summaryFor(_ context.Context, _ string, r Resolved, _ bool) (string, error) {
+	return Body(r.Detail), nil
 }
 
 // alreadyTagged reports whether the once-latch has fired, for dry-run

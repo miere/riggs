@@ -79,7 +79,6 @@ type rig struct {
 	jira   *fakeJira
 	slack  *slacktest.Fake
 	store  *notify.Store
-	sum    *stubSummariser
 	now    time.Time
 }
 
@@ -91,11 +90,10 @@ func newRig(t *testing.T, fj *fakeJira) *rig {
 	}
 	t.Cleanup(func() { store.Close() })
 	fake := slacktest.New()
-	sum := &stubSummariser{}
-	r := &rig{jira: fj, slack: fake, store: store, sum: sum,
+	r := &rig{jira: fj, slack: fake, store: store,
 		now: time.Date(2026, 8, 10, 9, 0, 0, 0, time.UTC)}
 	r.engine = NewEngine(fj, store, notify.New(store, fake).WithClock(func() time.Time { return r.now }),
-		sum, Admin{SlackUserID: adminID, JiraEmail: "miere@nurturecloud.com"}).
+		Admin{SlackUserID: adminID, JiraEmail: "miere@nurturecloud.com"}).
 		WithClock(func() time.Time { return r.now })
 	return r
 }
@@ -145,8 +143,10 @@ func TestPollIsIdempotent(t *testing.T) {
 	if len(r.slack.Calls) != 0 {
 		t.Errorf("slack calls = %v, want none", r.slack.Kinds())
 	}
-	if r.sum.runs != 1 {
-		t.Errorf("summariser ran %d times, want once", r.sum.runs)
+	// The body is derived from the description now, so repeating a pass costs
+	// nothing and needs no cache to stay stable.
+	if got := ticketBody(t, r); got != ticketBody(t, r) {
+		t.Errorf("the card body is not stable across renders: %q", got)
 	}
 }
 
@@ -408,4 +408,15 @@ func TestTicketKeyFromBlockID(t *testing.T) {
 			t.Errorf("TicketKeyFromBlockID(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
+}
+
+// ticketBody re-derives a card body, to assert it does not move between passes.
+func ticketBody(t *testing.T, _ *rig) string {
+	t.Helper()
+	e := &Engine{}
+	body, err := e.summaryFor(context.Background(), "", ready("NYX-1", "Add a health probe"), false)
+	if err != nil {
+		t.Fatalf("summaryFor: %v", err)
+	}
+	return body
 }

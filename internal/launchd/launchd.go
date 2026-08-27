@@ -50,10 +50,9 @@ type Options struct {
 	//
 	// A launch agent inherits nothing, and launchd's default PATH is
 	// /usr/bin:/bin:/usr/sbin:/sbin — which contains no Homebrew and no
-	// ~/.local/bin. Riggs shells out to `gh` for its GitHub token and to
-	// `claude` for card summaries, so without this the daemon connects
-	// perfectly and then fails on the first click with "executable file not
-	// found in $PATH".
+	// ~/.local/bin. Riggs shells out to `gh` for its GitHub token, so without
+	// this the daemon connects perfectly and then fails on the first click with
+	// "executable file not found in $PATH".
 	//
 	// Empty captures the PATH of whatever ran `riggs launchd install`, which is
 	// a shell that could find this binary and can almost certainly find the rest.
@@ -174,7 +173,9 @@ func (m *Manager) Uninstall(ctx context.Context) error {
 // gap was discovered.
 func (m *Manager) MissingTools() []string {
 	var missing []string
-	for _, name := range []string{"gh", "claude"} {
+	// `gh` alone: the card bodies used to shell out to `claude`, and no longer
+	// do (§7d).
+	for _, name := range []string{"gh"} {
 		if !onPath(name, m.opts.Path) {
 			missing = append(missing, name)
 		}

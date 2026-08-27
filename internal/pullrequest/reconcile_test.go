@@ -81,14 +81,6 @@ func (f *fakeGH) called(what string) bool {
 	return false
 }
 
-// stubSummariser records how often it ran, so caching can be asserted.
-type stubSummariser struct{ runs int }
-
-func (s *stubSummariser) Summarise(_ context.Context, title, _ string) (string, error) {
-	s.runs++
-	return "summary of " + title, nil
-}
-
 var target = slack.Target{Profile: "default", BotToken: "xoxb", Channel: "C1"}
 
 // rig assembles an engine over a temp ledger and a fake Slack.
@@ -97,7 +89,6 @@ type rig struct {
 	gh     *fakeGH
 	slack  *slacktest.Fake
 	store  *notify.Store
-	sum    *stubSummariser
 }
 
 func newRig(t *testing.T, gh *fakeGH) *rig {
@@ -108,10 +99,9 @@ func newRig(t *testing.T, gh *fakeGH) *rig {
 	}
 	t.Cleanup(func() { store.Close() })
 	fake := slacktest.New()
-	sum := &stubSummariser{}
 	return &rig{
-		engine: NewEngine(gh, store, notify.New(store, fake), sum, "miere", "U1"),
-		gh:     gh, slack: fake, store: store, sum: sum,
+		engine: NewEngine(gh, store, notify.New(store, fake), "miere", "U1"),
+		gh:     gh, slack: fake, store: store,
 	}
 }
 
@@ -182,9 +172,9 @@ func TestUnchangedTickIsSilent(t *testing.T) {
 	if len(r.slack.Calls) != 0 {
 		t.Errorf("slack calls = %v, want none", r.slack.Kinds())
 	}
-	if r.sum.runs != 1 {
-		t.Errorf("summariser ran %d times, want once (it is cached)", r.sum.runs)
-	}
+	// The body is derived from the description now. Two ticks producing no
+	// Slack calls (asserted above) is only possible because it is stable, which
+	// is what the cache used to buy.
 }
 
 // When the review lands GitHub drops us from the request list, the card

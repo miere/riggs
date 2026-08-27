@@ -37,7 +37,7 @@ func newBulkRig(t *testing.T, gh *fakeGH, opts BulkOptions) *bulkRig {
 
 	fake := slacktest.New()
 	notifier := notify.New(store, fake)
-	engine := NewEngine(gh, store, notifier, &stubSummariser{}, "miere", "U1")
+	engine := NewEngine(gh, store, notifier, "miere", "U1")
 
 	r := &bulkRig{gh: gh, slack: fake, store: store, clock: epoch}
 	r.bulk = NewBulkEngine(engine, store, notifier, opts).WithClock(func() time.Time { return r.clock })

@@ -30,12 +30,22 @@ type Completer struct {
 	store    *notify.Store
 	notifier *notify.Notifier
 	poster   slack.Poster
-	now      func() time.Time
+	// gh re-reads the pull request when an ask card has to be redrawn. Only
+	// then: the digest renders from the ledger alone, and this stays nil in the
+	// tests that exercise it.
+	gh  Detailer
+	now func() time.Time
 }
 
 // NewCompleter builds the completer.
 func NewCompleter(store *notify.Store, n *notify.Notifier, poster slack.Poster) *Completer {
 	return &Completer{store: store, notifier: n, poster: poster, now: time.Now}
+}
+
+// WithDetailer supplies the read used to redraw an ask card.
+func (c *Completer) WithDetailer(gh Detailer) *Completer {
+	c.gh = gh
+	return c
 }
 
 // WithClock overrides the clock; intended for tests.
@@ -69,6 +79,47 @@ func (c *Completer) Complete(ctx context.Context, ref, status string, target sla
 	}
 	if err := c.rebuild(ctx, item.PostKey, target); err != nil {
 		return true, err
+	}
+	return true, nil
+}
+
+// Settle collapses the review-request card for ref, if one was ever posted.
+//
+// The Approve button goes and the container closes. A card still offering
+// Approve for a pull request that is already merged is worse than no card: it
+// invites a click that can only fail.
+//
+// Independent of Complete, because the two are independent facts. A pull
+// request can be in a digest, or have an ask card, or both, or neither — the
+// same approval settles whichever exist.
+func (c *Completer) Settle(ctx context.Context, ref, label string, target slack.Target) (bool, error) {
+	key := AskKey(ref)
+	entry, found, err := c.notifier.Card(ctx, key)
+	if err != nil || !found {
+		return false, err
+	}
+	if entry.State == AskStateDone {
+		return false, nil // already collapsed
+	}
+	if c.gh == nil {
+		return false, fmt.Errorf("cannot redraw the review request for %s: nothing is wired to read it", ref)
+	}
+
+	repo, number, err := SplitRef(ref)
+	if err != nil {
+		return false, err
+	}
+	detail, err := c.gh.PullRequestDetail(ctx, repo, number)
+	if err != nil {
+		return false, fmt.Errorf("re-reading %s to collapse its review request: %w", ref, err)
+	}
+
+	dest := target
+	dest.Channel = entry.Channel
+	card := AskSettledCard(detail, Body(detail), label)
+	if _, err := c.notifier.Upsert(ctx, key, dest, card,
+		AskFallbackText(detail), AskStateDone); err != nil {
+		return false, err
 	}
 	return true, nil
 }

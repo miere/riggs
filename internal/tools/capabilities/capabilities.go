@@ -184,10 +184,10 @@ func (t *Tool) slackProfiles() []Profile {
 
 // backends probes the external dependencies. `gh` is the GitHub *credential*
 // provider — Riggs makes the HTTP calls itself — and card summaries shell out
-// to `claude -p`. Neither holds a credential of Riggs' own here.
+// Nothing else is shelled out to: card bodies are derived from the description
+// now rather than summarised by an LLM (§7d).
 func (t *Tool) backends() []Backend {
-	out := []Backend{t.binary("gh", "the GitHub token comes from the authenticated gh CLI"),
-		t.binary("claude", "card summaries shell out to `claude -p`")}
+	out := []Backend{t.binary("gh", "the GitHub token comes from the authenticated gh CLI")}
 
 	email := t.getenv(config.JiraEmailEnv)
 	token := t.getenv(config.JiraTokenEnv)
