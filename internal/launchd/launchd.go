@@ -165,6 +165,31 @@ func (m *Manager) Uninstall(ctx context.Context) error {
 	return nil
 }
 
+// Restart stops the running daemon and starts it again.
+//
+// This is how the daemon picks up a binary it has just replaced: the process
+// cannot re-exec itself into the new file without dropping the socket anyway,
+// so the honest move is to let its supervisor do what supervisors are for.
+//
+// `kickstart -k` rather than exiting and trusting KeepAlive, even though the
+// plist sets it. Exiting is a request that the agent be restarted *if* someone
+// happens to be watching; a Riggs started by hand for an afternoon's debugging
+// would simply vanish. This asks launchd directly, and says so when launchd is
+// not the one in charge — which the caller reports rather than swallowing, so
+// the admin is told to restart it themselves instead of waiting for a daemon
+// that is never coming back.
+func (m *Manager) Restart(ctx context.Context) error {
+	if err := Supported(); err != nil {
+		return err
+	}
+	out, err := m.runner.Run(ctx, "launchctl", "kickstart", "-k", m.target())
+	if err != nil {
+		return fmt.Errorf("launchd: could not restart %s: %w: %s",
+			m.target(), err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 // MissingTools reports which of the executables the daemon shells out to are
 // not resolvable on the PATH the agent will run with.
 //

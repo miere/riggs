@@ -6,6 +6,7 @@ import (
 	"log/slog"
 
 	slackgo "github.com/slack-go/slack"
+	"github.com/slack-go/slack/slackevents"
 	"github.com/slack-go/slack/socketmode"
 
 	"github.com/miere/riggs-mcp/internal/slack"
@@ -43,15 +44,14 @@ func NewSocketListener(creds slack.Credentials, logger *slog.Logger) *SocketList
 	return &SocketListener{creds: creds, logger: logger}
 }
 
-// Listen connects and pumps interaction callbacks into deliver until ctx is
-// cancelled.
+// Listen connects and pumps events into h until ctx is cancelled.
 //
 // Each callback is acknowledged *before* it is handled, and handled on its own
 // goroutine. Slack expects an ack within three seconds and a handler here can
 // legitimately take longer than that — approving a pull request makes several
 // GitHub calls with retries — so acknowledging after the work would leave Slack
 // re-sending an interaction that is already being acted on.
-func (l *SocketListener) Listen(ctx context.Context, deliver func(slackgo.InteractionCallback)) error {
+func (l *SocketListener) Listen(ctx context.Context, h Handlers) error {
 	api := slackgo.New(l.creds.BotToken, slackgo.OptionAppLevelToken(l.creds.AppToken))
 	client := socketmode.New(api)
 
@@ -75,7 +75,7 @@ func (l *SocketListener) Listen(ctx context.Context, deliver func(slackgo.Intera
 			if !open {
 				return nil
 			}
-			l.dispatch(client, ev, deliver)
+			l.dispatch(client, ev, h)
 		}
 	}
 }
@@ -92,7 +92,7 @@ func (l *SocketListener) Listen(ctx context.Context, deliver func(slackgo.Intera
 // warned; and no log line, so nothing recorded that it had happened. A link
 // button, whose interaction Riggs deliberately does nothing with, still needs
 // answering.
-func (l *SocketListener) dispatch(ack acker, ev socketmode.Event, deliver func(slackgo.InteractionCallback)) {
+func (l *SocketListener) dispatch(ack acker, ev socketmode.Event, h Handlers) {
 	if ev.Request != nil {
 		// A failed ack is worth seeing but changes nothing: Slack will not be
 		// told twice, and the work still needs doing.
@@ -118,10 +118,17 @@ func (l *SocketListener) dispatch(ack acker, ev socketmode.Event, deliver func(s
 			l.logger.Warn("interactive event carried an unexpected payload")
 			return
 		}
-		go deliver(cb)
+		if h.Interaction == nil {
+			l.logger.Debug("no interaction handler wired")
+			return
+		}
+		go h.Interaction(cb)
+
+	case socketmode.EventTypeEventsAPI:
+		l.dispatchEventsAPI(ev, h)
 
 	case socketmode.EventTypeHello, socketmode.EventTypeDisconnect,
-		socketmode.EventTypeEventsAPI, socketmode.EventTypeSlashCommand:
+		socketmode.EventTypeSlashCommand:
 		// Known, and not this daemon's business. Acked above; named here so
 		// they do not reach the default arm and read as a surprise.
 		l.logger.Debug("ignoring socket event", "type", string(ev.Type))
@@ -130,5 +137,41 @@ func (l *SocketListener) dispatch(ack acker, ev socketmode.Event, deliver func(s
 		// Anything else is acked and reported. A silent default is how the
 		// missing ack went unnoticed.
 		l.logger.Info("unhandled socket event", "type", string(ev.Type), "acked", ev.Request != nil)
+	}
+}
+
+// appHomeTab is the value app_home_opened carries for the Home surface. The
+// same event fires for the "messages" tab, which is somebody typing in the DM
+// and has nothing to publish.
+const appHomeTab = "home"
+
+// dispatchEventsAPI handles the one Events API subscription Riggs has:
+// app_home_opened.
+//
+// Everything else is logged and dropped. It has already been acked, so an
+// accidental subscription added in the app manifest costs a log line rather
+// than a ⚠ on the user's screen.
+func (l *SocketListener) dispatchEventsAPI(ev socketmode.Event, h Handlers) {
+	api, ok := ev.Data.(slackevents.EventsAPIEvent)
+	if !ok {
+		l.logger.Warn("events API event carried an unexpected payload")
+		return
+	}
+	switch inner := api.InnerEvent.Data.(type) {
+	case *slackevents.AppHomeOpenedEvent:
+		if inner.Tab != appHomeTab {
+			l.logger.Debug("app_home_opened on another tab", "tab", inner.Tab)
+			return
+		}
+		if h.AppHomeOpened == nil {
+			l.logger.Debug("no app home handler wired")
+			return
+		}
+		// On its own goroutine, for the same reason a click is: publishing the
+		// view checks GitHub for a release, and the ack is already sent.
+		go h.AppHomeOpened(inner.User)
+
+	default:
+		l.logger.Debug("ignoring events API event", "type", api.InnerEvent.Type)
 	}
 }

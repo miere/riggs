@@ -1,0 +1,159 @@
+package blockkit
+
+import (
+	"fmt"
+	"strings"
+)
+
+// The App Home surface: Riggs' portrait, the version it is running, and — for
+// the admin, and only when there is something to install — the latest release's
+// notes with an Update button beside them.
+//
+// The split is the whole design. Anyone in the workspace may open the app and
+// see what Riggs is and what version answers their clicks; everything from the
+// divider onwards is machinery, and machinery is the admin's business. A
+// non-admin is not shown a disabled button, because a control you cannot use is
+// worse than one that was never there.
+
+const (
+	// HomePortraitURL is the wide portrait at the top of the Home tab.
+	//
+	// Served from the repository over `?raw=true` rather than committed to a
+	// Slack-hosted asset: the file is already in the repo, it is public, and
+	// pinning the Home tab to an image someone has to remember to re-upload is
+	// how a broken thumbnail happens.
+	HomePortraitURL = "https://github.com/miere/riggs/blob/main/riggs-wide.jpeg?raw=true"
+	// HomePortraitAlt is its alt text.
+	HomePortraitAlt = "Riggs Photo"
+
+	// HomeUpdateActionID is the action_id of the Update button.
+	HomeUpdateActionID = "home_update"
+	// HomeUpdateIntent is its value: a bare token, like every other control
+	// Riggs renders, so the daemon's routing table can match it exactly.
+	//
+	// The release tag deliberately does NOT ride in it. The tag would make the
+	// value vary, which the router cannot match on — and it would also let a
+	// stale Home tab, published days ago and never refreshed, install a version
+	// that is no longer the latest. The handler re-resolves what to install at
+	// click time instead.
+	HomeUpdateIntent = "update"
+	// HomeReleaseNotesBlockID names the section carrying the notes.
+	HomeReleaseNotesBlockID = "release_notes"
+
+	// homeNotesLimit is Slack's cap on a section's text, in runes. Release
+	// notes routinely run past it; a payload that exceeds it is rejected
+	// wholesale, so the notes are cut rather than the tab going blank.
+	homeNotesLimit = 2900
+)
+
+// Home is the App Home view.
+type Home struct {
+	// Version is the running build, rendered verbatim under the portrait.
+	Version string
+	// Update, when set, appends the divider and everything after it. Nil is
+	// the ordinary state: up to date, or a viewer with no business seeing it.
+	Update *HomeUpdate
+}
+
+// HomeUpdate is the available release.
+type HomeUpdate struct {
+	// Tag is the release, shown in the header.
+	Tag string
+	// Notes is the release body, ALREADY converted to Slack mrkdwn. This type
+	// renders blocks; internal/slackmd translates dialects. Keeping the
+	// conversion outside means the view can be asserted on without dragging a
+	// Markdown converter into its tests.
+	Notes string
+}
+
+// --- wire types -----------------------------------------------------------
+// Ordered structs, so the encoded bytes are stable — see card.go.
+
+type imageBlock struct {
+	Type     string `json:"type"`
+	ImageURL string `json:"image_url"`
+	AltText  string `json:"alt_text"`
+}
+
+type headerBlock struct {
+	Type  string  `json:"type"`
+	Text  textObj `json:"text"`
+	Level int     `json:"level,omitempty"`
+}
+
+// accessorySection is a section with an element on its right. It is separate
+// from card.go's sectionBlock rather than an optional field on it: the digest's
+// fingerprint is computed over encoded bytes, and a type it shares has no
+// business growing fields for a surface it does not render.
+type accessorySection struct {
+	Type      string  `json:"type"`
+	BlockID   string  `json:"block_id,omitempty"`
+	Text      textObj `json:"text"`
+	Accessory any     `json:"accessory,omitempty"`
+}
+
+// homeView is the published view envelope.
+type homeView struct {
+	Type   string `json:"type"`
+	Blocks []any  `json:"blocks"`
+}
+
+// Blocks renders the Home tab.
+func (h Home) Blocks() []any {
+	blocks := []any{
+		imageBlock{Type: "image", ImageURL: HomePortraitURL, AltText: HomePortraitAlt},
+		contextBlock{Type: "context", Elements: []textObj{plainEmoji(h.versionLine())}},
+	}
+	if h.Update == nil {
+		return blocks
+	}
+
+	update := plainEmoji(fmt.Sprintf("Update Available: %s", h.Update.Tag))
+	button := buttonElem{
+		Type:     "button",
+		ActionID: HomeUpdateActionID,
+		Style:    "primary",
+		Value:    HomeUpdateIntent,
+		Text:     plain("Update"),
+	}
+	return append(blocks,
+		dividerBlock{Type: "divider"},
+		headerBlock{Type: "header", Text: update, Level: 1},
+		accessorySection{
+			Type:      "section",
+			BlockID:   HomeReleaseNotesBlockID,
+			Text:      mrkdwn(h.notes()),
+			Accessory: button,
+		},
+	)
+}
+
+// View renders the payload `views.publish` takes.
+func (h Home) View() any { return homeView{Type: "home", Blocks: h.Blocks()} }
+
+// Fingerprint is a stable digest of the rendered view, so the daemon can skip
+// a publish that would change nothing. app_home_opened fires on every glance at
+// the app, and republishing an identical view is a Slack call bought for
+// nothing.
+func (h Home) Fingerprint() string { return fingerprint(h.Blocks()) }
+
+// versionLine is the line under the portrait.
+func (h Home) versionLine() string {
+	v := strings.TrimSpace(h.Version)
+	if v == "" {
+		v = "unknown"
+	}
+	return "Version: " + v
+}
+
+// notes is the release body, cut to what a section block will accept.
+//
+// An empty body is a real case — a release published with no notes — and it
+// gets a line saying so rather than an empty section, which Slack rejects.
+func (h Home) notes() string {
+	notes := strings.TrimSpace(h.Update.Notes)
+	if notes == "" {
+		return fmt.Sprintf("*%s* is available. It was published without release notes.", h.Update.Tag)
+	}
+	return Truncate(notes, homeNotesLimit, homeNotesLimit)
+}

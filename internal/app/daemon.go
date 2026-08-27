@@ -8,9 +8,14 @@ import (
 	"os"
 	"strings"
 
+	"github.com/miere/riggs-mcp/internal/apphome"
+	"github.com/miere/riggs-mcp/internal/blockkit"
 	"github.com/miere/riggs-mcp/internal/daemon"
+	"github.com/miere/riggs-mcp/internal/launchd"
 	"github.com/miere/riggs-mcp/internal/pullrequest"
 	"github.com/miere/riggs-mcp/internal/slack"
+	"github.com/miere/riggs-mcp/internal/updates"
+	"github.com/miere/riggs-mcp/internal/version"
 )
 
 // profileFlag selects which configured Slack app the daemon listens as.
@@ -37,8 +42,62 @@ func (a *Application) runDaemon(ctx context.Context) error {
 	router := daemon.NewRouter()
 	a.registerInteractions(router, creds)
 
+	home := a.appHome(creds, logger)
+	a.registerHomeInteractions(router, home)
+
 	listener := daemon.NewSocketListener(creds, logger)
-	return daemon.New(listener, router, creds.Profile, logger).Run(ctx)
+	return daemon.New(listener, router, creds.Profile, logger).WithAppHome(home).Run(ctx)
+}
+
+// appHome assembles the Home tab publisher.
+//
+// Everything it needs is process-wide and cheap to hold: a version string, one
+// HTTP client, and a release lookup that caches for an hour. That is the
+// opposite of the click handlers below, which build and close their
+// dependencies per interaction — but the reason for those is a ledger and a
+// GitHub token that go stale between the handful of clicks a week anyone makes,
+// and neither applies here.
+func (a *Application) appHome(creds slack.Credentials, logger *slog.Logger) *apphome.Publisher {
+	checker := updates.New(updates.Deps{
+		Current: version.String(),
+		HTTPGet: updates.HTTPGetter(),
+	})
+	return apphome.New(apphome.Deps{
+		Version:     version.String(),
+		BotToken:    creds.BotToken,
+		AdminUserID: a.cfg.Admin.SlackUserID,
+		Views:       slack.NewAPI(),
+		Notify:      slack.NewAPI(),
+		Checker:     checker,
+		Installer:   updates.NewInstaller(checker),
+		Restart:     restartViaLaunchd,
+		Logger:      logger,
+	})
+}
+
+// registerHomeInteractions installs the Home tab's one control.
+//
+// It goes in the same routing table as the digest's buttons, on the same
+// (action_id, intent) match, because it is the same kind of thing: a control
+// Riggs rendered, clicked by a human, delivered to the app that drew it. The
+// Home tab being a different surface from a channel message changes where the
+// click came from, not what dispatching it means.
+func (a *Application) registerHomeInteractions(router *daemon.Router, home *apphome.Publisher) {
+	router.Handle(blockkit.HomeUpdateActionID, blockkit.HomeUpdateIntent,
+		daemon.HandlerFunc(func(ctx context.Context, in slack.Interaction) error {
+			return home.Update(ctx, in.UserID)
+		}))
+}
+
+// restartViaLaunchd asks launchd to restart this daemon, so it comes back
+// running the binary that was just installed.
+//
+// Options carries only what the restart needs. The plist is not rewritten here
+// — that is `riggs launchd install`'s job — so the binary path, config path and
+// profile baked into it are left exactly as they were, which is the point: the
+// agent restarts onto the same path, and the file at that path is new.
+func restartViaLaunchd(ctx context.Context) error {
+	return launchd.New(nil, launchd.Options{}).Restart(ctx)
 }
 
 // registerInteractions installs the handlers for the controls Riggs renders.
