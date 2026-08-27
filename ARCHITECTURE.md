@@ -585,7 +585,9 @@ and has nothing to publish.
 
 The rendered view is fingerprinted and a publish that would change nothing is
 skipped. `app_home_opened` fires on every glance at the app, and republishing an
-identical view is a Slack call bought for nothing.
+identical view is a Slack call bought for nothing. `Publish` reports which
+happened, so the daemon's log can say so — "app home published" on a call that
+was skipped is worse than no line at all.
 
 ### The controls menu
 
