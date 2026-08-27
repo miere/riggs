@@ -69,6 +69,11 @@ type Config struct {
 	// dbPath is the ledger location, derived from the config file path: same
 	// directory, same base name, ".db" extension.
 	dbPath string
+
+	// envPath is the dotenv file that was read, and envLoaded whether it
+	// existed. Both are reported by `riggs capabilities`.
+	envPath   string
+	envLoaded bool
 }
 
 // Admin identifies the single human Riggs acts for. It exists because that

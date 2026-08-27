@@ -13,6 +13,25 @@ import (
 // file when `env-file` names none.
 const EnvFileName = ".env"
 
+// DefaultEnvPath is ~/.config/riggs/.env — where Riggs looks for its
+// environment when nothing points it elsewhere.
+//
+// It is derived from DefaultPath rather than spelled out again, so the two
+// cannot drift: the rule is "beside the config file", and this is what that
+// resolves to in the default case.
+func DefaultEnvPath() string {
+	return filepath.Join(filepath.Dir(DefaultPath()), EnvFileName)
+}
+
+// EnvPath is the dotenv file this config read, or would have read. It is
+// reported by `riggs capabilities`, because the symptom of the wrong one is an
+// empty token — which surfaces as "profile has no bot-token", a message that
+// says nothing about where the token was looked for.
+func (c *Config) EnvPath() string { return c.envPath }
+
+// EnvLoaded reports whether that file existed and was loaded.
+func (c *Config) EnvLoaded() bool { return c.envLoaded }
+
 // loadEnvFile loads the dotenv file into the process environment, so the
 // ${VAR} references in the config resolve from it.
 //
@@ -33,6 +52,7 @@ const EnvFileName = ".env"
 // identically in each.
 func (c *Config) loadEnvFile(configPath string) error {
 	path, explicit := c.envFilePath(configPath)
+	c.envPath = path
 	if path == "" {
 		return nil
 	}
@@ -46,6 +66,7 @@ func (c *Config) loadEnvFile(configPath string) error {
 	if err := godotenv.Load(path); err != nil {
 		return fmt.Errorf("env-file %s: %w", path, err)
 	}
+	c.envLoaded = true
 	return nil
 }
 

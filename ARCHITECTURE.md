@@ -744,10 +744,21 @@ The same "no inherited environment" problem breaks the tokens: every
 `${SLACK_...}` in the config would expand to empty and the daemon would start up
 connected to nothing.
 
-So `config.yaml` gains `env-file`, a dotenv file loaded **before** expansion,
-defaulting to `.env` beside the config. It uses the parser Murtaugh already
-uses, which is the point: one `.env` can serve both, and quoting behaves the
-same in each.
+So `config.yaml` gains `env-file`, a dotenv file loaded **before** expansion.
+It uses the parser Murtaugh already uses, which is the point: one `.env` can
+serve both, and quoting behaves the same in each.
+
+Where it looks, first hit wins:
+
+1. `env-file` in the config — an absolute answer, `~` expanded, `${VAR}`
+   expanded.
+2. `.env` **beside the config file**, which in the default case is
+   **`~/.config/riggs/.env`**. The ledger already follows the config file
+   (§10); the environment does too, so moving a config moves all of its state.
+
+That default holds even when there is **no config file at all** — the location
+one *would* live at still decides, which is the state a fresh machine and
+`riggs capabilities` are both in.
 
 - An already-set variable wins (standard dotenv precedence).
 - A **missing conventional** file is not an error — Riggs is still invoked from
@@ -755,6 +766,10 @@ same in each.
   would be a regression.
 - A **named** file that cannot be read **is** an error, the same rule
   `--config-file` follows.
+- **The resolved path is reported by `riggs capabilities`**, loaded or not. The
+  symptom of the wrong one is an empty token, which surfaces as "profile has no
+  bot-token" — a message that says nothing about where the token was looked
+  for, and the first question anyone debugging a launch agent asks.
 
 ## 13. Roadmap
 
@@ -772,6 +787,7 @@ same in each.
 | 9 | The digest's actions: ask-review, approve-and-merge | done |
 | 10 | Supervising the daemon: `riggs launchd`, `env-file` (§12b) | done |
 | 11 | Decommission the per-PR card job, keeping the renderer (§12c) | done |
+| 12 | Pin the default dotenv location; report it (§12b) | done |
 
 ## 13b. Cutover
 
@@ -828,6 +844,10 @@ Rollback: the previous job and rule definitions are captured under
   reusing its name, so the review queue has exactly one notifier again. The card
   renderer and `git.pr.fetch-reviews` are retained and still registered — only
   the schedule is gone.
+- **unreleased** — Phase 12. Pins the default dotenv location at
+  `~/.config/riggs/.env` (`config.DefaultEnvPath`) and reports the resolved path
+  from `riggs capabilities`, loaded or not — the failure mode is an empty token,
+  whose error message names neither the file nor the directory.
 - **unreleased** — Phase 5, the cutover (§13b). Also fixes the installer,
   which built its job command from `cfg job set` — documented as equivalent to
   `jobs define`, but it rejects `--args`.
