@@ -67,6 +67,8 @@ const sentinel = "\x00"
 
 var (
 	htmlComment = regexp.MustCompile(`(?s)<!--.*?-->`)
+	detailsTag  = regexp.MustCompile(`(?i)<details\b[^>]*>|</details\s*>`)
+	onlyMarkup  = regexp.MustCompile(`^(?:\s|<[^>]*>)+$`)
 	heading     = regexp.MustCompile(`^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$`)
 	setextRule  = regexp.MustCompile(`^\s{0,3}(=+|-{2,})\s*$`)
 	fence       = regexp.MustCompile("^\\s*(```|~~~)\\s*[A-Za-z0-9_+-]*\\s*$")
@@ -222,18 +224,26 @@ func collapseBlankRuns(s string) string {
 
 // FirstParagraphs returns the first n paragraphs of src, before conversion.
 //
-// A paragraph is a run of non-blank lines. Two things are skipped rather than
-// counted, because both are routinely the first thing in a pull-request body
-// and neither says anything: an HTML comment (the template instructions nobody
-// deletes), and a paragraph that is nothing but images or badges.
+// A paragraph is a run of non-blank lines. Three things are skipped rather than
+// counted, because all of them are routinely the first thing in a pull-request
+// body and none of them says anything: an HTML comment (the template
+// instructions nobody deletes), a paragraph that is nothing but images or
+// badges, and a paragraph left holding nothing but HTML tags — the `<br />`
+// that a stripped <details> block leaves behind, which would otherwise reach
+// the card as a literal `<br />` on a line of its own.
+//
+// Selection is this function's job, not Convert's. Convert is a translator, and
+// a translator that silently deletes part of its input is a worse thing to
+// have; deciding which part of a body is worth showing belongs here.
 func FirstParagraphs(src string, n int) string {
 	src = strings.ReplaceAll(src, "\r\n", "\n")
 	src = htmlComment.ReplaceAllString(src, "")
+	src = stripDetails(src)
 
 	var kept []string
 	for _, para := range strings.Split(src, "\n\n") {
 		para = strings.Trim(para, "\n ")
-		if para == "" || isOnlyImages(para) {
+		if para == "" || isOnlyImages(para) || onlyMarkup.MatchString(para) {
 			continue
 		}
 		kept = append(kept, para)
@@ -242,6 +252,54 @@ func FirstParagraphs(src string, n int) string {
 		}
 	}
 	return strings.Join(kept, "\n\n")
+}
+
+// stripDetails removes every <details> element: its <summary> label, and
+// everything it collapses.
+//
+// This is the single biggest thing a body can contain and the least worth
+// showing — it is, by the author's own markup, the part they folded away. On a
+// Dependabot description it is nearly the whole message: on the pull request
+// that first hit this, two <details> blocks held 7,304 of 7,388 characters, and
+// the one sentence saying what the change actually does was the other 82.
+//
+// The size matters more than the character count suggests, because the HTML
+// does not merely take up room — Convert escapes it, so every `<p>` becomes
+// `&lt;p&gt;` and the body GROWS on the way to Slack. That description reached
+// 8,879 characters against a 3,000-character section limit, and Slack rejected
+// the entire message with invalid_blocks rather than just the block.
+//
+// Nesting is tracked rather than assumed. Dependabot folds one details block
+// inside another for its ignore conditions, and a non-greedy pattern would stop
+// at the inner closing tag and leave a stray `</details>` behind. RE2 has no
+// lookahead, so the pairing cannot be written as a single expression.
+//
+// An element that is never closed takes the rest of the body with it, which is
+// what GitHub itself renders: everything after an unclosed tag is inside the
+// collapsed block. A closing tag with no opener is left alone — malformed input
+// is passed through rather than guessed at.
+func stripDetails(src string) string {
+	var b strings.Builder
+	depth, start := 0, 0
+	for _, m := range detailsTag.FindAllStringIndex(src, -1) {
+		if strings.HasPrefix(src[m[0]:m[1]], "</") {
+			if depth == 0 {
+				continue
+			}
+			if depth--; depth == 0 {
+				start = m[1]
+			}
+			continue
+		}
+		if depth == 0 {
+			b.WriteString(src[start:m[0]])
+		}
+		depth++
+	}
+	if depth == 0 {
+		b.WriteString(src[start:])
+	}
+	return b.String()
 }
 
 // isOnlyImages reports whether a paragraph is nothing but images and badges.

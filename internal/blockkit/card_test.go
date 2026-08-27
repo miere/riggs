@@ -165,6 +165,44 @@ func TestActionsSupersedeContext(t *testing.T) {
 	}
 }
 
+// Slack rejects the whole message — not just the block — when a section runs
+// past 3,000 characters, so an uncapped body is a card that never posts and a
+// click that looks to the user like nothing happened.
+func TestLongBodyIsCappedUnderSlacksSectionLimit(t *testing.T) {
+	card := Card{Title: "T", Subtitle: "S", BodyBlockID: "pr_summary",
+		Body: strings.Repeat("x", 9000)}
+
+	encoded, err := json.Marshal(card.Blocks())
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	body := strings.Repeat("x", bodyLimit) + "…"
+	if !strings.Contains(string(encoded), body) {
+		t.Errorf("body was not cut to %d runes + ellipsis", bodyLimit)
+	}
+	if n := len([]rune(body)); n >= 3000 {
+		t.Errorf("cut body is %d runes, still at or over Slack's limit", n)
+	}
+}
+
+// A body already inside the limit is passed through untouched — the cap is a
+// backstop, and an ellipsis on a short card would be a lie.
+func TestShortBodyIsUnchanged(t *testing.T) {
+	card := Card{Title: "T", Subtitle: "S", Body: "Repoints the owner link."}
+	if got := string(mustJSON(t, card.Blocks())); !strings.Contains(got, "Repoints the owner link.\"") {
+		t.Errorf("short body was altered: %s", got)
+	}
+}
+
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return b
+}
+
 func TestTextAndContextBlocks(t *testing.T) {
 	semantic(t, TextBlocks("<@U1> ready for review"),
 		`[{"type":"section","text":{"type":"mrkdwn","text":"<@U1> ready for review"}}]`)
