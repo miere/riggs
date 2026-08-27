@@ -744,6 +744,13 @@ Rules:
   stops it.
 - **`ThrottleInterval` is set.** An agent that cannot start — bad token, no
   network — otherwise respawns as fast as launchd can fork it.
+- **The plist carries a `PATH`.** launchd's default is
+  `/usr/bin:/bin:/usr/sbin:/sbin` — no Homebrew, no `~/.local/bin`. Riggs shells
+  out to `gh` for its GitHub token and `claude` for summaries, so without this
+  the daemon connects perfectly and then fails on the *first click* with
+  "executable file not found in $PATH". `install` captures the PATH of the shell
+  that ran it, and reports any of those tools it cannot resolve — because the
+  alternative is finding out from a log nobody is watching.
 - **The plist names the config path explicitly.** A launch agent inherits none
   of the shell's environment, so `$RIGGS_CONFIG` never reaches it and the
   precedence chain (§10) would resolve somewhere else entirely.
@@ -816,6 +823,7 @@ one *would* live at still decides, which is the state a fresh machine and
 | 12 | Pin the default dotenv location; report it (§12b) | done |
 | 13 | `jira.base-url` becomes required configuration; no default tenant | done |
 | 14 | Explicit identity: login on the command (setting removed), own Slack app, dotenv wins | done |
+| 15 | Give the launch agent a PATH (§12b) | done |
 
 ## 13b. Cutover
 
@@ -892,6 +900,12 @@ Rollback: the previous job and rule definitions are captured under
   the app-level token, and asks for the Jira tenant §13 stopped defaulting.
   And `env-file` now *overrides* the ambient environment, so Riggs resolves to
   the same Slack app whether Murtaugh spawned it or launchd did.
+- **unreleased** — Phase 15. The launch agent gets a `PATH`. Phase 10 solved
+  the environment problem for *tokens* (`env-file`) and missed *executables*:
+  the daemon could not find `gh`, so every click that needed GitHub failed with
+  "executable file not found in $PATH" while the connection looked healthy.
+  `launchd install` now bakes the installing shell's PATH into the plist and
+  warns about any tool it cannot resolve.
 - **unreleased** — Phase 5, the cutover (§13b). Also fixes the installer,
   which built its job command from `cfg job set` — documented as equivalent to
   `jobs define`, but it rejects `--args`.
