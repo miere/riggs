@@ -598,6 +598,19 @@ One pass, per pull request:
 Then every existing post is rebuilt from the items that remain in it, and one
 new post is created from the selection.
 
+**Rows render from the ledger.** `items` stores each row's title, author and URL,
+not just its status — so a post can be rebuilt with no upstream read at all.
+Without that, acting on one row wrecked the others: any row the pass could not
+refetch collapsed to its bare reference with a dead link.
+
+**An approval completes the row immediately** (`Completer`). The reconcile pass
+would reach the same conclusion on its own, but up to three minutes later, and a
+button that visibly does nothing for three minutes reads as one that did not
+work. A failure is posted in the **digest's** thread — where the row still sits
+waiting, and where somebody looking for the outcome will look — never swallowed.
+Neither is allowed to mask the approval itself: a row that fails to redraw is
+still an approved pull request.
+
 Rules:
 
 - **Rolling 3h cooldown**, not calendar blocks.
@@ -846,6 +859,7 @@ one *would* live at still decides, which is the state a fresh machine and
 | 16 | Digest polish: own icon, 50/47 title | done |
 | 17 | Ask for Code Review posts a card (§7bb) | done |
 | 18 | Acknowledge every socket request (§7b) | done |
+| 19 | Complete the row on approval; report failures in-thread (§9b) | done |
 
 ## 13b. Cutover
 
@@ -941,6 +955,11 @@ Rollback: the previous job and rule definitions are captured under
   control; the same missing branch meant the click was never logged either.
   Adds `$RIGGS_LOG_LEVEL`, and an `action_id` on link buttons so their clicks
   are identifiable rather than blank.
+- **unreleased** — Phase 19. An approval completes its digest row at once
+  (§9b), and a failed one is reported in the digest's thread. `items` gains the
+  row's title, author and URL so a post rebuilds from the ledger alone — which
+  also fixes a latent bug: a row the pass could not refetch used to collapse to
+  its bare reference with a dead link.
 - **unreleased** — Phase 5, the cutover (§13b). Also fixes the installer,
   which built its job command from `cfg job set` — documented as equivalent to
   `jobs define`, but it rejects `--args`.

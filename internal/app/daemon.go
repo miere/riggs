@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -70,8 +71,8 @@ func (a *Application) registerInteractions(router *daemon.Router, creds slack.Cr
 				return err
 			}
 			defer closer.Close()
-			_, err = approver.WithoutReviewBody().Run(ctx, in.Item, false, a.targetFor(creds, in), in.MessageTS)
-			return err
+			result, err := approver.WithoutReviewBody().Run(ctx, in.Item, false, a.targetFor(creds, in), in.MessageTS)
+			return a.settle(ctx, creds, in, result, err, pullrequest.ReasonApproved)
 		}))
 
 	router.Handle(pullrequest.BulkActionID, pullrequest.IntentApproveMerge,
@@ -83,14 +84,51 @@ func (a *Application) registerInteractions(router *daemon.Router, creds slack.Cr
 			defer closer.Close()
 			// The outcome is narrated into the digest's own thread, so the
 			// answer lands next to the row that was clicked.
-			_, err = approver.Run(ctx, in.Item, true, a.targetFor(creds, in), in.MessageTS)
-			return err
+			result, err := approver.Run(ctx, in.Item, true, a.targetFor(creds, in), in.MessageTS)
+			return a.settle(ctx, creds, in, result, err, pullrequest.ReasonMerged)
 		}))
 
 	// IntentOpenBrowser is deliberately unregistered. Slack opens the link
 	// itself; the interaction it also sends has nothing to do, and a handler
 	// that exists only to return nil is worse than the router's own "no handler"
 	// log line.
+}
+
+// settle records what an approval did to the digest.
+//
+// On success the row is struck through immediately. The reconcile pass would
+// reach the same conclusion on its own, but up to three minutes later — and a
+// button that visibly does nothing for three minutes reads as one that did not
+// work.
+//
+// On failure the reason is posted in the DIGEST's thread, not the clicked
+// message's: the digest is where the row still sits waiting, and where somebody
+// looking for the outcome will look. The approver has already narrated into the
+// thread that was clicked; for a digest click those are the same place, and for
+// an ask-review card they are deliberately not.
+//
+// Neither is allowed to mask the approval itself. A row that fails to redraw is
+// still an approved pull request, so the original error is what comes back.
+func (a *Application) settle(ctx context.Context, creds slack.Credentials,
+	in slack.Interaction, result pullrequest.ApproveResult, runErr error, status string) error {
+
+	completer, closer, err := completerFor(a.cfg)
+	if err != nil {
+		return errors.Join(runErr, err)
+	}
+	defer closer.Close()
+	target := a.targetFor(creds, in)
+
+	if runErr != nil {
+		if _, err := completer.Fail(ctx, in.Item, result.Message, target); err != nil {
+			return errors.Join(runErr, err)
+		}
+		return runErr
+	}
+	if _, err := completer.Complete(ctx, in.Item, status, target); err != nil {
+		return fmt.Errorf("approved %s but could not mark it done in the digest: %w", in.Item, err)
+	}
+	return nil
 }
 
 // targetFor builds the delivery target for a click: this daemon's credentials,
