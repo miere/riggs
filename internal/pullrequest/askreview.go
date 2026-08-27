@@ -39,12 +39,22 @@ const (
 	// Slack opens the URL itself — but it is named so the interaction it
 	// nevertheless raises is identifiable in the daemon's log.
 	AskOpenActionID = "pr_ask_open"
+	// AskKeyPrefix namespaces the ask cards in the ledger.
+	//
+	// They are tracked, which they were not at first. The reasoning then — "an
+	// ask is a one-off, not a card to maintain" — held right up until an
+	// approval needed to change one: a card still offering Approve for a pull
+	// request that is already merged is worse than no card.
+	AskKeyPrefix = "git.pr.ask:"
 	// IntentApprove is the bare token the approve button carries.
 	//
 	// Bare, because the router matches it exactly (§7b). The pull request
 	// reference rides in the actions block_id, as everywhere else.
 	IntentApprove = "approve"
 )
+
+// AskKey is the ledger key for a pull request's review-request card.
+func AskKey(ref string) string { return AskKeyPrefix + ref }
 
 // Detailer reads one pull request. github.Client satisfies it.
 type Detailer interface {
@@ -64,11 +74,19 @@ type Resolver interface {
 // click away.
 const BodyParagraphs = 2
 
+// Ask card states, recorded on the ledger entry so a pass can tell an open
+// request from a settled one without re-reading GitHub.
+const (
+	AskStateOpen = "open"
+	AskStateDone = "done"
+)
+
 // Asker posts a review request.
 type Asker struct {
-	gh     Detailer
-	store  *notify.Store
-	poster slack.Poster
+	gh       Detailer
+	store    *notify.Store
+	notifier *notify.Notifier
+	poster   slack.Poster
 
 	// resolver turns a configured handle into an id, when the config holds one.
 	resolver Resolver
@@ -82,9 +100,9 @@ type Asker struct {
 }
 
 // NewAsker builds the asker.
-func NewAsker(gh Detailer, store *notify.Store, poster slack.Poster,
+func NewAsker(gh Detailer, store *notify.Store, n *notify.Notifier, poster slack.Poster,
 	reviewer, channel, prompt string) *Asker {
-	return &Asker{gh: gh, store: store, poster: poster,
+	return &Asker{gh: gh, store: store, notifier: n, poster: poster,
 		reviewer: reviewer, channel: channel, prompt: prompt}
 }
 
@@ -170,14 +188,22 @@ func (a *Asker) Ask(ctx context.Context, ref, requester string, target slack.Tar
 		dest.AdminUserID = reviewer
 	}
 
+	// Through the ledger, so a later approval can find this card and rewrite
+	// it. Asking twice for the same pull request therefore updates the existing
+	// card rather than posting a second one, which is the better answer anyway.
 	card := AskCard(detail, Body(detail))
-	posted, err := a.poster.Post(ctx, dest, slack.Message{
-		Text:   AskFallbackText(detail),
-		Blocks: card.Blocks(),
-	})
-	if err != nil {
+	if _, err := a.notifier.Upsert(ctx, AskKey(ref), dest, card,
+		AskFallbackText(detail), AskStateOpen); err != nil {
 		return AskResult{}, fmt.Errorf("asking %s for a review of %s: %w", reviewer, ref, err)
 	}
+	entry, found, err := a.notifier.Card(ctx, AskKey(ref))
+	if err != nil {
+		return AskResult{}, err
+	}
+	if !found || entry.TS == "" {
+		return AskResult{}, fmt.Errorf("posted the review request for %s but the ledger has no record of where", ref)
+	}
+	posted := slack.Ref{Channel: entry.Channel, TS: entry.TS}
 
 	result := AskResult{Ref: ref, Reviewer: reviewer, Requester: requester,
 		Channel: posted.Channel, TS: posted.TS}
@@ -243,6 +269,25 @@ func AskCard(d github.Detail, summary string) blockkit.Card {
 			blockkit.LinkButton{ActionID: AskOpenActionID, Text: "Open in Browser", URL: d.URL},
 		},
 	}
+}
+
+// AskSettledCard is the ask card once the pull request has been approved or
+// merged.
+//
+// Collapsed, and with the Approve button gone. A card still offering Approve
+// for a pull request that is already settled is worse than no card: it invites
+// a click that can only fail. The link stays, because "where was that again"
+// outlives the review.
+func AskSettledCard(d github.Detail, summary, label string) blockkit.Card {
+	card := AskCard(d, summary)
+	card.Collapsed = true
+	card.Actions = []blockkit.Element{
+		blockkit.LinkButton{ActionID: AskOpenActionID, Text: "Open in Browser", URL: d.URL},
+	}
+	if label != "" {
+		card.Context = label
+	}
+	return card
 }
 
 // AskFallbackText is the notification text: what Slack shows in the sidebar,

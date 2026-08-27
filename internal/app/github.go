@@ -4,10 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os/exec"
 	"time"
 
-	"github.com/miere/riggs-mcp/internal/ai"
 	"github.com/miere/riggs-mcp/internal/config"
 	"github.com/miere/riggs-mcp/internal/github"
 	"github.com/miere/riggs-mcp/internal/notify"
@@ -39,15 +37,6 @@ func githubClient(ctx context.Context, store *notify.Store) (*github.Client, err
 	return github.New(auth.Token).WithCache(store, time.Now), nil
 }
 
-// summariser picks the card-summary backend. With no `claude` on PATH the
-// titles stand in, rather than every card failing.
-func summariser() ai.Summariser {
-	if _, err := exec.LookPath("claude"); err != nil {
-		return ai.Titles{}
-	}
-	return ai.NewClaude()
-}
-
 // engineFor assembles the reconciler for one invocation, returning the closer
 // for the ledger it opened.
 func engineFor(cfg *config.Config, login string) (*pullrequest.Engine, io.Closer, error) {
@@ -61,7 +50,7 @@ func engineFor(cfg *config.Config, login string) (*pullrequest.Engine, io.Closer
 		return nil, nil, err
 	}
 	notifier := notify.New(store, slack.NewAPI())
-	engine := pullrequest.NewEngine(gh, store, notifier, summariser(), login, cfg.Admin.SlackUserID)
+	engine := pullrequest.NewEngine(gh, store, notifier, login, cfg.Admin.SlackUserID)
 	return engine, store, nil
 }
 
@@ -79,7 +68,7 @@ func bulkEngineFor(cfg *config.Config, login string, opts pullrequest.BulkOption
 		return nil, nil, err
 	}
 	notifier := notify.New(store, slack.NewAPI())
-	engine := pullrequest.NewEngine(gh, store, notifier, summariser(), login, cfg.Admin.SlackUserID)
+	engine := pullrequest.NewEngine(gh, store, notifier, login, cfg.Admin.SlackUserID)
 	return pullrequest.NewBulkEngine(engine, store, notifier, opts), store, nil
 }
 
@@ -97,7 +86,7 @@ func askerFor(cfg *config.Config) (*pullrequest.Asker, io.Closer, error) {
 		return nil, nil, err
 	}
 	api := slack.NewAPI()
-	asker := pullrequest.NewAsker(gh, store, api,
+	asker := pullrequest.NewAsker(gh, store, notify.New(store, api), api,
 		cfg.ReviewReviewer(), cfg.ReviewRequest.Channel, cfg.ReviewPrompt()).WithResolver(api)
 	return asker, store, nil
 }
@@ -110,7 +99,15 @@ func completerFor(cfg *config.Config) (*pullrequest.Completer, io.Closer, error)
 		return nil, nil, err
 	}
 	api := slack.NewAPI()
-	return pullrequest.NewCompleter(store, notify.New(store, api), api), store, nil
+	completer := pullrequest.NewCompleter(store, notify.New(store, api), api)
+
+	// The digest renders from the ledger, but an ask card has to be redrawn
+	// from the pull request. A GitHub client that cannot be built is not fatal:
+	// the digest half still works, and Settle says so if it is reached.
+	if gh, err := githubClient(context.Background(), store); err == nil {
+		completer = completer.WithDetailer(gh)
+	}
+	return completer, store, nil
 }
 
 // approverFor assembles the approver for one invocation.

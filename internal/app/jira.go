@@ -22,7 +22,7 @@ func engineForTickets(cfg *config.Config) (*ticket.Engine, io.Closer, error) {
 	email, token := cfg.JiraCredentials()
 	client := jira.New(cfg.JiraBaseURL(), email, token)
 	notifier := notify.New(store, slack.NewAPI())
-	engine := ticket.NewEngine(client, store, notifier, summariser(), ticket.Admin{
+	engine := ticket.NewEngine(client, store, notifier, ticket.Admin{
 		SlackUserID: cfg.Admin.SlackUserID,
 		JiraEmail:   cfg.Admin.JiraEmail,
 	})

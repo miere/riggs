@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/miere/riggs-mcp/internal/config"
 	"github.com/miere/riggs-mcp/internal/github"
+	"github.com/miere/riggs-mcp/internal/notify"
 	"github.com/miere/riggs-mcp/internal/slack"
 	"github.com/miere/riggs-mcp/internal/slack/slacktest"
 )
@@ -32,10 +34,23 @@ func askPR() github.Detail {
 	}
 }
 
+// askerStore builds a real ledger over the fake Slack, because the ask card is
+// tracked now: it has to be findable when the approval lands.
+func askerStore(t *testing.T, fake *slacktest.Fake) (*notify.Store, *notify.Notifier) {
+	t.Helper()
+	store, err := notify.Open(filepath.Join(t.TempDir(), "config.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	return store, notify.New(store, fake)
+}
+
 func newAsker(t *testing.T, fake *slacktest.Fake, channel string) (*Asker, *detailer) {
 	t.Helper()
 	d := &detailer{detail: askPR()}
-	return NewAsker(d, nil, fake, "U0B6HK02YBB", channel, "please take a look"), d
+	store, n := askerStore(t, fake)
+	return NewAsker(d, store, n, fake, "U0B6HK02YBB", channel, "please take a look"), d
 }
 
 // blocksOf decodes a posted message's blocks.
@@ -272,7 +287,8 @@ func TestAskWithNoChannelDMsTheReviewer(t *testing.T) {
 func TestAskRequiresAReviewer(t *testing.T) {
 	fake := slacktest.New()
 	d := &detailer{detail: askPR()}
-	_, err := NewAsker(d, nil, fake, "", "C1", "p").
+	store, n := askerStore(t, fake)
+	_, err := NewAsker(d, store, n, fake, "", "C1", "p").
 		Ask(context.Background(), "o/r#7", "U0B20G0ET9T", target)
 	if err == nil {
 		t.Fatal("Ask succeeded with no reviewer configured")
@@ -297,7 +313,8 @@ func TestAskRejectsABadRef(t *testing.T) {
 func TestAskFailsClosedWhenGitHubDoes(t *testing.T) {
 	fake := slacktest.New()
 	d := &detailer{err: errors.New("404")}
-	_, err := NewAsker(d, nil, fake, "U0B6HK02YBB", "C1", "p").
+	store, n := askerStore(t, fake)
+	_, err := NewAsker(d, store, n, fake, "U0B6HK02YBB", "C1", "p").
 		Ask(context.Background(), "o/r#7", "U0B20G0ET9T", target)
 	if err == nil {
 		t.Fatal("Ask succeeded despite a failed GitHub read")
@@ -389,7 +406,8 @@ func TestAskTagTextGuaranteesBothMentions(t *testing.T) {
 func TestAskResolvesAConfiguredHandle(t *testing.T) {
 	fake := slacktest.New()
 	d := &detailer{detail: askPR()}
-	asker := NewAsker(d, nil, fake, "@murtaugh", "C1", "").
+	store, n := askerStore(t, fake)
+	asker := NewAsker(d, store, n, fake, "@murtaugh", "C1", "").
 		WithResolver(fakeResolver{"murtaugh": "U0B6HK02YBB"})
 
 	res, err := asker.Ask(context.Background(), "o/r#7", "U0B20G0ET9T", target)
@@ -409,7 +427,8 @@ func TestAskResolvesAConfiguredHandle(t *testing.T) {
 func TestAskFailsClosedOnAnUnresolvableHandle(t *testing.T) {
 	fake := slacktest.New()
 	d := &detailer{detail: askPR()}
-	asker := NewAsker(d, nil, fake, "@nobody", "C1", "").
+	store, n := askerStore(t, fake)
+	asker := NewAsker(d, store, n, fake, "@nobody", "C1", "").
 		WithResolver(fakeResolver{})
 
 	if _, err := asker.Ask(context.Background(), "o/r#7", "U0B20G0ET9T", target); err == nil {
@@ -471,5 +490,93 @@ func TestBodyIsDeterministic(t *testing.T) {
 		if got := Body(d); got != first {
 			t.Fatalf("run %d differed: %q vs %q", i, got, first)
 		}
+	}
+}
+
+// --- settling ---------------------------------------------------------------
+
+// The ask card is tracked now. It was not at first — "an ask is a one-off, not
+// a card to maintain" held right up until an approval needed to change one.
+func TestAskCardIsTracked(t *testing.T) {
+	fake := slacktest.New()
+	asker, _ := newAsker(t, fake, "C-reviews")
+
+	if _, err := asker.Ask(context.Background(), "o/r#7", "U0B20G0ET9T", target); err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	entry, found, err := asker.store.Card(context.Background(), AskKey("o/r#7"))
+	if err != nil || !found {
+		t.Fatalf("the ask card was not recorded: %v", err)
+	}
+	if entry.TS == "" || entry.State != AskStateOpen {
+		t.Fatalf("entry = %+v", entry)
+	}
+}
+
+// Asking twice updates the card rather than posting a second one.
+func TestAskingTwiceUpdatesTheSameCard(t *testing.T) {
+	fake := slacktest.New()
+	asker, _ := newAsker(t, fake, "C-reviews")
+
+	for i := 0; i < 2; i++ {
+		if _, err := asker.Ask(context.Background(), "o/r#7", "U0B20G0ET9T", target); err != nil {
+			t.Fatalf("Ask %d: %v", i, err)
+		}
+	}
+	cards := 0
+	for _, c := range fake.Calls {
+		if c.Kind == "post" && c.Msg.ThreadTS == "" {
+			cards++
+		}
+	}
+	if cards != 1 {
+		t.Fatalf("posted %d cards, want one updated in place", cards)
+	}
+}
+
+// A card still offering Approve for a merged pull request invites a click that
+// can only fail.
+func TestSettledCardDropsApproveAndCollapses(t *testing.T) {
+	card := AskSettledCard(askPR(), "body", "Approved and merged")
+
+	if !card.Collapsed {
+		t.Error("the settled card is not collapsed")
+	}
+	raw, err := json.Marshal(card.Blocks())
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var blocks []map[string]any
+	if err := json.Unmarshal(raw, &blocks); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if blocks[0]["default_collapsed"] != true {
+		t.Error("default_collapsed is not set")
+	}
+
+	for _, child := range blocks[0]["child_blocks"].([]any) {
+		b := child.(map[string]any)
+		if b["type"] != "actions" {
+			continue
+		}
+		els := b["elements"].([]any)
+		if len(els) != 1 {
+			t.Fatalf("settled card has %d controls, want only the link", len(els))
+		}
+		el := els[0].(map[string]any)
+		if el["url"] == nil {
+			t.Errorf("the surviving control is not the link: %v", el)
+		}
+		if el["value"] == IntentApprove {
+			t.Error("Approve survived on the settled card")
+		}
+	}
+}
+
+// The live card still offers Approve, or none of the above means anything.
+func TestLiveCardStillOffersApprove(t *testing.T) {
+	raw, _ := json.Marshal(AskCard(askPR(), "body").Blocks())
+	if !strings.Contains(string(raw), IntentApprove) {
+		t.Fatal("the live ask card no longer offers Approve")
 	}
 }

@@ -317,16 +317,17 @@ func TestPlistCarriesAPath(t *testing.T) {
 }
 
 func TestMissingToolsReportsWhatIsUnreachable(t *testing.T) {
-	dir := t.TempDir()
-	// A `gh` the agent can reach, and no `claude` anywhere.
-	if err := os.WriteFile(filepath.Join(dir, "gh"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+	empty := t.TempDir()
+	if got := newManager(t, newFakeRunner(), Options{Path: empty}).MissingTools(); len(got) != 1 || got[0] != "gh" {
+		t.Fatalf("MissingTools = %v, want [gh]", got)
+	}
+
+	withGH := t.TempDir()
+	if err := os.WriteFile(filepath.Join(withGH, "gh"), []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	m := newManager(t, newFakeRunner(), Options{Path: dir})
-
-	missing := m.MissingTools()
-	if len(missing) != 1 || missing[0] != "claude" {
-		t.Fatalf("MissingTools = %v, want [claude]", missing)
+	if got := newManager(t, newFakeRunner(), Options{Path: withGH}).MissingTools(); len(got) != 0 {
+		t.Fatalf("MissingTools = %v, want none", got)
 	}
 }
 

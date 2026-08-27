@@ -6,18 +6,17 @@ import (
 	"strings"
 	"time"
 
-	"github.com/miere/riggs-mcp/internal/ai"
 	"github.com/miere/riggs-mcp/internal/jira"
 	"github.com/miere/riggs-mcp/internal/notify"
 	"github.com/miere/riggs-mcp/internal/slack"
+	"github.com/miere/riggs-mcp/internal/slackmd"
 )
 
 // Engine advertises tickets and keeps their cards in step.
 type Engine struct {
-	jira       Source
-	store      *notify.Store
-	notifier   *notify.Notifier
-	summariser ai.Summariser
+	jira     Source
+	store    *notify.Store
+	notifier *notify.Notifier
 	// admin is who may act on a card, and who idle nudges tag.
 	admin Admin
 	now   func() time.Time
@@ -30,8 +29,8 @@ type Admin struct {
 }
 
 // NewEngine builds the reconciler.
-func NewEngine(src Source, store *notify.Store, n *notify.Notifier, s ai.Summariser, admin Admin) *Engine {
-	return &Engine{jira: src, store: store, notifier: n, summariser: s, admin: admin, now: time.Now}
+func NewEngine(src Source, store *notify.Store, n *notify.Notifier, admin Admin) *Engine {
+	return &Engine{jira: src, store: store, notifier: n, admin: admin, now: time.Now}
 }
 
 // WithClock overrides the clock; intended for tests.
@@ -170,23 +169,28 @@ func (e *Engine) collapseHandled(ctx context.Context, issueKey string, target sl
 }
 
 // summaryFor returns the card body, computing it only once per ticket.
-func (e *Engine) summaryFor(ctx context.Context, key string, issue jira.Issue, dryRun bool) (string, error) {
-	cached, ok, err := e.store.Summary(ctx, key)
-	if err != nil {
-		return "", err
+// summaryFor is the card body: the opening of the ticket's own description,
+// translated into Slack's mrkdwn.
+//
+// It replaced an LLM summary for the same three reasons the pull-request card
+// did (§7d) — the seconds it cost on a per-ticket loop, the dependency on a
+// local `claude` binary, and output that changed between renders and so could
+// not be honestly fingerprinted. A reporter's description is not obviously
+// improved by being paraphrased.
+//
+// Pure now: no I/O, no cache, no dry-run special case. There is nothing left
+// that a preview would be expensive to do.
+func (e *Engine) summaryFor(_ context.Context, _ string, issue jira.Issue, _ bool) (string, error) {
+	if body := strings.TrimSpace(slackmd.Excerpt(issue.Description, BodyParagraphs)); body != "" {
+		return body, nil
 	}
-	if ok {
-		return cached, nil
-	}
-	// A dry run must be cheap as well as harmless: summarising shells out to
-	// `claude -p` per ticket, which turns a preview into minutes of work for a
-	// value nobody acts on. The title stands in.
-	if dryRun {
-		return issue.Summary, nil
-	}
-	summary, _ := e.summariser.Summarise(ctx, issue.Summary, issue.Description)
-	return summary, e.store.SaveSummary(ctx, key, summary, e.now())
+	// A card with no body renders no section at all, which reads as though
+	// something failed.
+	return slackmd.Convert(issue.Summary).Text, nil
 }
+
+// BodyParagraphs is how much of a description a ticket card shows.
+const BodyParagraphs = 2
 
 // Nudge re-pings the admin on cards that have sat unclaimed too long.
 //

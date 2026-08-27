@@ -125,10 +125,29 @@ func (a *Application) settle(ctx context.Context, creds slack.Credentials,
 		}
 		return runErr
 	}
+	// Both, because they are independent facts: a pull request can be in a
+	// digest, or have an ask card, or both, or neither.
+	var problems []error
 	if _, err := completer.Complete(ctx, in.Item, status, target); err != nil {
-		return fmt.Errorf("approved %s but could not mark it done in the digest: %w", in.Item, err)
+		problems = append(problems, fmt.Errorf("could not mark %s done in the digest: %w", in.Item, err))
+	}
+	if _, err := completer.Settle(ctx, in.Item, settledLabel(status), target); err != nil {
+		problems = append(problems, fmt.Errorf("could not collapse the review request for %s: %w", in.Item, err))
+	}
+	if len(problems) > 0 {
+		// The approval landed. Say what did not follow it, without pretending
+		// the approval itself failed.
+		return fmt.Errorf("approved %s, but: %w", in.Item, errors.Join(problems...))
 	}
 	return nil
+}
+
+// settledLabel is the line a collapsed ask card carries.
+func settledLabel(status string) string {
+	if status == pullrequest.ReasonMerged {
+		return "Approved and merged"
+	}
+	return "Approved"
 }
 
 // targetFor builds the delivery target for a click: this daemon's credentials,

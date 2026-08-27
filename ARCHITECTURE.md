@@ -67,8 +67,8 @@ The automations being replaced:
        (where it goes)         (what was already said)    (who we are)
                                       │
                       ┌───────────────┼───────────────┐
-                internal/github   internal/jira   internal/ai
-                (REST + ETags)    (REST v3)       (shells `claude -p`)
+                internal/github        internal/jira    internal/slackmd
+                (REST + ETags)         (REST v3)        (GH md -> mrkdwn)
 ```
 
 - `internal/app` is the only place tools are wired into the registry.
@@ -182,7 +182,8 @@ internal/
   daemon/                        # Socket Mode listener + interaction router (§7b)
   notify/                        # the card ledger (§9)
   github/                        # REST client, ETag cache (§8)
-  jira/ ai/                      # external seams
+  jira/                          # external seam
+  slackmd/                       # GitHub Markdown -> Slack mrkdwn (§7d)
 ```
 
 Rules:
@@ -352,6 +353,17 @@ Three options render on a live row; two of them are answered by the daemon.
   reads as the subject and the ask as the message about it. Nothing is delegated
   and no review is started. Destination is `review-request` in the config: a
   channel, or a DM when none is named.
+- **The ask card is tracked in the ledger** (`git.pr.ask:<ref>`), so an
+  approval can find and rewrite it. It was not, at first: "an ask is a one-off,
+  not a card to maintain" held right up until an approval needed to change one.
+  Asking twice therefore updates the card rather than posting a second, which is
+  the better answer anyway.
+- **An approval settles it**: the Approve button goes and the container
+  collapses. A card still offering Approve for a merged pull request is worse
+  than no card — it invites a click that can only fail. The link stays, because
+  "where was that again" outlives the review. Settling is independent of the
+  digest row: a pull request can be in a digest, have an ask card, both, or
+  neither, and the same approval settles whichever exist.
 - **The ask card has its own `action_id`** (`pr_ask_review`), not the legacy
   card's `approve_only`, so Riggs' dispatch table and Murtaugh's still-live
   rules never have to agree about a name.
@@ -454,6 +466,9 @@ Rules:
   and stopping there is what keeps it readable in one sitting.
 
 ### Card bodies
+
+Ticket cards use the same rule, over the flattened ADF description. With that,
+**`internal/ai` is gone** and nothing in Riggs shells out to an LLM.
 
 A pull-request card shows the first two paragraphs of the description, converted
 — **not** an LLM summary. That call cost ~8.6s on the click path with a human
@@ -830,7 +845,7 @@ Rules:
   network — otherwise respawns as fast as launchd can fork it.
 - **The plist carries a `PATH`.** launchd's default is
   `/usr/bin:/bin:/usr/sbin:/sbin` — no Homebrew, no `~/.local/bin`. Riggs shells
-  out to `gh` for its GitHub token and `claude` for summaries, so without this
+  out to `gh` for its GitHub token, so without this
   the daemon connects perfectly and then fails on the *first click* with
   "executable file not found in $PATH". `install` captures the PATH of the shell
   that ran it, and reports any of those tools it cannot resolve — because the
@@ -913,6 +928,8 @@ one *would* live at still decides, which is the state a fresh machine and
 | 18 | Acknowledge every socket request (§7b) | done |
 | 19 | Complete the row on approval; report failures in-thread (§9b) | done |
 | 20 | slackmd converter; card bodies from the description (§7d) | done |
+| 21 | Ticket bodies too; `internal/ai` decommissioned | done |
+| 22 | Track and settle the ask-review card (§7bb) | done |
 
 ## 13b. Cutover
 
@@ -1018,6 +1035,12 @@ Rollback: the previous job and rule definitions are captured under
   paragraphs of the description, converted — replacing the `claude -p` summary,
   which cost ~8.6s on the click path, bound the card to a local binary, and was
   non-deterministic.
+- **unreleased** — Phase 22. The ask-review card is tracked in the ledger, and
+  an approval collapses it and removes its Approve button (§7bb).
+- **unreleased** — Phase 21. Ticket card bodies come from the description too,
+  and **`internal/ai` is deleted** — nothing in Riggs shells out to an LLM any
+  more. `claude` leaves the launch agent's PATH requirement and the
+  capabilities report with it.
 - **unreleased** — Phase 5, the cutover (§13b). Also fixes the installer,
   which built its job command from `cfg job set` — documented as equivalent to
   `jobs define`, but it rejects `--args`.

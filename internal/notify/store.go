@@ -284,7 +284,7 @@ func (s *Store) CountCards(ctx context.Context) (int, error) {
 
 // Summary returns the cached AI summary for key.
 //
-// Summaries are cached because they cost a `claude -p` invocation each and the
+// Summaries were cached because each cost an LLM call and the
 // text does not change while the pull request description does not — paying
 // for one every minute would be absurd.
 func (s *Store) Summary(ctx context.Context, key string) (string, bool, error) {
