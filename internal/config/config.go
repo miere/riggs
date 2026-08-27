@@ -82,8 +82,9 @@ type Config struct {
 // (REVIEWER_HANDLE, REVIEWER_SLACK_ID, nudge_user_id, allowed_users and
 // slack_to_jira_email), which could drift apart.
 type Admin struct {
-	// SlackUserID is the DM target when a tool is given no channel, and the
-	// user tagged by threaded nudges.
+	// SlackUserID is the DM target when a tool is given no channel, the user
+	// tagged by threaded replies, and the one human who sees past the divider
+	// on the App Home tab (§7e).
 	SlackUserID string `yaml:"slack-user-id"`
 	// JiraEmail is the account tickets are assigned to.
 	JiraEmail string `yaml:"jira-email"`

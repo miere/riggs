@@ -5,19 +5,21 @@ import (
 	"fmt"
 	"os"
 	"sort"
-	"time"
 )
 
 // LegacyEntry is one record from the Python automation's state file
 // (`automations/quick_coding_tasks/state/tickets.json`).
+//
+// The file also carries `last_nudge_ts`, which is deliberately not read: the
+// idle nudge it clocked no longer exists, so there is nothing for the value to
+// mean on this side.
 type LegacyEntry struct {
-	Status      string  `json:"status"`
-	Summary     string  `json:"summary"`
-	Reporter    string  `json:"reporter"`
-	Parent      string  `json:"parent"`
-	TS          string  `json:"ts"`
-	GoalSummary string  `json:"goal_summary"`
-	LastNudgeTS float64 `json:"last_nudge_ts"`
+	Status      string `json:"status"`
+	Summary     string `json:"summary"`
+	Reporter    string `json:"reporter"`
+	Parent      string `json:"parent"`
+	TS          string `json:"ts"`
+	GoalSummary string `json:"goal_summary"`
 }
 
 // State maps the Python's status vocabulary onto ours. `resolved_oob` — the
@@ -33,16 +35,6 @@ func (e LegacyEntry) State() State {
 	default:
 		return Resolved
 	}
-}
-
-// NudgedAt returns when the idle ping last fired, if ever. Carrying this over
-// is what stops every stale card being nudged at once on the first run.
-func (e LegacyEntry) NudgedAt() (time.Time, bool) {
-	if e.LastNudgeTS <= 0 {
-		return time.Time{}, false
-	}
-	sec := int64(e.LastNudgeTS)
-	return time.Unix(sec, int64((e.LastNudgeTS-float64(sec))*1e9)), true
 }
 
 // LegacyState is the whole file, keyed by ticket key.

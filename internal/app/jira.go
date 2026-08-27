@@ -47,7 +47,6 @@ func registerJiraTools(reg *tools.Registry, cfg *config.Config, resolver *slack.
 		return engineForTickets(cfg)
 	}
 	reg.Register(tickets.NewPoll(resolver, factory))
-	reg.Register(tickets.NewNudge(resolver, factory))
 	reg.Register(tickets.NewAssign(resolver, factory))
 	reg.Register(tickets.NewDismiss(resolver, factory))
 	reg.Register(tickets.NewImport(func(context.Context) (tickets.Store, func() error, error) {

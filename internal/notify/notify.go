@@ -31,34 +31,20 @@ const (
 	Gone Outcome = "gone"
 )
 
-// Policy selects how a latch decides whether a threaded message may fire.
-type Policy int
-
-const (
-	// PolicyOnce fires at most once until the latch is explicitly cleared.
-	// This is the reviewer tag: one ping per episode of being asked to
-	// review, no matter how many ticks pass.
-	PolicyOnce Policy = iota
-	// PolicyMinGap fires only when at least MinGap has passed since the last
-	// firing. This is the idle nudge's floor, which stops a manual re-run
-	// landing on top of a scheduled one.
-	PolicyMinGap
-)
-
-// Latch names a one-shot or rate-limited threaded message.
+// Latch names a threaded message that fires at most once until it is
+// explicitly cleared.
+//
+// It used to carry a policy, because the idle nudge wanted a rate-limited
+// variant with a minimum gap between firings. The nudge is gone and nothing
+// else ever wanted one, so the policy went with it rather than staying as a
+// one-valued enum explaining itself.
 type Latch struct {
-	Name   string
-	Policy Policy
-	MinGap time.Duration
+	Name string
 }
 
-// Once builds a fire-once-until-cleared latch.
-func Once(name string) Latch { return Latch{Name: name, Policy: PolicyOnce} }
-
-// MinGap builds a rate-limited latch.
-func MinGap(name string, d time.Duration) Latch {
-	return Latch{Name: name, Policy: PolicyMinGap, MinGap: d}
-}
+// Once builds a fire-once-until-cleared latch. This is the reviewer tag: one
+// ping per episode of being asked to review, no matter how many ticks pass.
+func Once(name string) Latch { return Latch{Name: name} }
 
 // Notifier posts and maintains cards, keeping the ledger in step.
 type Notifier struct {
@@ -144,8 +130,9 @@ func (n *Notifier) save(ctx context.Context, key string, target slack.Target, re
 //
 // It reports whether the message was actually sent. false with a nil error is
 // the ordinary case, not a failure: either the latch is closed, or there is no
-// card to reply to. A nudge for a ticket that was never advertised has nowhere
-// to go, and inventing a top-level message would be worse than staying quiet.
+// card to reply to. A reply about something that was never advertised has
+// nowhere to go, and inventing a top-level message would be worse than staying
+// quiet.
 func (n *Notifier) Thread(ctx context.Context, key string, target slack.Target, text string, latch Latch) (bool, error) {
 	entry, found, err := n.store.Card(ctx, key)
 	if err != nil {
@@ -179,17 +166,11 @@ func (n *Notifier) latchOpen(ctx context.Context, key string, latch Latch) (bool
 	if latch.Name == "" {
 		return true, nil
 	}
-	firedAt, fired, err := n.store.LatchFiredAt(ctx, key, latch.Name)
+	_, fired, err := n.store.LatchFiredAt(ctx, key, latch.Name)
 	if err != nil {
 		return false, err
 	}
-	if !fired {
-		return true, nil
-	}
-	if latch.Policy == PolicyOnce {
-		return false, nil
-	}
-	return n.now().Sub(firedAt) >= latch.MinGap, nil
+	return !fired, nil
 }
 
 // ClearLatch reopens a latch, so a once-per-episode message fires again on the

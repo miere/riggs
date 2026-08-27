@@ -45,7 +45,7 @@ func TestJiraToolsNeedATenant(t *testing.T) {
 
 func TestJiraToolsRegisterWithATenant(t *testing.T) {
 	names := registeredNames(jiraCfg(t, "https://example.atlassian.net"))
-	for _, want := range []string{"jira.tickets.poll", "jira.tickets.nudge", "jira.tickets.assign"} {
+	for _, want := range []string{"jira.tickets.poll", "jira.tickets.assign"} {
 		if !names[want] {
 			t.Errorf("%s was not registered: got %v", want, names)
 		}

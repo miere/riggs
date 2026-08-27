@@ -75,13 +75,6 @@ var jobs = []job{
 		Every: "3m", Timeout: "2m",
 		What: "ai-able ticket poll",
 	},
-	{
-		Name:     "quick-coding-tasks-nudge",
-		Tool:     "jira.tickets.nudge",
-		Args:     []string{"jira", "tickets", "--nudge"},
-		Schedule: "0 9,12,14,17 * * 1-5", Timeout: "3m",
-		What: "idle ticket nudge",
-	},
 }
 
 // wireMurtaugh registers the scheduled jobs, if Murtaugh is installed.

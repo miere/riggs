@@ -23,8 +23,8 @@ type StoreFactory func(ctx context.Context) (Store, func() error, error)
 
 // ImportTool migrates the Python automation's state file into the ledger.
 //
-// Without it, cutover would re-advertise every live ticket and — because the
-// nudge timestamps would be lost too — ping the admin on all of them at once.
+// Without it, cutover would re-advertise every live ticket that the Python had
+// already put in front of the admin.
 type ImportTool struct {
 	newer StoreFactory
 	now   func() time.Time
@@ -69,7 +69,6 @@ type ImportResult struct {
 	Imported  int      `json:"imported"`
 	Live      int      `json:"live"`
 	Summaries int      `json:"summaries"`
-	Nudges    int      `json:"nudges"`
 	Skipped   []string `json:"skipped,omitempty"`
 	DryRun    bool     `json:"dry_run"`
 }
@@ -80,8 +79,8 @@ func (r ImportResult) String() string {
 	if r.DryRun {
 		b.WriteString("[dry run] ")
 	}
-	fmt.Fprintf(&b, "%s: %d entries, %d imported (%d still live), %d summaries, %d nudge timestamps",
-		r.Source, r.Total, r.Imported, r.Live, r.Summaries, r.Nudges)
+	fmt.Fprintf(&b, "%s: %d entries, %d imported (%d still live), %d summaries",
+		r.Source, r.Total, r.Imported, r.Live, r.Summaries)
 	if len(r.Skipped) > 0 {
 		fmt.Fprintf(&b, "\nskipped %d without a Slack timestamp", len(r.Skipped))
 	}
@@ -144,10 +143,6 @@ func (t *ImportTool) Invoke(ctx context.Context, args map[string]any) (any, erro
 		if entry.GoalSummary != "" {
 			result.Summaries++
 		}
-		nudgedAt, nudged := entry.NudgedAt()
-		if nudged {
-			result.Nudges++
-		}
 		if dryRun {
 			continue
 		}
@@ -162,13 +157,6 @@ func (t *ImportTool) Invoke(ctx context.Context, args map[string]any) (any, erro
 		}
 		if entry.GoalSummary != "" {
 			if err := store.SaveSummary(ctx, key, entry.GoalSummary, now); err != nil {
-				return nil, err
-			}
-		}
-		// Carry the nudge clock across, or every stale card would be pinged
-		// again on the first scheduled run.
-		if nudged {
-			if err := store.SetLatch(ctx, key, "nudge", nudgedAt); err != nil {
 				return nil, err
 			}
 		}

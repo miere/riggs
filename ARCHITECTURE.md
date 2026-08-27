@@ -39,7 +39,6 @@ The automations being replaced:
 | `pull_request/main.py approve` | rule `pr-approve` | `git.pr.approve` |
 | `pull_request/main.py approve --action-id approve_merge` | rule `pr-approve-merge` | `git.pr.approve-merge` |
 | `quick_coding_tasks/main.py poll` | job, every 3m | `jira.tickets.poll` |
-| `quick_coding_tasks/main.py nudge` | job, weekdays 09/12/14/17 | `jira.tickets.nudge` |
 | `quick_coding_tasks/main.py action` | rules `quick-coding-tasks-*` | `jira.tickets.assign` / `.dismiss` |
 | `repository_manager/main.py` | — | to be scoped |
 
@@ -739,16 +738,56 @@ Rules:
 - **Only the configured admin may act.** A card is visible to a whole channel,
   and a button anyone could press would assign work to someone who never asked
   for it. An unattributed click is refused too.
-- The nudge re-checks Jira before pinging, so a quietly claimed ticket gets its
-  card collapsed instead of a bogus reminder. Age is measured from when the
-  card was advertised, not from any Jira date.
+- **There is no idle nudge.** The Python re-pinged the admin on cards that had
+  sat unclaimed past a 24h threshold, on a weekday cron. It is retired (§8c):
+  re-pinging an unclaimed ticket does not make anyone pick it up, it only makes
+  the queue louder the longer it goes unread. A ticket claimed outside Slack
+  still gets its card collapsed — that was the nudge's other job, and the poll
+  already did it on the same pass.
 - **Dry runs never summarise.** Shelling `claude -p` per ticket turned a
   preview into minutes of work for a value nobody acts on; the title stands in.
   The same applies to the pull-request loop.
 
+## 8c. The idle nudge, and why it is gone
+
+The Python re-pinged the admin in-thread on any ticket card that had sat
+unclaimed past a 24h threshold, on a weekday 09/12/14/17 cron. Riggs carried it
+over verbatim during the migration (phase 4) and has now retired it.
+
+A reminder that fires on a timer rather than on a change tells the reader
+nothing they did not already know: the ticket is still there, which is exactly
+what the card already says. What it does do is make the queue louder the longer
+it goes unread, which trains the reader to skip it — and a queue you have learnt
+to skip is worse than one that says its piece once.
+
+The nudge's *other* job survives. It re-checked Jira before pinging, so a ticket
+quietly claimed since the last poll got its card collapsed rather than a bogus
+reminder. `Poll` already does that on the same pass, for every tracked card, and
+now carries the test that used to live on the nudge.
+
+What went with it:
+
+- `jira.tickets.nudge` and `ticket.Engine.Nudge`, and the
+  `quick-coding-tasks-nudge` job the installer registered.
+- `notify.MinGap` — the rate-limited latch policy. The nudge was its only user,
+  so `Latch` is now just a name and `latchOpen` is "has it fired".
+- The import's nudge-clock carry-over. It existed so cutover would not ping
+  every stale card at once; with nothing to ping, `last_nudge_ts` is read by
+  nobody.
+
+**Operator note:** the installer no longer *registers* the job, which does
+nothing about the one already in Murtaugh's config. It is still there, and once
+this build is installed it will fire at a tool the binary no longer exposes —
+four times a weekday, failing silently into the job log. Remove it as part of
+deploying this:
+
+```sh
+murtaugh cfg job delete --name quick-coding-tasks-nudge
+```
+
 ## 9. The notification ledger
 
-Every notification is stateful. A nudge can only be threaded onto a message
+Every notification is stateful. A threaded reply can only go onto a message
 that was already posted, so "post" and "update" and "thread" are one mechanism,
 not three programs.
 
@@ -760,10 +799,11 @@ fingerprint, latches, updated_at}`. Two operations cover both automations:
   card's fingerprint changed; re-post and reset latches if the stored `ts` went
   stale (the message was deleted).
 - **`Thread(key, msg, latch)`** — post into the stored message's thread, or
-  no-op if there is no such message. Two latch policies cover every case in the
-  Python: *once-per-episode* (the review queue's `tagged` flag, reset on
-  leaving the reviewable state) and *min-gap* (the nudge's 1h floor under a 24h
-  idle threshold).
+  no-op if there is no such message. One latch policy is left:
+  *once-per-episode* (the review queue's `tagged` flag, reset on leaving the
+  reviewable state). A rate-limited *min-gap* latch existed for the nudge's 1h
+  floor and went with it — a one-valued policy enum explaining itself is worse
+  than no enum.
 
 Rules:
 
@@ -1064,7 +1104,7 @@ one *would* live at still decides, which is the state a fresh machine and
 | 1 | Slack domain (live client), Block Kit cards, `notify` ledger, `slack.send-msg` | done |
 | 2 | GitHub REST client + ETag cache (§8), PR state derivation, `git.pr.fetch-reviews` + parity gate | done |
 | 3 | `git.pr.approve` / `--approve-merge` | done |
-| 4 | Jira domain, `jira.tickets.*` poll/nudge/assign/dismiss/import | done |
+| 4 | Jira domain, `jira.tickets.*` poll/nudge/assign/dismiss/import | done (nudge retired, phase 25) |
 | 5 | Repoint Murtaugh jobs and rules, retire the Python | done (applies on gateway restart) |
 | 6 | Riggs' own Slack app: `riggs daemon`, Socket Mode, interaction router (§7b) | done |
 | 7 | The bulk digest block (§7c) | done |
@@ -1085,6 +1125,7 @@ one *would* live at still decides, which is the state a fresh machine and
 | 22 | Track and settle the ask-review card (§7bb) | done |
 | 23 | Text-presentation glyphs, enforced by a source scan | done |
 | 24 | The App Home tab, versioning, and self-update (§7e) | done |
+| 25 | Retire the idle nudge (§8c) | done |
 
 ## 13b. Cutover
 
@@ -1110,6 +1151,16 @@ Rollback: the previous job and rule definitions are captured under
 `/tmp/riggs-cutover-backup/` and can be restored with the same commands.
 
 ## 14. Change log
+
+- **unreleased** — Phase 25. The idle nudge is retired (§8c). A reminder on a
+  timer tells the reader nothing the card did not already say, and only makes
+  the queue louder the longer it goes unread. `jira.tickets.nudge`,
+  `ticket.Engine.Nudge` and the `quick-coding-tasks-nudge` job are gone, along
+  with `notify.MinGap` — the nudge was its only user, so `Latch` collapses to a
+  name and `latchOpen` to "has it fired". The nudge's other job, collapsing a
+  card whose ticket was claimed outside Slack, was always also `Poll`'s, and the
+  test moved there. An already-installed nudge job must be removed from
+  Murtaugh's config by hand; this build no longer exposes the tool it calls.
 
 - **unreleased** — Phase 24. The App Home tab (§7e). Riggs gains a version
   (`internal/version`, stamped by a tagged release), a release lookup

@@ -126,12 +126,12 @@ func TestSkipsJobsWhoseToolIsNotBuilt(t *testing.T) {
 	}
 }
 
-// The nudge keeps its cron, not an interval — the cadences are carried over
-// unchanged so a migration does not also change behaviour.
+// The cadences are carried over unchanged, so a migration does not also change
+// behaviour.
 func TestPreservesExistingCadences(t *testing.T) {
 	s := happyScript("", "", "")
 	r := newRig(t, s, map[string]bool{
-		"git.pr.bulk": true, "jira.tickets.poll": true, "jira.tickets.nudge": true})
+		"git.pr.bulk": true, "jira.tickets.poll": true})
 
 	if err := r.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -139,7 +139,6 @@ func TestPreservesExistingCadences(t *testing.T) {
 	for _, tc := range []struct{ job, flag, value string }{
 		{"github-review-queue", "--every", "3m"},
 		{"quick-coding-tasks-poll", "--every", "3m"},
-		{"quick-coding-tasks-nudge", "--schedule", "0 9,12,14,17 * * 1-5"},
 	} {
 		argv, ok := argvOf(r, tc.job)
 		if !ok {
@@ -271,12 +270,12 @@ func TestDigestJobCarriesTheSlackProfile(t *testing.T) {
 func TestOnlyTheDigestAsksForAProfile(t *testing.T) {
 	s := happyScript("", "", "")
 	r := newRig(t, s, map[string]bool{
-		"git.pr.bulk": true, "jira.tickets.poll": true, "jira.tickets.nudge": true})
+		"git.pr.bulk": true, "jira.tickets.poll": true})
 
 	if err := r.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	for _, name := range []string{"quick-coding-tasks-poll", "quick-coding-tasks-nudge"} {
+	for _, name := range []string{"quick-coding-tasks-poll"} {
 		argv, ok := argvOf(r, name)
 		if !ok {
 			t.Fatalf("%s not registered", name)

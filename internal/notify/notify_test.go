@@ -145,12 +145,12 @@ func TestUpsertRepostsWhenMessageIsGone(t *testing.T) {
 	}
 }
 
-// A nudge for something never advertised has nowhere to go. Inventing a
+// A reply about something never advertised has nowhere to go. Inventing a
 // top-level message would be worse than staying quiet.
 func TestThreadWithoutCardIsQuiet(t *testing.T) {
 	n, fake, _ := harness(t)
 
-	sent, err := n.Thread(context.Background(), "never-posted", target, "nudge", Once("nudge"))
+	sent, err := n.Thread(context.Background(), "never-posted", target, "hello", Once("tagged"))
 	if err != nil {
 		t.Fatalf("Thread: %v", err)
 	}
@@ -239,36 +239,6 @@ func TestClearLatchAllowsRefiring(t *testing.T) {
 	}
 	if !sent {
 		t.Error("tag did not re-fire after the latch was cleared")
-	}
-}
-
-// The nudge's floor: a manual re-run must not land on top of a scheduled one.
-func TestMinGapLatch(t *testing.T) {
-	store, err := Open(filepath.Join(t.TempDir(), "config.db"))
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	defer store.Close()
-
-	clock := time.Date(2026, 8, 9, 9, 0, 0, 0, time.UTC)
-	fake := slacktest.New()
-	n := New(store, fake).WithClock(func() time.Time { return clock })
-	ctx := context.Background()
-	_, _ = n.Upsert(ctx, "k", target, card("v1"), "f", "")
-
-	latch := MinGap("nudge", time.Hour)
-	if sent, _ := n.Thread(ctx, "k", target, "nudge", latch); !sent {
-		t.Fatal("first nudge did not fire")
-	}
-
-	clock = clock.Add(59 * time.Minute)
-	if sent, _ := n.Thread(ctx, "k", target, "nudge", latch); sent {
-		t.Error("nudge fired inside the minimum gap")
-	}
-
-	clock = clock.Add(2 * time.Minute) // now 61 minutes on
-	if sent, _ := n.Thread(ctx, "k", target, "nudge", latch); !sent {
-		t.Error("nudge did not fire once the gap had passed")
 	}
 }
 

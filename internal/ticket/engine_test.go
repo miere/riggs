@@ -227,9 +227,10 @@ func TestPollDryRunWritesNothing(t *testing.T) {
 	}
 }
 
-// The nudge re-checks Jira first, so a quietly claimed ticket gets collapsed
-// instead of a bogus ping.
-func TestNudgeCollapsesInsteadOfPingingAClaimedTicket(t *testing.T) {
+// Collapsing a card whose ticket was claimed outside Slack was the nudge's job
+// too, and it re-checked Jira before pinging. With the nudge gone, the poll is
+// the only thing that notices — so this is the pass that has to.
+func TestPollCollapsesATicketClaimedOutsideSlack(t *testing.T) {
 	fj := &fakeJira{search: []jira.Issue{ready("NYX-1", "T")}}
 	r := newRig(t, fj)
 	ctx := context.Background()
@@ -240,56 +241,21 @@ func TestNudgeCollapsesInsteadOfPingingAClaimedTicket(t *testing.T) {
 	claimed := ready("NYX-1", "T")
 	claimed.Assignee = "Annie"
 	fj.issues = map[string]jira.Issue{"NYX-1": claimed}
+	fj.search = nil
 	r.now = r.now.Add(48 * time.Hour)
 	r.slack.Reset()
 
-	report, err := r.engine.Nudge(ctx, 24*time.Hour, time.Hour, target, false)
+	report, err := r.engine.Poll(ctx, "q", target, false)
 	if err != nil {
-		t.Fatalf("Nudge: %v", err)
+		t.Fatalf("Poll: %v", err)
 	}
 	if len(report.Outcomes) != 1 || report.Outcomes[0].State != string(Resolved) {
-		t.Fatalf("report = %+v, want a collapse rather than a nudge", report)
+		t.Fatalf("report = %+v, want the card collapsed", report)
 	}
 	for _, c := range r.slack.Calls {
 		if c.Msg.ThreadTS != "" {
-			t.Errorf("posted a threaded nudge on a claimed ticket: %q", c.Msg.Text)
+			t.Errorf("posted in-thread on a claimed ticket: %q", c.Msg.Text)
 		}
-	}
-}
-
-func TestNudgeRespectsTheIdleThreshold(t *testing.T) {
-	fj := &fakeJira{search: []jira.Issue{ready("NYX-1", "T")},
-		issues: map[string]jira.Issue{"NYX-1": ready("NYX-1", "T")}}
-	r := newRig(t, fj)
-	ctx := context.Background()
-	if _, err := r.engine.Poll(ctx, "q", target, false); err != nil {
-		t.Fatalf("Poll: %v", err)
-	}
-	r.slack.Reset()
-
-	// Only 2 hours old: too fresh.
-	r.now = r.now.Add(2 * time.Hour)
-	report, _ := r.engine.Nudge(ctx, 24*time.Hour, time.Hour, target, false)
-	if len(report.Outcomes) != 0 || len(r.slack.Calls) != 0 {
-		t.Fatalf("nudged a fresh card: %+v", report)
-	}
-
-	// Past the threshold.
-	r.now = r.now.Add(30 * time.Hour)
-	report, _ = r.engine.Nudge(ctx, 24*time.Hour, time.Hour, target, false)
-	if len(report.Outcomes) != 1 || !report.Outcomes[0].Nudged {
-		t.Fatalf("report = %+v, want a nudge", report)
-	}
-	if body := r.slack.Calls[0].Msg.Text; !strings.Contains(body, "<@"+adminID+">") ||
-		!strings.Contains(body, "NYX-1") {
-		t.Errorf("nudge text = %q", body)
-	}
-
-	// A manual re-run inside the gap must not double-tap.
-	r.slack.Reset()
-	report, _ = r.engine.Nudge(ctx, 24*time.Hour, time.Hour, target, false)
-	if report.Outcomes[0].Nudged || len(r.slack.Calls) != 0 {
-		t.Errorf("nudged twice inside the minimum gap: %+v", report)
 	}
 }
 

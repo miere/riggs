@@ -1,7 +1,7 @@
 // Package notify owns everything Riggs has already said: which card is where,
 // what it looked like, and which one-off messages have already fired.
 //
-// Every notification is stateful. A nudge can only be threaded onto a message
+// Every notification is stateful. A reply can only be threaded onto a message
 // that was already posted, and a card must be updated in place rather than
 // re-announced — so "post", "update" and "thread" are one mechanism, not three
 // programs. That mechanism is Notifier (see notify.go); this file is the
