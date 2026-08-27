@@ -19,9 +19,6 @@ import (
 	"time"
 )
 
-// DefaultBaseURL is the NurtureCloud Jira tenant.
-const DefaultBaseURL = "https://vmxproperty.atlassian.net"
-
 // ErrNotConfigured is returned when no credentials are available. Like every
 // other capability gap it disables a feature; it never crashes the binary.
 var ErrNotConfigured = errors.New("jira: not configured")
@@ -38,13 +35,22 @@ type Client struct {
 	auth    string
 }
 
-// New builds a client for the given credentials. Both are required; with
-// either missing every call fails with ErrNotConfigured rather than a
-// confusing 401.
+// New builds a client for the given tenant and credentials. All three are
+// required; with any of them missing every call fails with ErrNotConfigured
+// rather than a confusing 401 — or, in the tenant's case, a request to
+// somebody else's Jira.
+//
+// There is deliberately NO default tenant. One used to be baked in here, which
+// meant a machine with no `jira.base-url` silently talked to whichever
+// Atlassian instance this source happened to name. That is a fine default right
+// up until it is the wrong one, and nothing about the failure would have said
+// so. The tenant is now configuration, like the credentials that authenticate
+// against it.
+//
+// This is not the same kind of setting as github.DefaultBaseURL or
+// slack.DefaultBaseURL. Those are vendor API roots — one address for everyone.
+// A Jira tenant is per-customer.
 func New(baseURL, email, token string) *Client {
-	if baseURL == "" {
-		baseURL = DefaultBaseURL
-	}
 	c := &Client{
 		http:    &http.Client{Timeout: 30 * time.Second},
 		baseURL: strings.TrimRight(baseURL, "/"),
@@ -214,6 +220,9 @@ func (c *Client) Transition(ctx context.Context, key, name string) error {
 
 // call performs one authenticated request.
 func (c *Client) call(ctx context.Context, method, path string, body, out any) error {
+	if c.baseURL == "" {
+		return fmt.Errorf("%w: set jira.base-url (or ATLASSIAN_BASE_URL) — there is no default tenant", ErrNotConfigured)
+	}
 	if c.auth == "" {
 		return fmt.Errorf("%w: set jira.email and jira.token (or ATLASSIAN_JIRA_EMAIL/_TOKEN)", ErrNotConfigured)
 	}

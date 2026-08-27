@@ -788,6 +788,7 @@ one *would* live at still decides, which is the state a fresh machine and
 | 10 | Supervising the daemon: `riggs launchd`, `env-file` (§12b) | done |
 | 11 | Decommission the per-PR card job, keeping the renderer (§12c) | done |
 | 12 | Pin the default dotenv location; report it (§12b) | done |
+| 13 | `jira.base-url` becomes required configuration; no default tenant | done |
 
 ## 13b. Cutover
 
@@ -848,6 +849,15 @@ Rollback: the previous job and rule definitions are captured under
   `~/.config/riggs/.env` (`config.DefaultEnvPath`) and reports the resolved path
   from `riggs capabilities`, loaded or not — the failure mode is an empty token,
   whose error message names neither the file nor the directory.
+- **unreleased** — Phase 13. `jira.base-url` becomes real configuration. It was
+  the one Atlassian setting `expand()` never touched, so a `${VAR}` reference
+  reached the HTTP client verbatim and every request went to
+  `${ATLASSIAN_BASE_URL}/rest/api/3/...`. It now expands, falls back to
+  `$ATLASSIAN_BASE_URL` like the credentials beside it, and must be an absolute
+  http(s) URL. **The default tenant is removed**: `jira.DefaultBaseURL` used to
+  hard-code an Atlassian instance, so a machine that configured no tenant
+  silently talked to whichever one this source named. With none configured the
+  `jira.*` tools are now simply absent (§6), like any other capability gap.
 - **unreleased** — Phase 5, the cutover (§13b). Also fixes the installer,
   which built its job command from `cfg job set` — documented as equivalent to
   `jobs define`, but it rejects `--args`.

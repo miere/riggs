@@ -49,7 +49,8 @@ func TestReportsReadyInstallation(t *testing.T) {
 	}
 	r := invoke(t, probes(cfg,
 		map[string]string{"gh": "/opt/homebrew/bin/gh", "claude": "/usr/local/bin/claude"},
-		map[string]string{"ATLASSIAN_JIRA_EMAIL": "m@x", "ATLASSIAN_JIRA_TOKEN": "t"},
+		map[string]string{"ATLASSIAN_JIRA_EMAIL": "m@x", "ATLASSIAN_JIRA_TOKEN": "t",
+			"ATLASSIAN_BASE_URL": "https://example.atlassian.net"},
 	))
 
 	if len(r.Slack) != 1 || !r.Slack[0].IsDefault || r.Slack[0].Problem != "" {
