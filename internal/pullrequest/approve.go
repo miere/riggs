@@ -124,7 +124,7 @@ func (a *Approver) run(ctx context.Context, ref string, merge bool, target slack
 		action = "Approving & rebase-merging"
 	}
 	if !dry {
-		a.say(ctx, target, channel, thread, fmt.Sprintf("⏺ %s — verifying with GitHub…", action))
+		a.say(ctx, target, channel, thread, fmt.Sprintf("%s %s — verifying with GitHub…", blockkit.MarkerRunning, action))
 	}
 
 	login, err := a.gh.AuthenticatedLogin(ctx)
@@ -137,7 +137,7 @@ func (a *Approver) run(ctx context.Context, ref string, merge bool, target slack
 	standing, err := a.approvalStanding(ctx, repo, number, login)
 	if err != nil {
 		return a.fail(ctx, result, target, channel, thread,
-			fmt.Sprintf("✗ Could not read reviews for %s — %v", ref, err))
+			fmt.Sprintf("%s Could not read reviews for %s — %v", blockkit.MarkerFailed, ref, err))
 	}
 
 	if dry {
@@ -163,14 +163,14 @@ func (a *Approver) run(ctx context.Context, ref string, merge bool, target slack
 	} else {
 		if err := a.gh.Approve(ctx, repo, number, a.reviewBody); err != nil {
 			return a.fail(ctx, result, target, channel, thread,
-				fmt.Sprintf("✗ Could not approve %s — %v", ref, err))
+				fmt.Sprintf("%s Could not approve %s — %v", blockkit.MarkerFailed, ref, err))
 		}
 		// Verify it registered. `gh` occasionally returned success without the
 		// review landing; the same is true of the API.
 		if !a.verify(ctx, repo, number, login) {
 			return a.fail(ctx, result, target, channel, thread,
-				fmt.Sprintf("⚠ Approval submitted for %s but GitHub has not recorded it yet — "+
-					"double-check on GitHub.", ref))
+				fmt.Sprintf("%s Approval submitted for %s but GitHub has not recorded it yet — "+
+					"double-check on GitHub.", blockkit.MarkerWarning, ref))
 		}
 		result.Approved = true
 	}
@@ -178,14 +178,14 @@ func (a *Approver) run(ctx context.Context, ref string, merge bool, target slack
 	if merge {
 		if err := a.gh.Merge(ctx, repo, number); err != nil {
 			return a.fail(ctx, result, target, channel, thread,
-				fmt.Sprintf("✗ Approved %s but the rebase-merge failed — %v", ref, err))
+				fmt.Sprintf("%s Approved %s but the rebase-merge failed — %v", blockkit.MarkerFailed, ref, err))
 		}
 		result.Merged = true
-		result.Message = fmt.Sprintf("✓ Approved & rebase-merged — %s.", ref)
+		result.Message = fmt.Sprintf("%s Approved & rebase-merged — %s.", blockkit.MarkerDone, ref)
 	} else if result.AlreadyApproved {
-		result.Message = fmt.Sprintf("✓ %s was already approved — nothing to do.", ref)
+		result.Message = fmt.Sprintf("%s %s was already approved — nothing to do.", blockkit.MarkerDone, ref)
 	} else {
-		result.Message = fmt.Sprintf("✓ Approved %s.", ref)
+		result.Message = fmt.Sprintf("%s Approved %s.", blockkit.MarkerDone, ref)
 	}
 
 	a.say(ctx, target, channel, thread, result.Message)

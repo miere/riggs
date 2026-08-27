@@ -372,6 +372,23 @@ Three options render on a live row; two of them are answered by the daemon.
   spends clicking would also mean holding them across the reconcile pass that
   runs in a different process.
 
+### Glyphs
+
+Status markers are TEXT-PRESENTATION characters, named in `blockkit/glyphs.go`.
+That is a choice, not a setting.
+
+A text object's `emoji: false` governs **one** thing: whether Slack parses
+`:shortcode:` sequences. It has no effect on a literal codepoint Unicode gives
+emoji presentation — Slack renders those as a colour image regardless, and
+normalises them back to a shortcode in the message's fallback text. Which is how
+`⏺` (U+23FA) shipped in a status line on a block that already had
+`emoji: false`, while `✓` (U+2713) on the very next line rendered correctly.
+
+The two are indistinguishable in an editor, so the rule is enforced by a test
+that parses every `.go` file under `internal/` and rejects an
+emoji-presentation rune in any string literal. Comments are exempt, which is
+what lets this paragraph name the characters it is warning about.
+
 ### The Common Rule
 
 **Nothing Riggs sends anywhere may refer to Riggs.** Not the Slack messages, not
@@ -930,6 +947,7 @@ one *would* live at still decides, which is the state a fresh machine and
 | 20 | slackmd converter; card bodies from the description (§7d) | done |
 | 21 | Ticket bodies too; `internal/ai` decommissioned | done |
 | 22 | Track and settle the ask-review card (§7bb) | done |
+| 23 | Text-presentation glyphs, enforced by a source scan | done |
 
 ## 13b. Cutover
 
@@ -1041,6 +1059,10 @@ Rollback: the previous job and rule definitions are captured under
   and **`internal/ai` is deleted** — nothing in Riggs shells out to an LLM any
   more. `claude` leaves the launch agent's PATH requirement and the
   capabilities report with it.
+- **unreleased** — Phase 23. Status markers become text-presentation glyphs
+  (§7bb). `emoji: false` never governed this: `⏺` rendered as an image on a
+  block that already had the flag set. Enforced by a source scan, since the
+  right and wrong characters are indistinguishable in an editor.
 - **unreleased** — Phase 5, the cutover (§13b). Also fixes the installer,
   which built its job command from `cfg job set` — documented as equivalent to
   `jobs define`, but it rejects `--args`.
