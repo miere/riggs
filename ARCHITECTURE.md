@@ -507,16 +507,17 @@ body and neither says anything.
 rather than about somebody's pull requests, and `internal/updates` is what makes
 its single control mean anything.
 
-The view, top to bottom: the portrait, the running version, and then — behind a
-divider — the latest release's notes with an **Update** button beside them.
+The view, top to bottom: the portrait, the running version with a controls
+menu beside it, and then — behind a divider — the latest release's notes with an
+**Update** button beside them.
 
 ### The audience split is the design
 
 Everyone in the workspace can open the app and see the portrait and the version.
-**Everything from the divider onwards is the admin's alone.** A non-admin is not
-shown a greyed-out button; they are shown nothing, because a control you cannot
-use is worse than one that was never there — it invites a click and then
-explains why it will not work.
+**Everything from the divider onwards is the admin's alone**, and so is the
+controls menu above it. A non-admin is not shown a greyed-out button; they are
+shown nothing, because a control you cannot use is worse than one that was never
+there — it invites a click and then explains why it will not work.
 
 The gate is `admin.slack-user-id`. An **unset** admin matches *nobody*, not
 everybody: the other reading of an empty setting hands a binary swap to the whole
@@ -585,6 +586,30 @@ and has nothing to publish.
 The rendered view is fingerprinted and a publish that would change nothing is
 skipped. `app_home_opened` fires on every glance at the app, and republishing an
 identical view is a Slack call bought for nothing.
+
+### The controls menu
+
+The version line is a `section` with an `overflow` accessory (`app_menu`), whose
+one option today is **Restart** (`restart`).
+
+It sits on the version line rather than below the divider with the update,
+because it is not *about* a release: there is something to restart whether or
+not there is anything to install. The two gates differ accordingly — the update
+section needs a release AND an installer; the menu needs only the admin gate and
+a supervisor to restart through. With no supervisor wired the menu is not drawn
+at all, which is the same rule as everywhere else on this surface: never render
+a control that cannot act.
+
+The restart handler re-checks the admin gate, and reports the outcome BEFORE
+asking launchd — afterwards there is nobody left to say it. The one failure
+worth narrating is launchd declining, because that means the daemon is *not*
+coming back on its own and the admin is otherwise left watching a tab that will
+never change.
+
+The menu is `app_menu` rather than a second `home_*` id because it is Riggs'
+own controls, as opposed to the Update button, which belongs to a release. New
+operations go in here as options; a bare token value each, so the routing table
+keeps matching them exactly.
 
 ### The Update button
 
@@ -1126,6 +1151,7 @@ one *would* live at still decides, which is the state a fresh machine and
 | 23 | Text-presentation glyphs, enforced by a source scan | done |
 | 24 | The App Home tab, versioning, and self-update (§7e) | done |
 | 25 | Retire the idle nudge (§8c) | done |
+| 26 | The Home tab's controls menu: Restart (§7e) | done |
 
 ## 13b. Cutover
 
@@ -1151,6 +1177,15 @@ Rollback: the previous job and rule definitions are captured under
 `/tmp/riggs-cutover-backup/` and can be restored with the same commands.
 
 ## 14. Change log
+
+- **unreleased** — Phase 26. The Home tab's version line becomes a `section`
+  with an `overflow` accessory (`app_menu`), carrying **Restart**. It lives
+  above the divider, not with the update, because restarting has nothing to do
+  with a release — there is something to restart whether or not anything is out
+  of date. Admin-only like everything else that operates Riggs, and not drawn at
+  all when no supervisor is wired: a Restart option on a Riggs that cannot
+  restart is the same mistake as a disabled button. The outcome is DMed before
+  launchd is asked, since afterwards this process is gone.
 
 - **unreleased** — Phase 25. The idle nudge is retired (§8c). A reminder on a
   timer tells the reader nothing the card did not already say, and only makes

@@ -87,6 +87,11 @@ func (a *Application) registerHomeInteractions(router *daemon.Router, home *apph
 		daemon.HandlerFunc(func(ctx context.Context, in slack.Interaction) error {
 			return home.Update(ctx, in.UserID)
 		}))
+
+	router.Handle(blockkit.HomeMenuActionID, blockkit.HomeRestartIntent,
+		daemon.HandlerFunc(func(ctx context.Context, in slack.Interaction) error {
+			return home.Restart(ctx, in.UserID)
+		}))
 }
 
 // restartViaLaunchd asks launchd to restart this daemon, so it comes back
