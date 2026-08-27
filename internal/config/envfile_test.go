@@ -134,3 +134,91 @@ func TestExpandHome(t *testing.T) {
 		}
 	}
 }
+
+// The documented default, pinned. Every other test here uses a temp directory,
+// so without this one a refactor could quietly move the file Riggs reads and
+// nothing would notice until a launch agent came up with no tokens.
+func TestDefaultEnvPathIsUnderTheRiggsConfigDir(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home directory")
+	}
+	want := filepath.Join(home, ".config", "riggs", EnvFileName)
+	if got := DefaultEnvPath(); got != want {
+		t.Fatalf("DefaultEnvPath = %q, want %q", got, want)
+	}
+	// And it must be the sibling of the default config, not a parallel rule
+	// that happens to agree today.
+	if got, want := filepath.Dir(DefaultEnvPath()), filepath.Dir(DefaultPath()); got != want {
+		t.Fatalf("env dir %q is not the config dir %q", got, want)
+	}
+}
+
+// With nothing configured at all — no config file on disk — Riggs must still
+// look in the default location rather than giving up. This is the state a fresh
+// machine is in, and the state `riggs capabilities` is run in to diagnose it.
+func TestNoConfigFileStillLooksInTheDefaultDir(t *testing.T) {
+	t.Setenv("RIGGS_CONFIG", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	got, explicit := (&Config{}).envFilePath(candidatePaths()[0])
+	if got != DefaultEnvPath() {
+		t.Fatalf("envFilePath = %q, want %q", got, DefaultEnvPath())
+	}
+	if explicit {
+		t.Error("the default location reported itself as explicitly named")
+	}
+}
+
+// "Unless otherwise specified" — the three ways to move it, in precedence
+// order. Each must win over the default.
+func TestEnvFileLocationCanBeMoved(t *testing.T) {
+	t.Run("env-file wins outright", func(t *testing.T) {
+		cfg := &Config{EnvFile: "/opt/secrets/riggs.env"}
+		got, explicit := cfg.envFilePath("/anywhere/config.yaml")
+		if got != "/opt/secrets/riggs.env" || !explicit {
+			t.Fatalf("envFilePath = %q (explicit=%v)", got, explicit)
+		}
+	})
+
+	// The ledger already follows the config file (§10); the environment does
+	// too, so moving a config moves the whole of its state.
+	t.Run("otherwise it follows the config file", func(t *testing.T) {
+		got, _ := (&Config{}).envFilePath("/opt/riggs/config.yaml")
+		if got != filepath.Join("/opt/riggs", EnvFileName) {
+			t.Fatalf("envFilePath = %q", got)
+		}
+	})
+
+	t.Run("RIGGS_CONFIG moves it too", func(t *testing.T) {
+		t.Setenv("RIGGS_CONFIG", "/srv/riggs/config.yaml")
+		got, _ := (&Config{}).envFilePath(candidatePaths()[0])
+		if got != filepath.Join("/srv/riggs", EnvFileName) {
+			t.Fatalf("envFilePath = %q", got)
+		}
+	})
+}
+
+// The resolved path is reported whether or not the file was there, because
+// "which file did you look in" is the question being asked when it was not.
+func TestEnvPathIsReportedEvenWhenAbsent(t *testing.T) {
+	path := writeConfig(t, "admin:\n  slack-user-id: U1\n", "")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.EnvLoaded() {
+		t.Error("EnvLoaded is true with no .env on disk")
+	}
+	if cfg.EnvPath() != filepath.Join(filepath.Dir(path), EnvFileName) {
+		t.Fatalf("EnvPath = %q", cfg.EnvPath())
+	}
+
+	cfg2, err := Load(writeConfig(t, "admin:\n  slack-user-id: U1\n", "X=1\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg2.EnvLoaded() {
+		t.Error("EnvLoaded is false after loading a .env")
+	}
+}

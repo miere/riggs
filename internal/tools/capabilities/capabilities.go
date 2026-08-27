@@ -88,10 +88,24 @@ func (t *Tool) InputSchema() *jsonschema.Schema { return nil }
 // frontend marshals it as JSON.
 type Report struct {
 	ConfigPath string    `json:"config_path"`
+	EnvFile    EnvFile   `json:"env_file"`
 	Ledger     Ledger    `json:"ledger"`
 	Admin      Admin     `json:"admin"`
 	Slack      []Profile `json:"slack_profiles"`
 	Backends   []Backend `json:"backends"`
+}
+
+// EnvFile reports which dotenv file supplied the ${VAR} references, and
+// whether it was there.
+//
+// It is reported because the symptom of the wrong one is an *empty token*,
+// which surfaces as "profile has no bot-token" — a message that says nothing
+// about where the token was looked for. That is the first question anyone
+// debugging a launch agent asks, since the agent inherits no environment of its
+// own (§12b).
+type EnvFile struct {
+	Path   string `json:"path"`
+	Loaded bool   `json:"loaded"`
 }
 
 // Ledger reports the notification store: where it is, and what it holds.
@@ -136,6 +150,7 @@ type Backend struct {
 func (t *Tool) Invoke(context.Context, map[string]any) (any, error) {
 	r := Report{
 		ConfigPath: t.cfg.Path,
+		EnvFile:    EnvFile{Path: t.cfg.EnvPath(), Loaded: t.cfg.EnvLoaded()},
 		Ledger:     t.ledger(t.cfg.DBPath()),
 		Admin: Admin{
 			SlackUserID: set(t.cfg.Admin.SlackUserID),
@@ -213,6 +228,14 @@ func set(v string) string {
 func (r Report) String() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "config: %s\n", r.ConfigPath)
+	switch {
+	case r.EnvFile.Path == "":
+		b.WriteString("env:    (none — variables come from the environment)\n")
+	case r.EnvFile.Loaded:
+		fmt.Fprintf(&b, "env:    %s\n", r.EnvFile.Path)
+	default:
+		fmt.Fprintf(&b, "env:    %s (not found — variables come from the environment)\n", r.EnvFile.Path)
+	}
 	switch {
 	case r.Ledger.Problem != "":
 		fmt.Fprintf(&b, "ledger: %s — unreadable: %s\n", r.Ledger.Path, r.Ledger.Problem)

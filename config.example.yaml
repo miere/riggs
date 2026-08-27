@@ -22,8 +22,9 @@ admin:
 # daemon starts up connected to nothing. Point it at Murtaugh's .env rather
 # than duplicating the secrets.
 #
-# Omitted, `.env` beside this file is used if it exists. A file named here that
-# cannot be read is an error.
+# Omitted, `.env` beside this file is used if it exists — in the default setup
+# that is ~/.config/riggs/.env. A file named here that cannot be read is an
+# error. `riggs capabilities` prints whichever path was resolved.
 # env-file: ~/.config/murtaugh/.env
 
 # "Ask for Code Review" on a bulk digest row. It drops one message and stops —
