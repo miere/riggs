@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/miere/riggs-mcp/internal/ask"
 	"github.com/miere/riggs-mcp/internal/blockkit"
 	"github.com/miere/riggs-mcp/internal/config"
 	"github.com/miere/riggs-mcp/internal/github"
@@ -300,41 +301,14 @@ func AskFallbackText(d github.Detail) string {
 //
 //	Hey <@reviewer>, mind to review this Pull Request? c/c <@requester>
 //
-// The prompt is the message. `{reviewer}` and `{requester}` in it are replaced
-// with the corresponding mentions, so a configured wording can put them
-// wherever it likes.
-//
-// Two things are then GUARANTEED rather than left to the wording, because they
-// are the point of the feature and a config typo must not silently lose them:
-//
-//   - the reviewer is mentioned — prefixed if the prompt did not do it;
-//   - the requester is copied in — appended as `c/c <@…>` if the prompt did
-//     not do it.
-//
-// The c/c is dropped when there is nobody to copy, or when the requester IS the
-// reviewer: copying somebody in on their own request reads as a mistake.
-//
-// It names no tool and claims no authorship. The ask reads as though the person
-// who clicked wrote it, because they did: they chose the pull request and the
-// reviewer, and they are named as the asker.
+// The wording is configuration; the two mentions in it are not. See
+// internal/ask, which is shared with the ticket queue's equivalent action so
+// the guarantee cannot drift between them.
 func AskTagText(reviewer, requester, prompt string) string {
-	reviewerTag := fmt.Sprintf("<@%s>", reviewer)
-	requesterTag := fmt.Sprintf("<@%s>", requester)
-
-	prompt = strings.TrimSpace(prompt)
-	if prompt == "" {
+	if strings.TrimSpace(prompt) == "" {
 		prompt = config.DefaultReviewPrompt
 	}
-	tag := strings.NewReplacer("{reviewer}", reviewerTag, "{requester}", requesterTag).Replace(prompt)
-
-	if !strings.Contains(tag, reviewerTag) {
-		tag = reviewerTag + " " + tag
-	}
-	copyIn := requester != "" && requester != reviewer
-	if copyIn && !strings.Contains(tag, requesterTag) {
-		tag += " c/c " + requesterTag
-	}
-	return strings.TrimSpace(tag)
+	return ask.TagText(reviewer, requester, prompt)
 }
 
 // RefURL renders the browser URL for owner/repo#number.

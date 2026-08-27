@@ -38,7 +38,7 @@ The automations being replaced:
 | `pull_request/main.py review-queue` | job, every 3m | `git.pr.bulk` (was `git.pr.fetch-reviews`, §12c) |
 | `pull_request/main.py approve` | rule `pr-approve` | `git.pr.approve` |
 | `pull_request/main.py approve --action-id approve_merge` | rule `pr-approve-merge` | `git.pr.approve-merge` |
-| `quick_coding_tasks/main.py poll` | job, every 3m | `jira.tickets.poll` |
+| `quick_coding_tasks/main.py poll` | job, every 3m | `jira.tickets.bulk` (was `jira.tickets.poll`, §8d) |
 | `quick_coding_tasks/main.py action` | rules `quick-coding-tasks-*` | `jira.tickets.assign` / `.dismiss` |
 | `repository_manager/main.py` | — | to be scoped |
 
@@ -179,7 +179,9 @@ internal/
   config/                        # config file, admin identity, Slack profiles
   slack/                         # profile → Target resolution; inbound decode (§7b)
   daemon/                        # Socket Mode listener + interaction router (§7b)
-  notify/                        # the card ledger (§9)
+  notify/                        # the card ledger (§9) + the item ledger (§9b)
+  bulk/                          # the digest rotation engine (§9b)
+  ask/                           # the "hand this to somebody" tag (§7bb)
   github/                        # REST client, ETag cache (§8)
   jira/                          # external seam
   slackmd/                       # GitHub Markdown -> Slack mrkdwn (§7d)
@@ -193,6 +195,10 @@ Rules:
 - Each tool lives in its own package under `internal/tools/`.
 - External-SDK wrappers and cross-cutting helpers live under
   `internal/<domain>/`, never inside a tool package.
+- **A domain package owns what its items ARE and how they DRAW; nothing else.**
+  `pullrequest` and `ticket` each supply a `bulk.Domain` and stop there. The
+  rotation between messages is not theirs to reimplement, and neither is the
+  guarantee that an ask names both people.
 
 ## 6. Credentials and capability gating
 
@@ -330,15 +336,31 @@ Slack ──ws──► SocketListener ──► Daemon ──► Router ──�
   message is still in the channel is an ordinary occurrence, and the daemon logs
   what it could not place.
 
-## 7bb. The digest's actions
+## 7bb. The digests' actions
 
-Three options render on a live row; two of them are answered by the daemon.
+Two digests, one pattern. On the pull-request digest, three options render on a
+live row and two are answered by the daemon:
 
 | Option | Intent | Handler |
 | --- | --- | --- |
 | ⧉ Open on Browser | `open_browser` | none — the option carries a `url` and Slack opens it |
 | ✎ Ask for Code Review | `ask_review` | `pullrequest.Asker` |
 | ✓ Approve and Merge | `approve_merge` | `pullrequest.Approver`, rebase-only (§8) |
+
+On the ticket digest, two:
+
+| Option | Intent | Handler |
+| --- | --- | --- |
+| ⧉ Open on Browser | `open_browser` | none — same as above |
+| ✎ Ask for AI Assistance | `ask_assist` | `ticket.Asker` |
+
+- **Both action ids are distinct** (`pr_bulk_overflow`, `jira_bulk_overflow`), so
+  one dispatch table answers both without either digest having to know the
+  other exists.
+- **"Assign to Me" is not implemented, and so is not rendered** — the same call
+  Approve got. The verb behind it (`jira.tickets.assign`) already exists and is
+  still reachable; what is missing is the option and its route, which is where
+  it should stay until somebody wants it.
 
 - **Approve is not implemented.** It is specified for later, and it is not
   rendered: a button that silently does nothing is worse than one that is not
@@ -373,6 +395,30 @@ Three options render on a live row; two of them are answered by the daemon.
   a ledger handle and a GitHub client open all day for the seconds a week anyone
   spends clicking would also mean holding them across the reconcile pass that
   runs in a different process.
+
+### The ask
+
+Both digests can hand one item to somebody else, and both do it the same way:
+post a card about the thing, then tag a person in its thread. `internal/ask`
+owns the one part that must not differ.
+
+The wording is configuration. The two mentions in it are not:
+
+- the person being asked is mentioned — prefixed if the prompt did not;
+- the person who asked is copied in — appended as `c/c` if the prompt did not.
+
+Those are the point of the feature, and a prompt edited to drop one would fail
+*silently*: the message still posts, still reads fine, and simply never reaches
+anybody. `{user}` and `{requester}` place them; `{reviewer}` stays an alias for
+`{user}` because a live config still spells it that way. A prompt that places
+`{requester}` inline — as the ticket default does — renders `somebody` when the
+click carried no user, because an empty mention reaches Slack as a literal
+`<@>`.
+
+The ticket ask carries **no verb at all** — only the link. A review request asks
+somebody to look at code that exists and offers Approve; this asks somebody
+whether work that does not exist yet is ready to be picked up, and there is
+nothing on that card for them to press.
 
 ### Glyphs
 
@@ -437,9 +483,11 @@ Rules:
   stay legible, because they are what you read to find the thing again.
 - **Titles are elided at 50 runes**, cut to 47 plus an ellipsis. One
   untruncated title in a list of ten pushes the reference onto a wrap.
-- **The digest has its own icon const**, not the legacy card's. Sharing it would
-  mean a change to one silently re-rendering every card of the other — the same
-  reason the option type is duplicated.
+- **Each digest family has its own icon, title and subtitle consts**, not the
+  legacy card's and not each other's. Sharing one would mean a change to it
+  silently re-rendering every message of the others — the same reason the option
+  type is duplicated. `blockkit.Digest` itself is shared by both families: it is
+  the *shape*, and the shape genuinely is identical.
 - **Titles are escaped.** A title containing `&` or `<` would
   otherwise re-open the row's own bold run and garble every row after it.
 - **An empty digest is deleted, not rendered.** A header with nothing under it
@@ -812,6 +860,46 @@ deploying this:
 murtaugh cfg job delete --name quick-coding-tasks-nudge
 ```
 
+## 8d. The ticket digest
+
+`jira.tickets.bulk` mirrors the same query as a bulk digest instead of a card
+each, on the shared rotation engine (§9b). The card loop is untouched and still
+reachable; it is simply no longer what the schedule runs.
+
+The domain supplies two things and nothing else: which tickets a pass is
+responsible for, and what a row says.
+
+Rules:
+
+- **Candidates are (matches the query) ∪ (already in the digest).** A tracked
+  ticket that has fallen out of the query has been handled by somebody, so its
+  row is struck through rather than quietly dropped — the reader was shown it
+  advertised and is owed the outcome.
+- **A ticket that cannot be READ is left exactly as it is**, on §8b's rule. It
+  is omitted from the pass entirely, so the engine redraws it from what the
+  ledger last stored rather than from a stub.
+- **FIFO is by `created`**, which is why the Jira read now asks for that field.
+  Ordering by `updated` would put a ticket somebody edited this morning behind
+  one raised last month, which is the opposite of a queue.
+- **The row names the REPORTER**, not an assignee: an unclaimed ticket has no
+  assignee, and the reporter is who you go to about scope.
+- **The cooldown is a rolling three hours**, the same as the pull-request
+  digest. The specification asked for "no more than once per period, in 6h
+  blocks"; a rolling window rather than calendar blocks, for the reason §9b
+  already gives — a block boundary makes the gap between two announcements
+  anything from a minute to a whole block depending on where in it the ticket
+  appeared, and nobody reading the channel can tell which they got. It remains
+  its own constant: the two queues are tuned independently and happen to agree.
+- **Nothing replaces the idle nudge, and nothing needs to.** §8c retired it on
+  its own argument, before this existed. What the digest adds is not a louder
+  reminder but a *quieter* one: an unclaimed ticket rejoins a fresh message once
+  its cooldown expires, which says the same thing the nudge did without a second
+  message under the first.
+- **The digest must be posted through Riggs' own Slack profile.** A click is
+  delivered to the app that posted the message, so a digest sent as Murtaugh —
+  which is how the ticket cards are posted today — renders a menu Riggs' daemon
+  never hears about. The installer asks for the profile for exactly this reason.
+
 ## 9. The notification ledger
 
 Every notification is stateful. A threaded reply can only go onto a message
@@ -865,7 +953,25 @@ items(key, stream, post_key, position, status, done, posted_at, updated_at)
 ```
 
 `cards` keeps its job as the *post* table; a digest's row there is keyed
-`git.pr.bulk:post:<n>`, allocated by `NextPostKey`.
+`<stream>:post:<n>`, allocated by `NextPostKey`.
+
+**The rotation is one implementation, in `internal/bulk`.** It began inside
+`internal/pullrequest`, as the only digest there was; the ticket queue wanted
+the same five rules and none of the same rendering, so the rules moved out and
+the rendering stayed. A domain supplies what its items ARE (`Source`) and how
+they DRAW (`Renderer`), and nothing between.
+
+That is the opposite call to the one blockkit made about its two card shapes
+(§7c), and for the opposite reason. There, two things that *looked* alike had
+diverging lifecycles, so they were kept apart. Here, two things that look
+nothing alike — a pull request and a Jira ticket — have provably the same
+lifecycle: announce, hold, rotate, strike through, purge. Duplicating it would
+mean two copies of the one piece of logic in Riggs where an off-by-one silently
+loses somebody's row.
+
+`Renderer` is split from `Source` because half the callers have no upstream at
+all: completing a row after a click rebuilds the message from the ledger alone,
+and must not need a GitHub or Jira client to do it.
 
 **`posted_at` is the cooldown anchor, and it moves only on entry to a NEW post.**
 An in-place status refresh deliberately does not touch it. Otherwise a busy pull
@@ -890,6 +996,14 @@ not just its status — so a post can be rebuilt with no upstream read at all.
 Without that, acting on one row wrecked the others: any row the pass could not
 refetch collapsed to its bare reference with a dead link.
 
+That was true of the click path from the start and, until the rotation moved
+here, **not** of the reconcile path. One branch still rebuilt a held row as a
+bare id: an item the source could not report this pass — a transient 502, a lost
+permission, a pull request turned draft — was redrawn without its title or its
+link, and then written back, losing the real values permanently for something
+that was only briefly unreadable. It now renders from the ledger like every
+other row.
+
 **An approval completes the row immediately** (`Completer`). The reconcile pass
 would reach the same conclusion on its own, but up to three minutes later, and a
 button that visibly does nothing for three minutes reads as one that did not
@@ -900,7 +1014,11 @@ still an approved pull request.
 
 Rules:
 
-- **Rolling 3h cooldown**, not calendar blocks.
+- **Rolling cooldown, not calendar blocks** — 3h on both digests today, but each
+  family names its own constant and its own environment override
+  (`RIGGS_BULK_MAX_ITEMS`, `RIGGS_JIRA_BULK_MAX_ITEMS`): raising one queue's cap
+  says nothing about the other's, and two settings that agree are not one
+  setting.
 - **FIFO by pull request age** — oldest waiting first, not by when Riggs noticed
   it.
 - **The cap holds, it does not drop.** Anything past its cooldown that misses
@@ -946,6 +1064,15 @@ Rules:
 - Structural problems are reported **all at once**, so fixing a config takes
   one edit rather than one round-trip per mistake.
 - An empty token is a capability gap, not a config error (§6).
+- **`review-request` and `ai-assistance` are independent, and neither is ever
+  defaulted from the other.** They are the same three settings — channel, user,
+  prompt — for two actions that look identical and answer different questions:
+  one asks a human to review code that exists, the other asks somebody whether
+  work that does not exist yet is ready to be picked up. In practice they are
+  pointed at different channels and different people, so a shared setting would
+  mean changing one silently moved the other. An unset value falls back to the
+  admin, never sideways. The installer asks for both, separately, for the same
+  reason.
 
 ## 11. Testing conventions
 
@@ -1154,6 +1281,7 @@ one *would* live at still decides, which is the state a fresh machine and
 | 24 | The App Home tab, versioning, and self-update (§7e) | done |
 | 25 | Retire the idle nudge (§8c) | done |
 | 26 | The Home tab's controls menu: Restart (§7e) | done |
+| 27 | The ticket digest: rotation extracted to `internal/bulk`, `jira.tickets.bulk`, Ask for AI Assistance (§8d) | done |
 
 ## 13b. Cutover
 
@@ -1179,6 +1307,27 @@ Rollback: the previous job and rule definitions are captured under
 `/tmp/riggs-cutover-backup/` and can be restored with the same commands.
 
 ## 14. Change log
+
+- **unreleased** — Phase 27. The ticket queue becomes a bulk digest (§8d).
+  The rotation moves out of `internal/pullrequest` into `internal/bulk` (§9b),
+  parameterised by a domain's `Source` and `Renderer`; the pull-request digest
+  becomes a thin adapter over it and its eighteen tests pass unchanged, which is
+  the whole evidence that the move was behaviour-preserving. Adds
+  `jira.tickets.bulk`, `ticket.Asker` ("Ask for AI Assistance", §7bb), the
+  `ai-assistance` config section (§10), `internal/ask` for the tag both digests
+  share, and `created` to the Jira read so FIFO orders by how long a ticket has
+  actually waited.
+
+  It also fixes a latent bug the extraction surfaced: a tracked item the source
+  could not report on a given pass was redrawn as a bare id — no title, no link
+  — and that stub was then written back to the ledger, destroying the real
+  values for something that was only briefly unreadable. §9b claimed rows always
+  render from the ledger; on that one branch they did not.
+
+  The installer now registers `quick-coding-tasks-poll` against the digest, and
+  asks it for a Slack profile: the ticket cards were posted through Murtaugh's
+  app, and a digest posted that way would render a menu Riggs' daemon never
+  hears about.
 
 - **unreleased** — Phase 26. The Home tab's version line becomes a `section`
   with an `overflow` accessory (`app_menu`), carrying **Restart**. It lives

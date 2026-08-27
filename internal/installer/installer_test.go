@@ -138,7 +138,7 @@ func (p prLister) ReviewRequested(context.Context, string, int) ([]github.PullRe
 // makes a test assert against the wrong question.
 const (
 	answerConfigPath   = 0
-	answerMurtaughPath = 7
+	answerMurtaughPath = 9
 )
 
 func happyScript(extra ...string) *script {
@@ -151,6 +151,8 @@ func happyScript(extra ...string) *script {
 			"https://example.atlassian.net",        // jira tenant
 			"C0B24F579T4",                          // review-request channel
 			"@murtaugh",                            // review-request reviewer
+			"C0B29C20Z9S",                          // ai-assistance channel
+			"@murtaugh",                            // ai-assistance person
 			"/home/m/.config/murtaugh/config.yaml", // murtaugh config
 		}, extra...),
 		// bot, app, user, jira — in prompt order.

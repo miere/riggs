@@ -69,11 +69,23 @@ var jobs = []job{
 		AskProfile: true,
 	},
 	{
+		// Deliberately the SAME name the per-ticket card job used, for the same
+		// reason the pull-request digest reused `github-review-queue`: two jobs
+		// mirroring one ticket queue is noise, not redundancy, and nothing would
+		// have removed the old one.
+		//
+		// The card renderer is retained and still reachable as
+		// `jira.tickets.poll`; it is simply no longer on a schedule.
 		Name:  "quick-coding-tasks-poll",
-		Tool:  "jira.tickets.poll",
-		Args:  []string{"jira", "tickets", "--poll", defaultTicketJQL},
+		Tool:  "jira.tickets.bulk",
+		Args:  []string{"jira", "tickets", "--bulk", defaultTicketJQL},
 		Every: "3m", Timeout: "2m",
-		What: "ai-able ticket poll",
+		What: "ai-able ticket digest",
+		// Not cosmetic, and the reason the ticket job now asks: a click is
+		// delivered to the app that POSTED the message, so a digest sent through
+		// Murtaugh's profile — which is how the ticket cards were posted —
+		// renders a menu Riggs' daemon never hears about.
+		AskProfile: true,
 	},
 }
 
