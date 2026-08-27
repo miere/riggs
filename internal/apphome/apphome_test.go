@@ -138,7 +138,7 @@ func publisher(t *testing.T, mutate func(*Deps)) (*Publisher, *fakeViews, *fakeC
 
 func TestTheAdminSeesPastTheDivider(t *testing.T) {
 	p, views, _, _, _ := publisher(t, nil)
-	if err := p.Publish(context.Background(), admin); err != nil {
+	if _, err := p.Publish(context.Background(), admin); err != nil {
 		t.Fatalf("Publish: %v", err)
 	}
 	got := strings.Join(views.last().blockTypes(), ",")
@@ -152,7 +152,7 @@ func TestTheAdminSeesPastTheDivider(t *testing.T) {
 // one.
 func TestANonAdminNeverSeesTheUpdateSection(t *testing.T) {
 	p, views, checker, _, _ := publisher(t, nil)
-	if err := p.Publish(context.Background(), "U0SOMEONE"); err != nil {
+	if _, err := p.Publish(context.Background(), "U0SOMEONE"); err != nil {
 		t.Fatalf("Publish: %v", err)
 	}
 	if got := strings.Join(views.last().blockTypes(), ","); got != "image,section" {
@@ -193,7 +193,7 @@ func TestAFailedCheckStillPublishesTheVersion(t *testing.T) {
 	p, views, checker, _, _ := publisher(t, nil)
 	checker.rel, checker.err = updates.Release{Current: "v0.1.0"}, errors.New("no network")
 
-	if err := p.Publish(context.Background(), admin); err != nil {
+	if _, err := p.Publish(context.Background(), admin); err != nil {
 		t.Fatalf("Publish: %v", err)
 	}
 	if got := strings.Join(views.last().blockTypes(), ","); got != "image,section" {
@@ -442,5 +442,21 @@ func TestWithNoRestartConfiguredTheAdminIsToldToDoIt(t *testing.T) {
 	}
 	if len(poster.posted) != 1 || !strings.Contains(poster.posted[0], "Restart Riggs") {
 		t.Fatalf("outcome = %v", poster.posted)
+	}
+}
+
+// The skip has to be visible to the caller. Without it the daemon logged "app
+// home published" on every glance at the app — including the ones it had
+// deliberately skipped — which is a log line that lies about a network call.
+func TestPublishReportsWhetherItActuallyPublished(t *testing.T) {
+	p, _, _, _, _ := publisher(t, nil)
+
+	published, err := p.Publish(context.Background(), admin)
+	if err != nil || !published {
+		t.Fatalf("first publish = %v, %v; want a real publish", published, err)
+	}
+	published, err = p.Publish(context.Background(), admin)
+	if err != nil || published {
+		t.Fatalf("second publish = %v, %v; want a skip", published, err)
 	}
 }

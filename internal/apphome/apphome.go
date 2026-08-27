@@ -96,14 +96,17 @@ func (p *Publisher) IsAdmin(userID string) bool {
 	return admin != "" && admin == strings.TrimSpace(userID)
 }
 
-// Publish renders the Home tab for userID and publishes it.
+// Publish renders the Home tab for userID and publishes it, reporting whether
+// a Slack call was actually made.
 //
 // A view identical to the one this user was last sent is skipped.
 // app_home_opened fires every time somebody so much as glances at the app, and
-// republishing an unchanged view is a Slack call bought for nothing.
-func (p *Publisher) Publish(ctx context.Context, userID string) error {
+// republishing an unchanged view is a Slack call bought for nothing. The
+// caller is told which happened so its log can say so — "published" on a call
+// that was skipped is worse than no line at all.
+func (p *Publisher) Publish(ctx context.Context, userID string) (bool, error) {
 	if p.deps.Views == nil {
-		return fmt.Errorf("apphome: no view publisher configured")
+		return false, fmt.Errorf("apphome: no view publisher configured")
 	}
 	home := p.render(ctx, userID)
 	fingerprint := home.Fingerprint()
@@ -112,17 +115,16 @@ func (p *Publisher) Publish(ctx context.Context, userID string) error {
 	unchanged := p.published[userID] == fingerprint
 	p.mu.Unlock()
 	if unchanged {
-		p.deps.Logger.Debug("app home unchanged, not republished", "user", userID)
-		return nil
+		return false, nil
 	}
 
 	if err := p.deps.Views.PublishHome(ctx, p.deps.BotToken, userID, home.View()); err != nil {
-		return err
+		return false, err
 	}
 	p.mu.Lock()
 	p.published[userID] = fingerprint
 	p.mu.Unlock()
-	return nil
+	return true, nil
 }
 
 // render builds the view for one viewer.
@@ -276,7 +278,7 @@ func (p *Publisher) republish(ctx context.Context, userID string) {
 	p.mu.Lock()
 	delete(p.published, userID)
 	p.mu.Unlock()
-	if err := p.Publish(ctx, userID); err != nil {
+	if _, err := p.Publish(ctx, userID); err != nil {
 		p.deps.Logger.Error("republishing the app home failed", "user", userID, "error", err)
 	}
 }

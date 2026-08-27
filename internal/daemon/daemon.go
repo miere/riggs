@@ -38,8 +38,14 @@ type Listener interface {
 
 // AppHome publishes a user's Home tab.
 type AppHome interface {
-	// Publish renders and publishes the Home view for userID.
-	Publish(ctx context.Context, userID string) error
+	// Publish renders the Home view for userID and publishes it, reporting
+	// whether a Slack call was actually made — a view identical to the one
+	// that user was last sent is skipped.
+	//
+	// The bool exists for the log line. Without it the daemon reported "app
+	// home published" on every glance at the app, including the ones it had
+	// deliberately skipped, which is a log that lies about a network call.
+	Publish(ctx context.Context, userID string) (published bool, err error)
 }
 
 // Daemon holds the connection open and routes what arrives on it.
@@ -118,8 +124,13 @@ func (d *Daemon) handleAppHomeOpened(ctx context.Context, userID string) {
 		d.logger.Debug("app home opened, but no publisher is wired", "user", userID)
 		return
 	}
-	if err := d.home.Publish(ctx, userID); err != nil {
+	published, err := d.home.Publish(ctx, userID)
+	if err != nil {
 		d.logger.Error("publishing the app home failed", "user", userID, "error", err)
+		return
+	}
+	if !published {
+		d.logger.Debug("app home unchanged, not republished", "user", userID)
 		return
 	}
 	d.logger.Info("app home published", "user", userID)
