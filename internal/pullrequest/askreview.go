@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/miere/riggs-mcp/internal/ai"
 	"github.com/miere/riggs-mcp/internal/blockkit"
 	"github.com/miere/riggs-mcp/internal/config"
 	"github.com/miere/riggs-mcp/internal/github"
 	"github.com/miere/riggs-mcp/internal/notify"
 	"github.com/miere/riggs-mcp/internal/slack"
+	"github.com/miere/riggs-mcp/internal/slackmd"
 )
 
 // "Ask for Code Review": hand one pull request to somebody else.
@@ -57,12 +57,18 @@ type Resolver interface {
 	LookupUserID(ctx context.Context, target slack.Target, handle string) (string, error)
 }
 
+// BodyParagraphs is how much of a pull-request description a card shows.
+//
+// Two: enough for the author's own summary of what they did, and short enough
+// that the card stays a card. Anything past it is on the pull request, one
+// click away.
+const BodyParagraphs = 2
+
 // Asker posts a review request.
 type Asker struct {
-	gh         Detailer
-	store      *notify.Store
-	summariser ai.Summariser
-	poster     slack.Poster
+	gh     Detailer
+	store  *notify.Store
+	poster slack.Poster
 
 	// resolver turns a configured handle into an id, when the config holds one.
 	resolver Resolver
@@ -76,9 +82,9 @@ type Asker struct {
 }
 
 // NewAsker builds the asker.
-func NewAsker(gh Detailer, store *notify.Store, s ai.Summariser, poster slack.Poster,
+func NewAsker(gh Detailer, store *notify.Store, poster slack.Poster,
 	reviewer, channel, prompt string) *Asker {
-	return &Asker{gh: gh, store: store, summariser: s, poster: poster,
+	return &Asker{gh: gh, store: store, poster: poster,
 		reviewer: reviewer, channel: channel, prompt: prompt}
 }
 
@@ -164,7 +170,7 @@ func (a *Asker) Ask(ctx context.Context, ref, requester string, target slack.Tar
 		dest.AdminUserID = reviewer
 	}
 
-	card := AskCard(detail, a.summaryFor(ctx, ref, detail))
+	card := AskCard(detail, Body(detail))
 	posted, err := a.poster.Post(ctx, dest, slack.Message{
 		Text:   AskFallbackText(detail),
 		Blocks: card.Blocks(),
@@ -193,26 +199,25 @@ func (a *Asker) Ask(ctx context.Context, ref, requester string, target slack.Tar
 	return result, nil
 }
 
-// summaryFor is the card body: the cached summary when the queue already wrote
-// one, otherwise a fresh one.
+// Body is the card's body: the opening of the pull request's own description,
+// translated into Slack's mrkdwn.
 //
-// A summary failure degrades to the title rather than failing the ask — the
-// reviewer can read the pull request, and a missing paragraph is not worth
-// swallowing a request over.
-func (a *Asker) summaryFor(ctx context.Context, ref string, d github.Detail) string {
-	if a.store != nil {
-		if cached, ok, err := a.store.Summary(ctx, Key(ref)); err == nil && ok && cached != "" {
-			return cached
-		}
+// It replaced an LLM summary, and the speed was the least of it. That call took
+// ~8.6s on the click path with somebody waiting; it bound the card to a local
+// `claude` binary being present and authenticated; and its output was
+// non-deterministic, so the same card rendered differently on two passes and
+// could not be honestly fingerprinted.
+//
+// A description is also not obviously improved by being summarised. The author
+// already wrote it to explain the change.
+//
+// An empty description falls back to the title: a card with no body renders no
+// section at all, which reads as though something failed.
+func Body(d github.Detail) string {
+	if excerpt := strings.TrimSpace(slackmd.Excerpt(d.Body, BodyParagraphs)); excerpt != "" {
+		return excerpt
 	}
-	if a.summariser == nil {
-		return d.Title
-	}
-	summary, _ := a.summariser.Summarise(ctx, d.Title, d.Body)
-	if strings.TrimSpace(summary) == "" {
-		return d.Title
-	}
-	return summary
+	return slackmd.Convert(d.Title).Text
 }
 
 // AskCard renders the review request.

@@ -97,7 +97,7 @@ func askerFor(cfg *config.Config) (*pullrequest.Asker, io.Closer, error) {
 		return nil, nil, err
 	}
 	api := slack.NewAPI()
-	asker := pullrequest.NewAsker(gh, store, summariser(), api,
+	asker := pullrequest.NewAsker(gh, store, api,
 		cfg.ReviewReviewer(), cfg.ReviewRequest.Channel, cfg.ReviewPrompt()).WithResolver(api)
 	return asker, store, nil
 }
