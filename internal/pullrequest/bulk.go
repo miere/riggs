@@ -54,6 +54,10 @@ const MaxItemsEnv = "RIGGS_BULK_MAX_ITEMS"
 const (
 	bulkTitle    = "GitHub - Pull Requests"
 	bulkSubtitle = "You have been assigned some juicy code reviews."
+	// bulkIconURL is the digest's own glyph, deliberately not the legacy card's
+	// const: the two shapes have separate lifecycles (§7c), and sharing it would
+	// mean a change to one silently re-renders every card of the other.
+	bulkIconURL = "https://avatars.slack-edge.com/2020-11-25/1527503386626_319578f21381f9641cd8_36.png"
 )
 
 // BulkOptions configures one digest family.
@@ -325,7 +329,7 @@ func (b *BulkEngine) rebuildPosts(ctx context.Context, target slack.Target,
 
 		digest := blockkit.Digest{
 			Title: bulkTitle, Subtitle: bulkSubtitle,
-			IconURL: iconURL, IconAlt: "GitHub", Rows: rows,
+			IconURL: bulkIconURL, IconAlt: "GitHub", Rows: rows,
 		}
 		outcome, err := b.notifier.UpdateDigest(ctx, postKey, target, digest, bulkFallback(rows))
 		if err != nil {
@@ -367,7 +371,7 @@ func (b *BulkEngine) postDigest(ctx context.Context, target slack.Target, select
 	}
 	digest := blockkit.Digest{
 		Title: bulkTitle, Subtitle: bulkSubtitle,
-		IconURL: iconURL, IconAlt: "GitHub", Rows: rows,
+		IconURL: bulkIconURL, IconAlt: "GitHub", Rows: rows,
 	}
 	if _, err := b.notifier.PostDigest(ctx, postKey, target, digest, bulkFallback(rows)); err != nil {
 		return err

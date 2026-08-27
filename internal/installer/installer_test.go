@@ -10,6 +10,7 @@ import (
 
 	"github.com/miere/riggs-mcp/internal/config"
 	"github.com/miere/riggs-mcp/internal/github"
+	"github.com/miere/riggs-mcp/internal/slack"
 	"github.com/miere/riggs-mcp/internal/slack/slacktest"
 )
 
@@ -78,6 +79,7 @@ type rig struct {
 	slack   *slacktest.Fake
 	written map[string]string
 	cmds    []ran
+	users   map[string]string
 	prs     []github.PullRequest
 	prErr   error
 	authErr error
@@ -85,7 +87,8 @@ type rig struct {
 
 func newRig(t *testing.T, s *script, tools map[string]bool) *rig {
 	t.Helper()
-	r := &rig{prompt: s, slack: slacktest.New(), written: map[string]string{}}
+	r := &rig{prompt: s, slack: slacktest.New(), written: map[string]string{},
+		users: map[string]string{"murtaugh": "U0B6HK02YBB"}}
 	inst := New(s, Options{
 		RiggsPath: "/usr/local/bin/riggs",
 		ToolsFor:  func(string) (map[string]bool, error) { return tools, nil },
@@ -111,6 +114,13 @@ func newRig(t *testing.T, s *script, tools map[string]bool) *rig {
 		return nil, os.ErrNotExist // the Riggs config does not
 	}
 	inst.getenv = func(string) string { return "" }
+	// A workspace directory the installer can resolve a handle against.
+	inst.lookupUser = func(_ context.Context, _ slack.Target, handle string) (string, error) {
+		if id, ok := r.users[handle]; ok {
+			return id, nil
+		}
+		return "", fmt.Errorf("no such member %q", handle)
+	}
 	r.Installer = inst
 	return r
 }
@@ -128,7 +138,7 @@ func (p prLister) ReviewRequested(context.Context, string, int) ([]github.PullRe
 // makes a test assert against the wrong question.
 const (
 	answerConfigPath   = 0
-	answerMurtaughPath = 5
+	answerMurtaughPath = 7
 )
 
 func happyScript(extra ...string) *script {
@@ -139,6 +149,8 @@ func happyScript(extra ...string) *script {
 			"U0B20G0ET9T",                          // slack user id
 			"miere@nurturecloud.com",               // jira email
 			"https://example.atlassian.net",        // jira tenant
+			"C0B24F579T4",                          // review-request channel
+			"@murtaugh",                            // review-request reviewer
 			"/home/m/.config/murtaugh/config.yaml", // murtaugh config
 		}, extra...),
 		// bot, app, user, jira — in prompt order.

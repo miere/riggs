@@ -27,6 +27,10 @@ type Fake struct {
 
 	// PostErr, when set, fails every Post.
 	PostErr error
+	// PostErrAfter, when positive, fails every Post from the Nth onwards
+	// (1-based). It exists for flows that post more than once and must behave
+	// sanely when a later step fails but an earlier one already landed.
+	PostErrAfter int
 	// UpdateErr, when set, fails every Update — set it to
 	// slack.ErrMessageNotFound to exercise the re-post path.
 	UpdateErr error
@@ -44,6 +48,9 @@ func (f *Fake) Post(_ context.Context, target slack.Target, msg slack.Message) (
 	f.Calls = append(f.Calls, Call{Kind: "post", Target: target, Msg: msg})
 	if f.PostErr != nil {
 		return slack.Ref{}, f.PostErr
+	}
+	if f.PostErrAfter > 0 && len(f.Posts()) >= f.PostErrAfter+1 {
+		return slack.Ref{}, fmt.Errorf("slacktest: scripted failure on post %d", len(f.Posts()))
 	}
 	f.seq++
 	channel := target.Channel

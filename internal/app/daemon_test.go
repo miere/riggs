@@ -9,9 +9,10 @@ import (
 	"github.com/miere/riggs-mcp/internal/slack"
 )
 
-// The digest renders three options; exactly two of them are meant to be
-// answered here. "Open on Browser" is Slack's own job — a handler that exists
-// only to return nil would be worse than the router's "no handler" log line.
+// Every control Riggs renders that is meant to do something, and nothing else.
+// "Open on Browser" is deliberately absent: Slack opens the link itself, and a
+// handler that exists only to return nil would be worse than the router's own
+// "no handler" log line.
 func TestDaemonRegistersTheDigestActions(t *testing.T) {
 	a := &Application{cfg: &config.Config{}}
 	router := daemon.NewRouter()
@@ -19,6 +20,9 @@ func TestDaemonRegistersTheDigestActions(t *testing.T) {
 
 	got := router.Routes()
 	want := []string{
+		// The ask-review card's Approve, which leaves no comment.
+		pullrequest.AskActionID + "/" + pullrequest.IntentApprove,
+		// The digest rows' menu.
 		pullrequest.BulkActionID + "/" + pullrequest.IntentApproveMerge,
 		pullrequest.BulkActionID + "/" + pullrequest.IntentAskReview,
 	}

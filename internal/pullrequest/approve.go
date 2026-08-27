@@ -54,6 +54,17 @@ func NewApprover(gh Writer, store *notify.Store, poster slack.Poster) *Approver 
 		reviewBody: "Approved."}
 }
 
+// WithoutReviewBody submits the approval with no comment at all.
+//
+// Used by the ask-review card (§7bb): that approval is the reviewer's own, and
+// a body attached to it would be words they did not write. GitHub omits the
+// field entirely when it is empty, so nothing is posted to the pull request but
+// the approval itself.
+func (a *Approver) WithoutReviewBody() *Approver {
+	a.reviewBody = ""
+	return a
+}
+
 // WithSleep overrides the retry delay; intended for tests.
 func (a *Approver) WithSleep(f func(time.Duration)) *Approver {
 	a.sleep = f
