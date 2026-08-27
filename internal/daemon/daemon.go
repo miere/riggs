@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 
 	slackgo "github.com/slack-go/slack"
@@ -48,6 +49,19 @@ type AppHome interface {
 	Publish(ctx context.Context, userID string) (published bool, err error)
 }
 
+// Reporter tells whoever clicked that their click failed.
+//
+// It takes the whole interaction rather than a channel and a user because where
+// a failure belongs depends on where the click came from, and only the
+// implementation should decide that: a digest click has a channel and a thread,
+// a Home tab click has neither.
+//
+// The wording is the implementation's too. This package knows a handler
+// returned an error; it does not know how Riggs talks.
+type Reporter interface {
+	ReportFailure(ctx context.Context, in slack.Interaction, cause error) error
+}
+
 // Daemon holds the connection open and routes what arrives on it.
 type Daemon struct {
 	listener Listener
@@ -55,6 +69,7 @@ type Daemon struct {
 	logger   *slog.Logger
 	profile  string
 	home     AppHome
+	reporter Reporter
 }
 
 // New builds a daemon over a listener and a routing table.
@@ -75,12 +90,28 @@ func (d *Daemon) WithAppHome(home AppHome) *Daemon {
 	return d
 }
 
+// WithReporter registers the failure reporter.
+//
+// Optional, like WithAppHome, and for the same reason: a daemon with none still
+// routes every click it is asked to. Left unset, a failed click reports to the
+// log alone — which is the behaviour this exists to end.
+func (d *Daemon) WithReporter(r Reporter) *Daemon {
+	d.reporter = r
+	return d
+}
+
 // Run connects and serves until ctx is cancelled.
 //
 // A handler error is logged and swallowed. One failed click must not take the
 // connection down with it: the next click is a separate piece of work, and a
 // daemon that exits on the first GitHub hiccup would need a human to notice and
 // restart it before any button worked again.
+//
+// Swallowed is not the same as silent, and for a long time this conflated them.
+// A handler that failed said so in the log and nowhere else, so from Slack a
+// broken button and an ignored one looked identical — which is exactly how a
+// card that Slack was rejecting with invalid_blocks went unnoticed. The error
+// is still swallowed; it is now also reported to whoever clicked.
 func (d *Daemon) Run(ctx context.Context) error {
 	d.logger.Info("riggs daemon starting",
 		"profile", d.profile, "routes", d.router.Describe(), "app_home", d.home != nil)
@@ -104,6 +135,7 @@ func (d *Daemon) handleInteraction(ctx context.Context, cb slackgo.InteractionCa
 		d.logger.Error("interaction handler failed",
 			"action_id", in.ActionID, "intent", in.Intent, "item", in.Item,
 			"user", in.UserID, "error", err)
+		d.report(ctx, in, err)
 	case !matched:
 		d.logger.Info("no handler for interaction",
 			"action_id", in.ActionID, "intent", in.Intent, "item", in.Item)
@@ -112,6 +144,36 @@ func (d *Daemon) handleInteraction(ctx context.Context, cb slackgo.InteractionCa
 			"action_id", in.ActionID, "intent", in.Intent, "item", in.Item,
 			"user", in.UserID)
 	}
+}
+
+// report shows a failed click's cause to the person who made it.
+//
+// A handler that has already reported the failure itself is left alone. Some of
+// them narrate into the thread the click came from — that is a better message
+// than this one can write, because the handler knows what it was attempting —
+// and a click that answers twice is its own kind of broken. The signal is an
+// error exposing `Reported() bool`, which is a plain interface assertion rather
+// than a shared sentinel so no domain package has to import this one.
+//
+// A failure to report is logged and goes no further. There is nothing sensible
+// left to do about a Slack call that fails while explaining a Slack call that
+// failed, and recursing into it would be worse.
+func (d *Daemon) report(ctx context.Context, in slack.Interaction, cause error) {
+	if d.reporter == nil || alreadyReported(cause) {
+		return
+	}
+	if err := d.reporter.ReportFailure(ctx, in, cause); err != nil {
+		d.logger.Error("could not tell the user their click failed",
+			"action_id", in.ActionID, "intent", in.Intent, "item", in.Item,
+			"user", in.UserID, "error", err, "cause", cause)
+	}
+}
+
+// alreadyReported reports whether err has been shown to the user by whoever
+// produced it.
+func alreadyReported(err error) bool {
+	var r interface{ Reported() bool }
+	return errors.As(err, &r) && r.Reported()
 }
 
 // handleAppHomeOpened republishes the Home tab for whoever opened it.

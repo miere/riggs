@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -119,6 +120,137 @@ func TestDaemonSurvivesAFailingHandler(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Fatalf("handler ran %d time(s), want 2", calls)
+	}
+}
+
+// fakeReporter records what the daemon asked it to tell the user.
+type fakeReporter struct {
+	causes []error
+	items  []string
+	err    error
+}
+
+func (f *fakeReporter) ReportFailure(_ context.Context, in slack.Interaction, cause error) error {
+	f.causes = append(f.causes, cause)
+	f.items = append(f.items, in.Item)
+	return f.err
+}
+
+// alreadyReported is satisfied by a domain error that has announced itself.
+type saidSoError struct{ error }
+
+func (saidSoError) Reported() bool { return true }
+
+// The bug this exists for: a failed click reported to the log and nowhere else
+// is indistinguishable, from Slack, from a click nothing was listening for.
+func TestAFailedClickIsReportedToWhoeverClicked(t *testing.T) {
+	r := NewRouter()
+	r.Handle("pr_overflow", "ask_review", HandlerFunc(func(context.Context, slack.Interaction) error {
+		return errors.New("chat.postMessage failed: invalid_blocks")
+	}))
+
+	reporter := &fakeReporter{}
+	listener := &fakeListener{callbacks: []slackgo.InteractionCallback{
+		overflowCallback("pr_overflow", "ask_review", "o/r#43"),
+	}}
+
+	if err := New(listener, r, "riggs", quietLogger()).WithReporter(reporter).Run(context.Background()); err != nil {
+		t.Fatalf("Run returned %v, want nil", err)
+	}
+	if len(reporter.causes) != 1 {
+		t.Fatalf("reported %d time(s), want 1", len(reporter.causes))
+	}
+	if got := reporter.causes[0].Error(); !strings.Contains(got, "invalid_blocks") {
+		t.Errorf("the cause did not reach the user: %q", got)
+	}
+	if reporter.items[0] != "o/r#43" {
+		t.Errorf("reported about %q, want o/r#43", reporter.items[0])
+	}
+}
+
+// A handler that already announced the failure itself says it better — it knows
+// what it was attempting — and a click that answers twice is its own kind of
+// broken.
+func TestAnAlreadyReportedFailureIsNotReportedAgain(t *testing.T) {
+	r := NewRouter()
+	r.Handle("pr_overflow", "approve_merge", HandlerFunc(func(context.Context, slack.Interaction) error {
+		return saidSoError{errors.New("could not approve o/r#1 — github is down")}
+	}))
+
+	reporter := &fakeReporter{}
+	listener := &fakeListener{callbacks: []slackgo.InteractionCallback{
+		overflowCallback("pr_overflow", "approve_merge", "o/r#1"),
+	}}
+
+	if err := New(listener, r, "riggs", quietLogger()).WithReporter(reporter).Run(context.Background()); err != nil {
+		t.Fatalf("Run returned %v, want nil", err)
+	}
+	if len(reporter.causes) != 0 {
+		t.Errorf("reported a failure the handler had already announced: %v", reporter.causes)
+	}
+}
+
+// The mark survives wrapping, because a caller that adds context to an
+// already-announced error has not un-announced it.
+func TestTheReportedMarkSurvivesWrapping(t *testing.T) {
+	wrapped := fmt.Errorf("asking for a review: %w", saidSoError{errors.New("boom")})
+	if !alreadyReported(wrapped) {
+		t.Error("wrapping lost the reported mark")
+	}
+	if alreadyReported(errors.New("plain")) {
+		t.Error("a plain error claimed to have been reported")
+	}
+}
+
+// Nothing sensible is left to do about a Slack call that fails while explaining
+// a Slack call that failed. It must not take the connection down with it.
+func TestAFailingReporterIsSurvived(t *testing.T) {
+	r := NewRouter()
+	r.Handle("pr_overflow", "ask_review", HandlerFunc(func(context.Context, slack.Interaction) error {
+		return errors.New("original failure")
+	}))
+
+	reporter := &fakeReporter{err: errors.New("slack is down too")}
+	listener := &fakeListener{callbacks: []slackgo.InteractionCallback{
+		overflowCallback("pr_overflow", "ask_review", "o/r#1"),
+		overflowCallback("pr_overflow", "ask_review", "o/r#2"),
+	}}
+
+	if err := New(listener, r, "riggs", quietLogger()).WithReporter(reporter).Run(context.Background()); err != nil {
+		t.Fatalf("Run returned %v, want nil", err)
+	}
+	if len(reporter.causes) != 2 {
+		t.Errorf("a failing reporter stopped later clicks being reported: %d", len(reporter.causes))
+	}
+}
+
+// A daemon with no reporter is the pre-existing arrangement, and must still
+// route: the Home tab is optional the same way.
+func TestNoReporterIsNotAFailure(t *testing.T) {
+	r := NewRouter()
+	r.Handle("pr_overflow", "ask_review", HandlerFunc(func(context.Context, slack.Interaction) error {
+		return errors.New("boom")
+	}))
+	listener := &fakeListener{callbacks: []slackgo.InteractionCallback{
+		overflowCallback("pr_overflow", "ask_review", "o/r#1"),
+	}}
+	if err := New(listener, r, "riggs", quietLogger()).Run(context.Background()); err != nil {
+		t.Fatalf("Run returned %v, want nil", err)
+	}
+}
+
+// A click that matched no route is not a failure — a link button raises one on
+// every press — so it must not tell the user anything went wrong.
+func TestAnUnroutedClickIsNotReported(t *testing.T) {
+	reporter := &fakeReporter{}
+	listener := &fakeListener{callbacks: []slackgo.InteractionCallback{
+		overflowCallback("pr_bulk_overflow", "open_browser", "o/r#1"),
+	}}
+	if err := New(listener, NewRouter(), "riggs", quietLogger()).WithReporter(reporter).Run(context.Background()); err != nil {
+		t.Fatalf("Run returned %v, want nil", err)
+	}
+	if len(reporter.causes) != 0 {
+		t.Errorf("an unrouted click was reported as a failure: %v", reporter.causes)
 	}
 }
 

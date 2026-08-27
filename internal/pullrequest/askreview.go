@@ -91,6 +91,11 @@ type Asker struct {
 
 	// resolver turns a configured handle into an id, when the config holds one.
 	resolver Resolver
+	// failChannel and failThread are where a failure is announced: the digest
+	// message the ask was clicked from. Empty when the ask did not come from a
+	// click — a CLI invocation has a terminal to fail into and needs no card.
+	failChannel string
+	failThread  string
 	// reviewer is the configured reviewer, as written: an id, a mention, or a
 	// handle. It is normalised at send time, never assumed.
 	reviewer string
@@ -111,6 +116,17 @@ func NewAsker(gh Detailer, store *notify.Store, n *notify.Notifier, poster slack
 // an error rather than a mention that reaches nobody.
 func (a *Asker) WithResolver(r Resolver) *Asker {
 	a.resolver = r
+	return a
+}
+
+// WithFailureThread points failures at the message the ask was clicked from.
+//
+// Deliberately the DIGEST's thread, not the card's. The card is the thing that
+// failed to post, so there is no thread under it to reply in; the digest is
+// where the row still sits, unstruck, and where somebody who clicked and saw
+// nothing happen will look. It is the same choice the approve path made.
+func (a *Asker) WithFailureThread(channel, ts string) *Asker {
+	a.failChannel, a.failThread = channel, ts
 	return a
 }
 
@@ -164,7 +180,47 @@ func (r AskResult) String() string {
 // target supplies the credentials; the destination is this asker's own
 // configuration, not the caller's — the point of the action is to reach
 // somebody who is not looking at the digest it was clicked from.
+//
+// Every failure is announced under the digest row it was clicked from, when
+// WithFailureThread said where that is. This action is the one that most needs
+// it: the card it posts goes somewhere else entirely — another channel, or a
+// DM to the reviewer — so the person who clicked cannot tell a request that
+// was sent from one that died on the way, and "nothing happened" is the same
+// picture either way.
 func (a *Asker) Ask(ctx context.Context, ref, requester string, target slack.Target) (AskResult, error) {
+	result, err := a.ask(ctx, ref, requester, target)
+	if err != nil {
+		return result, a.fail(ctx, target, ref, err)
+	}
+	return result, nil
+}
+
+// fail announces err under the digest row and marks it as already reported.
+//
+// The wording names the pull request and the verb, because the reader is
+// looking at a list of rows and needs to know which one did not go. When there
+// is no thread to announce into — a CLI ask — the error is returned untouched
+// and the caller prints it, which is the same information in the right place.
+func (a *Asker) fail(ctx context.Context, target slack.Target, ref string, cause error) error {
+	if a.poster == nil || a.failThread == "" {
+		return cause
+	}
+	text := fmt.Sprintf("%s Could not ask for a review of %s — %v", blockkit.MarkerFailed, ref, cause)
+	t := target
+	t.Channel = a.failChannel
+	if _, err := a.poster.Post(ctx, t, slack.Message{
+		Text: text, Blocks: blockkit.ContextBlocks(text), ThreadTS: a.failThread,
+	}); err != nil {
+		// Unreported: the daemon's own reporter is now the only thing left that
+		// can tell the user, so it must not be told this was handled.
+		return cause
+	}
+	return slack.Reported(cause)
+}
+
+// ask is Ask without the announcing, so every exit from it is reported in one
+// place rather than at each return.
+func (a *Asker) ask(ctx context.Context, ref, requester string, target slack.Target) (AskResult, error) {
 	repo, number, err := SplitRef(ref)
 	if err != nil {
 		return AskResult{}, err

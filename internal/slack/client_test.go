@@ -85,6 +85,52 @@ func TestPostToChannel(t *testing.T) {
 	}
 }
 
+// A failed click is reported to the person who made it and nobody else, which
+// is what chat.postEphemeral is for: the same message as a real post, plus the
+// user it is visible to.
+func TestPostEphemeralTargetsOneUser(t *testing.T) {
+	var log []recorded
+	api, stop := server(t, &log, okJSON)
+	defer stop()
+
+	err := api.PostEphemeral(context.Background(),
+		Target{Profile: "default", BotToken: "xoxb-t", Channel: "C123"}, "U42",
+		Message{Text: "that did not work", ThreadTS: "1700.0001"})
+	if err != nil {
+		t.Fatalf("PostEphemeral: %v", err)
+	}
+	if len(log) != 1 || log[0].method != "chat.postEphemeral" {
+		t.Fatalf("calls = %+v, want a single chat.postEphemeral", log)
+	}
+	if log[0].body["user"] != "U42" {
+		t.Errorf("user = %v, want the clicker", log[0].body["user"])
+	}
+	if log[0].body["channel"] != "C123" || log[0].body["thread_ts"] != "1700.0001" {
+		t.Errorf("body = %+v, want it threaded under the message clicked", log[0].body)
+	}
+}
+
+// The Home tab has no channel, so a failure there is reported by DM — which
+// means the ephemeral path has to resolve a DM target like any other.
+func TestPostEphemeralToDMOpensConversation(t *testing.T) {
+	var log []recorded
+	api, stop := server(t, &log, okJSON)
+	defer stop()
+
+	err := api.PostEphemeral(context.Background(),
+		Target{Profile: "default", BotToken: "xoxb-t", AdminUserID: "U42"}, "U42",
+		Message{Text: "that did not work"})
+	if err != nil {
+		t.Fatalf("PostEphemeral: %v", err)
+	}
+	if len(log) != 2 || log[0].method != "conversations.open" {
+		t.Fatalf("calls = %+v, want the conversation opened first", log)
+	}
+	if log[1].body["channel"] != "D999" {
+		t.Errorf("channel = %v, want the opened DM", log[1].body["channel"])
+	}
+}
+
 // A DM target has no channel, so the client opens the conversation first.
 func TestPostToDMOpensConversation(t *testing.T) {
 	var log []recorded

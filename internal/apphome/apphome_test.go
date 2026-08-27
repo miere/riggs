@@ -417,6 +417,51 @@ func TestAFailedInstallDoesNotRestart(t *testing.T) {
 	}
 }
 
+// The Home tab says its own failures, so the daemon must not say them again.
+// An admin who clicked Update once should be told once.
+func TestHomeTabFailuresAreMarkedAsAlreadyReported(t *testing.T) {
+	t.Run("a failed install", func(t *testing.T) {
+		p, _, _, installer, _ := publisher(t, nil)
+		installer.err = errors.New("no asset for darwin/arm64")
+		err := p.Update(context.Background(), admin)
+		if err == nil {
+			t.Fatal("Update reported success after a failed install")
+		}
+		if !slack.WasReported(err) {
+			t.Error("the daemon would report this a second time")
+		}
+	})
+
+	t.Run("a failed restart", func(t *testing.T) {
+		p, _, _, _, _ := publisher(t, func(d *Deps) {
+			d.Restart = func(context.Context) error { return errors.New("launchd does not know this agent") }
+		})
+		err := p.Restart(context.Background(), admin)
+		if err == nil {
+			t.Fatal("Restart reported success after a failed restart")
+		}
+		if !slack.WasReported(err) {
+			t.Error("the daemon would report this a second time")
+		}
+	})
+
+	// A refusal says nothing to the user, so it must NOT claim to have been
+	// reported — this is the case the daemon's catch-all exists for.
+	t.Run("a non-admin refusal", func(t *testing.T) {
+		p, _, _, _, poster := publisher(t, nil)
+		err := p.Update(context.Background(), "U-stranger")
+		if err == nil {
+			t.Fatal("Update accepted a non-admin")
+		}
+		if len(poster.posted) != 0 {
+			t.Fatalf("a refusal said something: %v", poster.posted)
+		}
+		if slack.WasReported(err) {
+			t.Error("a silent refusal claimed to have been reported")
+		}
+	})
+}
+
 // Installed but not restarted is a real state — a Riggs started by hand has no
 // supervisor to bring it back — and the admin has to be told, or they are left
 // looking at a version line that will not change.
