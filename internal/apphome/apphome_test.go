@@ -114,6 +114,10 @@ func (f *fakePoster) Update(context.Context, slack.Target, slack.Ref, slack.Mess
 }
 func (f *fakePoster) Delete(context.Context, slack.Target, slack.Ref) error { return nil }
 
+func (f *fakePoster) HasForeignReplies(context.Context, slack.Target, slack.Ref) (bool, error) {
+	return false, nil
+}
+
 // --- helpers ----------------------------------------------------------------
 
 func publisher(t *testing.T, mutate func(*Deps)) (*Publisher, *fakeViews, *fakeChecker, *fakeInstaller, *fakePoster) {

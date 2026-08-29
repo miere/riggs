@@ -13,7 +13,7 @@ import (
 
 // Call records one interaction with the fake.
 type Call struct {
-	// Kind is "post", "update" or "delete".
+	// Kind is "post", "update", "delete" or "replies".
 	Kind   string
 	Target slack.Target
 	// Ref is the message being updated or deleted; zero for a post.
@@ -36,6 +36,11 @@ type Fake struct {
 	UpdateErr error
 	// DeleteErr, when set, fails every Delete.
 	DeleteErr error
+	// Threaded holds the message timestamps that have a reply from someone
+	// other than Riggs.
+	Threaded map[string]bool
+	// RepliesErr, when set, fails every HasForeignReplies.
+	RepliesErr error
 
 	seq int
 }
@@ -71,6 +76,15 @@ func (f *Fake) Update(_ context.Context, target slack.Target, ref slack.Ref, msg
 func (f *Fake) Delete(_ context.Context, target slack.Target, ref slack.Ref) error {
 	f.Calls = append(f.Calls, Call{Kind: "delete", Target: target, Ref: ref})
 	return f.DeleteErr
+}
+
+// HasForeignReplies answers from Threaded, and records that it was asked.
+func (f *Fake) HasForeignReplies(_ context.Context, target slack.Target, ref slack.Ref) (bool, error) {
+	f.Calls = append(f.Calls, Call{Kind: "replies", Target: target, Ref: ref})
+	if f.RepliesErr != nil {
+		return false, f.RepliesErr
+	}
+	return f.Threaded[ref.TS], nil
 }
 
 // Deleted returns the refs passed to Delete, in order.

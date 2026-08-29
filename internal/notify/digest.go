@@ -68,17 +68,43 @@ func (n *Notifier) UpdateDigest(ctx context.Context, key string, target slack.Ta
 // A message that is already gone is success, not failure: the intent was for it
 // not to be there. The ledger row is dropped either way, so a post that Slack
 // has lost cannot strand the next pass trying to update it.
-func (n *Notifier) DeleteDigest(ctx context.Context, key string, target slack.Target) error {
+//
+// One exception: a digest whose thread somebody replied in is KEPT. Deleting a
+// Slack message deletes its whole thread with it, and an emptied digest is
+// tidiness where a colleague's reply is work. Tidiness loses.
+//
+// "Somebody" excludes Riggs, which posts into a digest's own thread when it
+// narrates an approval or reports a failed click. Counting those would retain
+// every digest that ever saw a click.
+//
+// The ledger row is dropped for a retained digest too. Its only purpose is to
+// let a later pass update or delete that message, and this decides we will
+// never do either again — so the message is left as the record the thread hangs
+// off, and Riggs stops managing it.
+//
+// Reported reports whether the message was actually deleted.
+func (n *Notifier) DeleteDigest(ctx context.Context, key string, target slack.Target) (bool, error) {
 	entry, found, err := n.store.Card(ctx, key)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if !found {
-		return nil
+		return false, nil
 	}
 	ref := slack.Ref{Channel: entry.Channel, TS: entry.TS}
-	if err := n.poster.Delete(ctx, target, ref); err != nil && !errors.Is(err, slack.ErrMessageNotFound) {
-		return fmt.Errorf("deleting digest %s: %w", key, err)
+
+	// A failure to read the thread must not fall through to the delete: not
+	// knowing whether a conversation is there is not permission to destroy one.
+	replied, err := n.poster.HasForeignReplies(ctx, target, ref)
+	if err != nil {
+		return false, fmt.Errorf("checking the thread on digest %s before deleting it: %w", key, err)
 	}
-	return n.store.DeleteCard(ctx, key)
+	if replied {
+		return false, n.store.DeleteCard(ctx, key)
+	}
+
+	if err := n.poster.Delete(ctx, target, ref); err != nil && !errors.Is(err, slack.ErrMessageNotFound) {
+		return false, fmt.Errorf("deleting digest %s: %w", key, err)
+	}
+	return true, n.store.DeleteCard(ctx, key)
 }
