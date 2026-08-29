@@ -99,6 +99,11 @@ func TestReviewRequested(t *testing.T) {
 	if !strings.Contains(gotPath, "review-requested%3Amiere") {
 		t.Errorf("query = %q, want it scoped to the reviewer", gotPath)
 	}
+	// An archived repository is read-only: GitHub rejects a review on it with
+	// `422 lock prevents review`, so those must never reach the queue.
+	if !strings.Contains(gotPath, "archived%3Afalse") {
+		t.Errorf("query = %q, want archived repositories excluded", gotPath)
+	}
 }
 
 func TestReviewRequestedNeedsALogin(t *testing.T) {
@@ -147,5 +152,43 @@ func TestRepoFromAPIURL(t *testing.T) {
 		if got := repoFromAPIURL(tc.in); got != tc.want {
 			t.Errorf("repoFromAPIURL(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// The archived flag rides along in the pull request payload
+// (base.repo.archived), so a read-only repository is detectable without a
+// second call to /repos/{owner}/{repo}.
+func TestPullRequestDetailReadsTheArchivedFlag(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"number":43,"title":"Bump pytest","state":"open",
+			"head":{"sha":"abc"},"user":{"login":"app/dependabot"},
+			"base":{"repo":{"archived":true}}}`)
+	}))
+	defer srv.Close()
+
+	d, err := New("t").WithTransport(srv.Client(), srv.URL).
+		PullRequestDetail(context.Background(), "o/archived-repo", 43)
+	if err != nil {
+		t.Fatalf("PullRequestDetail: %v", err)
+	}
+	if !d.Archived {
+		t.Error("Archived = false, want it read from base.repo.archived")
+	}
+}
+
+func TestPullRequestDetailDefaultsToNotArchived(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"number":1,"state":"open","head":{"sha":"abc"},
+			"user":{"login":"hjed"},"base":{"repo":{"archived":false}}}`)
+	}))
+	defer srv.Close()
+
+	d, err := New("t").WithTransport(srv.Client(), srv.URL).
+		PullRequestDetail(context.Background(), "o/r", 1)
+	if err != nil {
+		t.Fatalf("PullRequestDetail: %v", err)
+	}
+	if d.Archived {
+		t.Error("Archived = true, want false for a live repository")
 	}
 }

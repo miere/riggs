@@ -129,6 +129,12 @@ func (p PullRequest) Ref() string { return fmt.Sprintf("%s#%d", p.Repo, p.Number
 // This is the search API, which has its own much tighter bucket (30
 // requests/minute) than the core one — so it is called once per tick and never
 // fanned out.
+//
+// `archived:false` excludes pull requests in archived repositories. An
+// archived repository is read-only: GitHub locks every pull request in it and
+// rejects a review with `422 lock prevents review`, so nothing here could ever
+// be acted on. Filtering at the query is free — the alternative is discovering
+// them and failing on the click.
 func (c *Client) ReviewRequested(ctx context.Context, login string, limit int) ([]PullRequest, error) {
 	if login == "" {
 		return nil, fmt.Errorf("github: no reviewer login given")
@@ -137,7 +143,7 @@ func (c *Client) ReviewRequested(ctx context.Context, login string, limit int) (
 		limit = 30
 	}
 	q := url.Values{}
-	q.Set("q", fmt.Sprintf("is:open is:pr review-requested:%s", login))
+	q.Set("q", fmt.Sprintf("is:open is:pr archived:false review-requested:%s", login))
 	q.Set("per_page", fmt.Sprint(limit))
 	q.Set("sort", "updated")
 

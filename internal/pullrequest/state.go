@@ -29,6 +29,7 @@ import (
 const (
 	ReasonMerged           = "merged"
 	ReasonClosed           = "closed"
+	ReasonArchived         = "archived"
 	ReasonChangesRequested = "changes_requested"
 	ReasonChecksFailed     = "checks_failed"
 	ReasonChecksRunning    = "checks_running"
@@ -37,7 +38,15 @@ const (
 
 // TerminalReasons can never be left. Once here nothing more will change, so
 // the loop stops re-fetching the pull request entirely.
-var TerminalReasons = map[string]bool{ReasonMerged: true, ReasonClosed: true}
+//
+// Archived counts, with one caveat: a repository *can* be unarchived. That is
+// safe here because scope() is the union of discovery and tracked-non-terminal
+// pull requests — unarchiving puts the pull request back in the search results
+// and discovery re-adopts it. Treating it as terminal only stops us paying
+// reads for a card that cannot move.
+var TerminalReasons = map[string]bool{
+	ReasonMerged: true, ReasonClosed: true, ReasonArchived: true,
+}
 
 // Check conclusions treated as a hard failure. Everything else that has
 // completed (success, neutral, skipped) counts as passing.
@@ -146,17 +155,23 @@ func (s State) Terminal() bool { return TerminalReasons[s.Reason] }
 //
 //  1. merged
 //  2. closed
-//  3. changes requested
-//  4. a check failed
-//  5. — reviewable slots in here: a direct request, green —
-//  6. still building, or no checks at all
-//  7. approved / not ours
+//  3. archived — the repository is read-only, so no review can ever land
+//  4. changes requested
+//  5. a check failed
+//  6. — reviewable slots in here: a direct request, green —
+//  7. still building, or no checks at all
+//  8. approved / not ours
+//
+// Archived ranks below merged and closed on purpose: how a pull request ended
+// is more useful on the card than the state of the repository around it.
 func Derive(d github.Detail, checks CheckStatus, v Verdict, requested bool) State {
 	switch {
 	case d.Merged:
 		return State{Reason: ReasonMerged}
 	case d.State == "closed":
 		return State{Reason: ReasonClosed}
+	case d.Archived:
+		return State{Reason: ReasonArchived}
 	case v.ChangesRequested:
 		return State{Reason: ReasonChangesRequested, ChangesRequestedBy: v.ChangesRequestedBy}
 	case checks.Failed:
@@ -209,6 +224,8 @@ func (s State) Label(d github.Detail, closedBy string) string {
 			return fmt.Sprintf("Closed by @%s at %s", closedBy, FormatTime(d.ClosedAt))
 		}
 		return "Closed at " + FormatTime(d.ClosedAt)
+	case ReasonArchived:
+		return "Repository archived — read-only, cannot be reviewed or merged"
 	case ReasonChangesRequested:
 		if s.ChangesRequestedBy != "" {
 			return "Changes requested by @" + s.ChangesRequestedBy

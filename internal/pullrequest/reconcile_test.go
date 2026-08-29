@@ -421,3 +421,49 @@ func TestSplitRef(t *testing.T) {
 		}
 	}
 }
+
+// Archiving a repository makes it read-only. A card already on the board then
+// has to collapse, because the queue's discovery query no longer returns it
+// and it can never merge. Left alone such a card sits there reading
+// "reviewable" and answers every approval with `422 lock prevents review`.
+func TestArchivingCollapsesATrackedCard(t *testing.T) {
+	gh := greenGH(ref)
+	r := newRig(t, gh)
+	ctx := context.Background()
+
+	if _, err := r.engine.Run(ctx, target, false); err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+
+	// The repository is archived, and so drops out of discovery.
+	d := gh.details[ref]
+	d.Archived = true
+	gh.details[ref] = d
+	gh.search = nil
+	gh.calls = nil
+	r.slack.Reset()
+
+	report, err := r.engine.Run(ctx, target, false)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(report.Outcomes) != 1 {
+		t.Fatalf("outcomes = %+v, want the tracked card still reconciled once", report.Outcomes)
+	}
+	if report.Outcomes[0].State != ReasonArchived {
+		t.Errorf("state = %s, want it collapsed to archived", report.Outcomes[0].State)
+	}
+	// One read and no more: checks and the decision cannot change the answer.
+	if gh.called("checks:sha-"+ref) || gh.called("decision:"+ref) {
+		t.Errorf("calls = %v, want the detail read to settle it alone", gh.calls)
+	}
+
+	// Archived is terminal, so the next tick stops reading the PR entirely.
+	gh.calls = nil
+	if _, err := r.engine.Run(ctx, target, false); err != nil {
+		t.Fatalf("second Run: %v", err)
+	}
+	if gh.called("detail:" + ref) {
+		t.Errorf("calls = %v, want a terminal card never re-fetched", gh.calls)
+	}
+}

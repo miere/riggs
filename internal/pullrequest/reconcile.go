@@ -108,7 +108,10 @@ func (e *Engine) resolveFrom(ctx context.Context, d github.Detail, mustDecide bo
 	repo, number := d.Repo, d.Number
 	r := Resolved{Detail: d, Requested: d.Requested(e.login)}
 
-	if d.Merged || d.State == "closed" {
+	// Archived joins the short-circuit for the same reason merged and closed
+	// are here: nothing checks or reviews could say would change the answer,
+	// so the pull request costs exactly one read.
+	if d.Merged || d.State == "closed" || d.Archived {
 		r.State = Derive(d, CheckStatus{}, Verdict{}, r.Requested)
 		closedBy := ""
 		if r.State.Reason == ReasonClosed {

@@ -108,6 +108,12 @@ func detail(state string, merged bool, requested ...string) github.Detail {
 	}
 }
 
+// archived marks a pull request as living in a read-only repository.
+func archived(d github.Detail) github.Detail {
+	d.Archived = true
+	return d
+}
+
 // The precedence table, which is the heart of the port.
 func TestDerive(t *testing.T) {
 	green := CheckStatus{Passed: true, Total: 1}
@@ -126,6 +132,14 @@ func TestDerive(t *testing.T) {
 			Verdict{ChangesRequested: true}, true, State{Reason: ReasonMerged}},
 		{"closed outranks a verdict", detail("closed", false), green,
 			Verdict{ChangesRequested: true}, true, State{Reason: ReasonClosed}},
+		// Green, requested, and still unapprovable, because archiving the
+		// repository locks every pull request inside it.
+		{"archived is not reviewable however green", archived(detail("open", false, "miere")),
+			green, Verdict{}, true, State{Reason: ReasonArchived}},
+		{"merged still says merged in an archived repo", archived(detail("closed", true)),
+			green, Verdict{}, true, State{Reason: ReasonMerged}},
+		{"closed still says closed in an archived repo", archived(detail("closed", false)),
+			green, Verdict{}, true, State{Reason: ReasonClosed}},
 		{"changes requested outranks failing checks", detail("open", false), failed,
 			Verdict{ChangesRequested: true, ChangesRequestedBy: "hjed"}, true,
 			State{Reason: ReasonChangesRequested, ChangesRequestedBy: "hjed"}},
@@ -157,7 +171,7 @@ func TestDerive(t *testing.T) {
 
 func TestTerminalStates(t *testing.T) {
 	for reason, want := range map[string]bool{
-		ReasonMerged: true, ReasonClosed: true,
+		ReasonMerged: true, ReasonClosed: true, ReasonArchived: true,
 		ReasonApproved: false, ReasonChecksRunning: false, ReasonChangesRequested: false,
 	} {
 		if got := (State{Reason: reason}).Terminal(); got != want {
@@ -212,6 +226,8 @@ func TestLabels(t *testing.T) {
 		{"checks failing", State{Reason: ReasonChecksFailed}, "", "Checks failing"},
 		{"checks running", State{Reason: ReasonChecksRunning}, "", "Checks running"},
 		{"approved", State{Reason: ReasonApproved}, "", "Approved — awaiting merge"},
+		{"archived", State{Reason: ReasonArchived}, "",
+			"Repository archived — read-only, cannot be reviewed or merged"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := tc.state.Label(d, tc.closedBy); got != tc.want {
