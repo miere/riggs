@@ -48,6 +48,10 @@ type Poster interface {
 	// than updated to an empty shell (§7c), which is the only reason this
 	// exists.
 	Delete(ctx context.Context, target Target, ref Ref) error
+	// HasForeignReplies reports whether anyone but Riggs replied in a
+	// message's thread. Deleting the message would take the thread with it,
+	// so this is what stops a tidy-up destroying a conversation.
+	HasForeignReplies(ctx context.Context, target Target, ref Ref) (bool, error)
 }
 
 // Doer is the HTTP seam, so tests can drive the client without a network.
@@ -69,6 +73,8 @@ type API struct {
 	sleep   func(time.Duration)
 	// maxAttempts bounds retries on 429 and 5xx.
 	maxAttempts int
+	// self remembers who this token is, for recognising our own messages.
+	self selfCache
 }
 
 // NewAPI constructs a client over the default HTTP transport.

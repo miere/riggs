@@ -1036,7 +1036,22 @@ Rules:
   cooldown expires, then it is purged. That is what eventually empties a post —
   and it means a pull request that goes green again comes back as new, which is
   the same non-stickiness §9's cards have.
-- **An emptied post is deleted, not blanked** (§7c).
+- **An emptied post is deleted, not blanked** (§7c), **unless somebody replied
+  in its thread.** Deleting a Slack message deletes its whole thread with it. An
+  emptied digest is tidiness; a colleague's reply under it is work, and tidiness
+  loses. Such a post is left in Slack and dropped from the ledger: the row exists
+  only to update or delete that message, and this decides we will never do
+  either again.
+- **Riggs' own replies do not count as a conversation.** It posts into a
+  digest's own thread on two paths — narrating an approval, and reporting a
+  failed click — so a plain "does this thread have replies" would keep every
+  digest that ever saw a click. The check compares each reply against the bot's
+  own user id, read once per token from `auth.test`.
+- **A thread that cannot be read blocks the delete.** Not knowing whether a
+  conversation is there is not permission to destroy one, so the failure is
+  reported rather than falling through. `conversations.replies` needs a history
+  scope (`channels:history` and its private, DM and group-DM siblings); the app
+  already holds all four.
 - **A vanished digest stays vanished.** Unlike a card, a digest whose message is
   gone is not re-posted: its items come back on their own cooldown, and
   resurrecting a message the reader dismissed is the wrong answer.

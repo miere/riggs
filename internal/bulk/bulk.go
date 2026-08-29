@@ -136,7 +136,10 @@ type Report struct {
 	Purged     []string `json:"purged,omitempty"`
 	Updated    []string `json:"updated_posts,omitempty"`
 	Deleted    []string `json:"deleted_posts,omitempty"`
-	DryRun     bool     `json:"dry_run"`
+	// Retained names the emptied posts that were left in Slack because
+	// somebody had replied in their thread.
+	Retained []string `json:"retained_posts,omitempty"`
+	DryRun   bool     `json:"dry_run"`
 
 	// Noun names what was counted, so the human line reads "considered 4
 	// ticket(s)" rather than something generic. It is not part of the JSON
@@ -165,6 +168,7 @@ func (r Report) String() string {
 	line("posted", r.Posted)
 	line("held", r.Held)
 	line("purged", r.Purged)
+	line("retained (thread has replies)", r.Retained)
 	line("updated", r.Updated)
 	line("deleted", r.Deleted)
 	return strings.TrimRight(b.String(), "\n")
@@ -173,7 +177,7 @@ func (r Report) String() string {
 // sortAll makes the report deterministic, so a test (and a human diffing two
 // runs) sees a stable order.
 func (r *Report) sortAll() {
-	for _, s := range [][]string{r.Posted, r.Held, r.Purged, r.Updated, r.Deleted} {
+	for _, s := range [][]string{r.Posted, r.Held, r.Purged, r.Updated, r.Deleted, r.Retained} {
 		sort.Strings(s)
 	}
 }
@@ -240,7 +244,8 @@ func (b *Rebuilder) Rebuild(ctx context.Context, postKey string, target slack.Ta
 	sort.SliceStable(members, func(i, j int) bool { return members[i].Position < members[j].Position })
 
 	if len(members) == 0 {
-		return b.notifier.DeleteDigest(ctx, postKey, target)
+		_, err := b.notifier.DeleteDigest(ctx, postKey, target)
+		return err
 	}
 
 	rows := make([]blockkit.Row, 0, len(members))
@@ -443,10 +448,18 @@ func (e *Engine) rebuildPosts(ctx context.Context, target slack.Target,
 		}
 
 		if len(rows) == 0 {
-			if err := e.notifier.DeleteDigest(ctx, postKey, target); err != nil {
+			deleted, err := e.notifier.DeleteDigest(ctx, postKey, target)
+			if err != nil {
 				return err
 			}
-			report.Deleted = append(report.Deleted, postKey)
+			if deleted {
+				report.Deleted = append(report.Deleted, postKey)
+			} else {
+				// Kept because its thread has replies. Riggs has forgotten it,
+				// so say so rather than reporting a deletion that did not
+				// happen.
+				report.Retained = append(report.Retained, postKey)
+			}
 			continue
 		}
 
