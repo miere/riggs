@@ -32,14 +32,14 @@ func semantic(t *testing.T, got []any, want string) {
 func TestReviewablePullRequestCard(t *testing.T) {
 	card := Card{
 		Title:          "Fix the resolver",
-		Subtitle:       "UpsideRealty/upside#20069",
+		Subtitle:       "acme/monolith#20069",
 		IconURL:        "https://example.test/gh.png",
 		IconAlt:        "GitHub",
 		Body:           "Repoints the owner link.",
 		BodyBlockID:    "pr_summary",
-		ActionsBlockID: "UpsideRealty/upside#20069",
+		ActionsBlockID: "acme/monolith#20069",
 		Actions: []Element{
-			Button{ActionID: "approve_only", Text: "Approve", Value: "UpsideRealty/upside#20069", Primary: true},
+			Button{ActionID: "approve_only", Text: "Approve", Value: "acme/monolith#20069", Primary: true},
 			LinkButton{Text: "Open in Browser", URL: "https://github.com/x/y/pull/1"},
 			Overflow{ActionID: "pr_overflow", Options: []Option{
 				{Text: "Approve & Merge", Value: "approve_merge"},
@@ -51,14 +51,14 @@ func TestReviewablePullRequestCard(t *testing.T) {
 	semantic(t, card.Blocks(), `[{
       "type":"container","width":"wide",
       "title":{"type":"plain_text","text":"Fix the resolver"},
-      "subtitle":{"type":"plain_text","text":"UpsideRealty/upside#20069"},
+      "subtitle":{"type":"plain_text","text":"acme/monolith#20069"},
       "icon":{"type":"image","image_url":"https://example.test/gh.png","alt_text":"GitHub"},
       "is_collapsible":true,"default_collapsed":false,
       "child_blocks":[
         {"type":"section","block_id":"pr_summary","text":{"type":"mrkdwn","text":"Repoints the owner link."}},
         {"type":"divider"},
-        {"type":"actions","block_id":"UpsideRealty/upside#20069","elements":[
-          {"type":"button","action_id":"approve_only","style":"primary","value":"UpsideRealty/upside#20069",
+        {"type":"actions","block_id":"acme/monolith#20069","elements":[
+          {"type":"button","action_id":"approve_only","style":"primary","value":"acme/monolith#20069",
            "text":{"type":"plain_text","text":"Approve","emoji":true}},
           {"type":"button","url":"https://github.com/x/y/pull/1",
            "text":{"type":"plain_text","text":"Open in Browser","emoji":true}},

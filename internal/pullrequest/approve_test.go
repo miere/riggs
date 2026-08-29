@@ -166,14 +166,14 @@ func TestDismissedApprovalIsReapproved(t *testing.T) {
 
 // Someone else's approval is not ours.
 func TestAnotherReviewersApprovalDoesNotCount(t *testing.T) {
-	gh := &fakeWriter{login: "miere", reviews: approved("hjed"), reviewsAfter: approved("miere")}
+	gh := &fakeWriter{login: "miere", reviews: approved("alex"), reviewsAfter: approved("miere")}
 	r := newApproverRig(t, gh)
 
 	if _, err := r.Run(context.Background(), "o/r#1", false, approveTarget, "1700.1"); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if gh.approved != 1 {
-		t.Errorf("approvals = %d, want ours submitted despite hjed's", gh.approved)
+		t.Errorf("approvals = %d, want ours submitted despite alex's", gh.approved)
 	}
 }
 

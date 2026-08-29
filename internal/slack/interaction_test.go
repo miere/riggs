@@ -19,7 +19,7 @@ func blockActions(a *slackgo.BlockAction) slackgo.InteractionCallback {
 func TestDecodeInteractionReadsAButton(t *testing.T) {
 	in, ok := DecodeInteraction(blockActions(&slackgo.BlockAction{
 		ActionID: "approve_only",
-		BlockID:  "UpsideRealty/upside#20534",
+		BlockID:  "acme/monolith#20534",
 		Value:    "approve_only",
 	}))
 	if !ok {
@@ -28,7 +28,7 @@ func TestDecodeInteractionReadsAButton(t *testing.T) {
 	if in.ActionID != "approve_only" || in.Intent != "approve_only" {
 		t.Fatalf("action/intent = %q/%q", in.ActionID, in.Intent)
 	}
-	if in.Item != "UpsideRealty/upside#20534" {
+	if in.Item != "acme/monolith#20534" {
 		t.Fatalf("Item = %q, want the block_id", in.Item)
 	}
 	if in.Channel != "C123" || in.UserID != "U999" || in.MessageTS != "1700.0001" {
@@ -41,7 +41,7 @@ func TestDecodeInteractionReadsAButton(t *testing.T) {
 func TestDecodeInteractionPrefersTheSelectedOption(t *testing.T) {
 	a := &slackgo.BlockAction{
 		ActionID: "pr_overflow",
-		BlockID:  "UpsideRealty/upside#20534",
+		BlockID:  "acme/monolith#20534",
 	}
 	a.SelectedOption.Value = "approve_merge"
 
@@ -52,7 +52,7 @@ func TestDecodeInteractionPrefersTheSelectedOption(t *testing.T) {
 	if in.Intent != "approve_merge" {
 		t.Fatalf("Intent = %q, want the selected option's value", in.Intent)
 	}
-	if in.Item != "UpsideRealty/upside#20534" {
+	if in.Item != "acme/monolith#20534" {
 		t.Fatalf("Item = %q, want the block_id", in.Item)
 	}
 }

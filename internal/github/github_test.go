@@ -68,9 +68,9 @@ func TestReviewRequested(t *testing.T) {
 		gotAuth = r.Header.Get("Authorization")
 		io.WriteString(w, `{"items":[
 			{"number":20069,"title":"Fix the resolver",
-			 "html_url":"https://github.com/UpsideRealty/upside/pull/20069",
-			 "repository_url":"https://api.github.com/repos/UpsideRealty/upside",
-			 "updated_at":"2026-08-09T01:02:03Z","user":{"login":"hjed"}}]}`)
+			 "html_url":"https://github.com/acme/monolith/pull/20069",
+			 "repository_url":"https://api.github.com/repos/acme/monolith",
+			 "updated_at":"2026-08-09T01:02:03Z","user":{"login":"alex"}}]}`)
 	}))
 	defer srv.Close()
 
@@ -84,13 +84,13 @@ func TestReviewRequested(t *testing.T) {
 	}
 	pr := prs[0]
 	// The search payload has no plain repository field; it has to be derived.
-	if pr.Repo != "UpsideRealty/upside" {
+	if pr.Repo != "acme/monolith" {
 		t.Errorf("repo = %q, want it derived from repository_url", pr.Repo)
 	}
-	if pr.Ref() != "UpsideRealty/upside#20069" {
+	if pr.Ref() != "acme/monolith#20069" {
 		t.Errorf("Ref() = %q, want the owner/repo#number form the cards key on", pr.Ref())
 	}
-	if pr.Author != "hjed" || pr.Title != "Fix the resolver" {
+	if pr.Author != "alex" || pr.Title != "Fix the resolver" {
 		t.Errorf("pr = %+v, want the payload's title and author", pr)
 	}
 	if gotAuth != "Bearer gho_test" {
@@ -179,7 +179,7 @@ func TestPullRequestDetailReadsTheArchivedFlag(t *testing.T) {
 func TestPullRequestDetailDefaultsToNotArchived(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, `{"number":1,"state":"open","head":{"sha":"abc"},
-			"user":{"login":"hjed"},"base":{"repo":{"archived":false}}}`)
+			"user":{"login":"alex"},"base":{"repo":{"archived":false}}}`)
 	}))
 	defer srv.Close()
 

@@ -74,8 +74,8 @@ func TestDeriveVerdict(t *testing.T) {
 		{"changes requested names the reviewer", github.DecisionChangesRequested,
 			[]github.Review{review("a", "APPROVED", base), review("b", "CHANGES_REQUESTED", base)},
 			Verdict{ChangesRequested: true, ChangesRequestedBy: "b"}},
-		// A standing approval from someone else does NOT make it approved:
-		// live counter-example nct-intelligence-beholder#1315.
+		// A standing approval from someone else does NOT make it approved.
+		// This is a live counter-example, not a hypothetical one.
 		{"another approval without a decision", "",
 			[]github.Review{review("a", "APPROVED", base)}, Verdict{}},
 	} {
@@ -92,12 +92,12 @@ func TestDeriveVerdict(t *testing.T) {
 func TestLatestByAuthorIsWhatVerdictsAreBuiltFrom(t *testing.T) {
 	base := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
 	reviews := github.LatestByAuthor([]github.Review{
-		review("hjed", "CHANGES_REQUESTED", base),
-		review("hjed", "APPROVED", base.Add(time.Hour)),
+		review("alex", "CHANGES_REQUESTED", base),
+		review("alex", "APPROVED", base.Add(time.Hour)),
 		review("other", "COMMENTED", base.Add(2*time.Hour)),
 	})
-	if len(reviews) != 1 || reviews[0].Author != "hjed" || reviews[0].State != "APPROVED" {
-		t.Errorf("latest = %+v, want only hjed's superseding approval", reviews)
+	if len(reviews) != 1 || reviews[0].Author != "alex" || reviews[0].State != "APPROVED" {
+		t.Errorf("latest = %+v, want only alex's superseding approval", reviews)
 	}
 }
 
@@ -141,15 +141,15 @@ func TestDerive(t *testing.T) {
 		{"closed still says closed in an archived repo", archived(detail("closed", false)),
 			green, Verdict{}, true, State{Reason: ReasonClosed}},
 		{"changes requested outranks failing checks", detail("open", false), failed,
-			Verdict{ChangesRequested: true, ChangesRequestedBy: "hjed"}, true,
-			State{Reason: ReasonChangesRequested, ChangesRequestedBy: "hjed"}},
+			Verdict{ChangesRequested: true, ChangesRequestedBy: "alex"}, true,
+			State{Reason: ReasonChangesRequested, ChangesRequestedBy: "alex"}},
 		{"failing checks", detail("open", false), failed, Verdict{}, true,
 			State{Reason: ReasonChecksFailed}},
 		{"reviewable", detail("open", false, "miere"), green, Verdict{}, true,
 			State{Reviewable: true}},
-		// GitHub's own APPROVED decision does dequeue us (gcp-jsm-bridge#80);
-		// another reviewer approving with no decision does not
-		// (nct-intelligence-beholder#1315, covered in TestDeriveVerdict).
+		// GitHub's own APPROVED decision does dequeue us; another reviewer
+		// approving with no decision does not (see TestDeriveVerdict). Both
+		// shapes come from live data.
 		{"github's approved decision dequeues us", detail("open", false, "miere"), green,
 			Verdict{Approved: true}, true, State{Reason: ReasonApproved}},
 		{"not requested and green collapses to approved", detail("open", false), green,
@@ -217,12 +217,12 @@ func TestLabels(t *testing.T) {
 		want     string
 	}{
 		{"merged", State{Reason: ReasonMerged}, "", "Merged at: May 14, 2026 at 3:42 PM"},
-		{"closed by someone", State{Reason: ReasonClosed}, "hjed",
-			"Closed by @hjed at May 14, 2026 at 3:42 PM"},
+		{"closed by someone", State{Reason: ReasonClosed}, "alex",
+			"Closed by @alex at May 14, 2026 at 3:42 PM"},
 		{"closed by nobody known", State{Reason: ReasonClosed}, "",
 			"Closed at May 14, 2026 at 3:42 PM"},
-		{"changes requested", State{Reason: ReasonChangesRequested, ChangesRequestedBy: "hjed"}, "",
-			"Changes requested by @hjed"},
+		{"changes requested", State{Reason: ReasonChangesRequested, ChangesRequestedBy: "alex"}, "",
+			"Changes requested by @alex"},
 		{"checks failing", State{Reason: ReasonChecksFailed}, "", "Checks failing"},
 		{"checks running", State{Reason: ReasonChecksRunning}, "", "Checks running"},
 		{"approved", State{Reason: ReasonApproved}, "", "Approved — awaiting merge"},
