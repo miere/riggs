@@ -36,6 +36,11 @@ type Detail struct {
 	// RequestedTeams are team-based requests. A team request alone is not a
 	// direct request, and the Python mirror deliberately ignores those.
 	RequestedTeams []string
+	// Archived reports that the repository is archived, i.e. read-only.
+	// GitHub then locks every pull request in it and answers a review with
+	// `422 lock prevents review`. It rides along in this payload
+	// (`base.repo.archived`), so knowing it costs no extra request.
+	Archived bool
 }
 
 // Requested reports whether login is a *direct* requested reviewer.
@@ -70,6 +75,11 @@ func (c *Client) PullRequestDetail(ctx context.Context, repo string, number int)
 		Head struct {
 			SHA string `json:"sha"`
 		} `json:"head"`
+		Base struct {
+			Repo struct {
+				Archived bool `json:"archived"`
+			} `json:"repo"`
+		} `json:"base"`
 		RequestedReviewers []struct {
 			Login string `json:"login"`
 		} `json:"requested_reviewers"`
@@ -86,6 +96,7 @@ func (c *Client) PullRequestDetail(ctx context.Context, repo string, number int)
 		URL: raw.HTMLURL, Author: raw.User.Login, Draft: raw.Draft,
 		State: raw.State, Merged: raw.Merged, CreatedAt: raw.CreatedAt,
 		MergedAt: raw.MergedAt, ClosedAt: raw.ClosedAt, HeadSHA: raw.Head.SHA,
+		Archived: raw.Base.Repo.Archived,
 	}
 	for _, u := range raw.RequestedReviewers {
 		d.RequestedUsers = append(d.RequestedUsers, u.Login)

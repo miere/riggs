@@ -769,6 +769,14 @@ Rules:
 - Discovery (`review-requested:<user>`) uses the search API, which has its own
   much tighter bucket (30 requests/**minute**). One call per tick is fine;
   fanning search out is not.
+- **Discovery excludes archived repositories** (`archived:false`). Archiving a
+  repository makes it read-only: GitHub locks every pull request in it and
+  answers a review with `422 lock prevents review`, so nothing there could ever
+  be acted on. The query is only half of it — `scope()` also carries tracked
+  pull requests, so `Detail.Archived` (read free from `base.repo.archived`)
+  collapses a card that was adopted before the repository was archived.
+  The case that prompted this: an archived repository holding eleven green
+  Dependabot pull requests, every one of them permanently unapprovable.
 - Concurrency is bounded. GitHub's secondary rate limits trigger on burst
   concurrency independently of the quota, so the fan-out over tracked PRs is
   deliberately modest.
