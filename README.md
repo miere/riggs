@@ -71,7 +71,7 @@ Commands come in three spellings, depending on the tool:
 ```sh
 riggs ping                                          # flat
 riggs jira tickets --query "project = NYX ..."      # namespaced
-riggs git pr --approve UpsideRealty/upside#20069    # namespaced + verb flag
+riggs git pr --approve acme/monolith#20069    # namespaced + verb flag
 ```
 
 A verb flag names the operation and carries its primary argument as the flag's

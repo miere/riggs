@@ -92,12 +92,12 @@ func TestDottedCommand(t *testing.T) {
 // The headline form: a verb flag completes the tool name and carries the
 // operation's primary argument as its own value.
 func TestVerbFlagBindsPrimaryArgument(t *testing.T) {
-	_, fakes, err := run(t, "git", "pr", "--approve", "UpsideRealty/upside#20069")
+	_, fakes, err := run(t, "git", "pr", "--approve", "acme/monolith#20069")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	got := fakes["git.pr.approve"].got
-	if got["pr"] != "UpsideRealty/upside#20069" {
+	if got["pr"] != "acme/monolith#20069" {
 		t.Errorf("pr = %v, want the ref bound from the verb flag", got["pr"])
 	}
 	if fakes["git.pr.approve-merge"].got != nil {

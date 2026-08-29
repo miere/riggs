@@ -13,9 +13,9 @@ func sampleDigest() Digest {
 		IconURL:  "https://example.test/icon.png",
 		IconAlt:  "Icon",
 		Rows: []Row{{
-			BlockID:  "UpsideRealty/upside#20534",
+			BlockID:  "acme/monolith#20534",
 			Title:    "TFL-3338: derive business contact type and name",
-			Meta:     "_UpsideRealty/upside#20534_ by `@abatten`",
+			Meta:     "_acme/monolith#20534_ by `@sam`",
 			ActionID: "pr_bulk_overflow",
 			Options: []MenuOption{
 				{Text: "⧉  Open on Browser", Value: "open_browser", URL: "https://github.test/pr/1"},
@@ -70,7 +70,7 @@ func TestRowCarriesItsIdentityInTheBlockID(t *testing.T) {
 	if row["type"] != "section" {
 		t.Fatalf("row type = %v, want section", row["type"])
 	}
-	if row["block_id"] != "UpsideRealty/upside#20534" {
+	if row["block_id"] != "acme/monolith#20534" {
 		t.Fatalf("row block_id = %v", row["block_id"])
 	}
 }
@@ -120,7 +120,7 @@ func TestDoneRowIsStruckThrough(t *testing.T) {
 	if strings.Count(text, "~") != 2 {
 		t.Errorf("strike-through leaked past the title: %q", text)
 	}
-	if !strings.Contains(text, "_UpsideRealty/upside#20534_") {
+	if !strings.Contains(text, "_acme/monolith#20534_") {
 		t.Errorf("done row lost its reference line: %q", text)
 	}
 }
@@ -181,7 +181,7 @@ func TestItemsListsRowsInOrder(t *testing.T) {
 	d.Rows = append(d.Rows, Row{BlockID: "o/r#2"}, Row{BlockID: "o/r#3"})
 
 	got := d.Items()
-	want := []string{"UpsideRealty/upside#20534", "o/r#2", "o/r#3"}
+	want := []string{"acme/monolith#20534", "o/r#2", "o/r#3"}
 	if len(got) != len(want) {
 		t.Fatalf("Items() = %v", got)
 	}

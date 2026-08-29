@@ -31,7 +31,7 @@ func (d *detailer) PullRequestDetail(context.Context, string, int) (github.Detai
 func askPR() github.Detail {
 	return github.Detail{
 		Repo: "o/r", Number: 7, Title: "Fix the thing", Body: "body",
-		URL: "https://github.com/o/r/pull/7", Author: "hjed", State: "open",
+		URL: "https://github.com/o/r/pull/7", Author: "alex", State: "open",
 	}
 }
 
@@ -467,7 +467,7 @@ func assertNoSelfReference(t *testing.T, text string) {
 }
 
 func TestRefURL(t *testing.T) {
-	if got := RefURL("UpsideRealty/upside#20534"); got != "https://github.com/UpsideRealty/upside/pull/20534" {
+	if got := RefURL("acme/monolith#20534"); got != "https://github.com/acme/monolith/pull/20534" {
 		t.Fatalf("RefURL = %q", got)
 	}
 	// A ref that will not parse degrades to itself rather than to a broken link.

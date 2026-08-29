@@ -111,7 +111,7 @@ func openPR(ref string) github.Detail {
 	return github.Detail{
 		Repo: repo, Number: n, Title: "Fix the thing", Body: "body",
 		URL:    "https://github.com/" + repo + "/pull/" + fmt.Sprint(n),
-		Author: "hjed", State: "open", HeadSHA: "sha-" + ref,
+		Author: "alex", State: "open", HeadSHA: "sha-" + ref,
 		RequestedUsers: []string{"miere"},
 	}
 }
@@ -411,8 +411,8 @@ func TestDiscoveryFailureIsFatal(t *testing.T) {
 }
 
 func TestSplitRef(t *testing.T) {
-	repo, n, err := SplitRef("UpsideRealty/upside#20069")
-	if err != nil || repo != "UpsideRealty/upside" || n != 20069 {
+	repo, n, err := SplitRef("acme/monolith#20069")
+	if err != nil || repo != "acme/monolith" || n != 20069 {
 		t.Errorf("SplitRef = (%q, %d, %v)", repo, n, err)
 	}
 	for _, bad := range []string{"no-hash", "o/r#abc", ""} {

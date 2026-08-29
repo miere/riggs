@@ -23,10 +23,9 @@ const (
 // wrong, in opposite directions, and the parity check caught both against live
 // data:
 //
-//   - gcp-jsm-bridge#80 — one approval from another reviewer, branch
-//     unprotected, we are still requested: GitHub says APPROVED.
-//   - nct-intelligence-beholder#1315 — the same shape, plus an older dismissed
-//     review: GitHub says null.
+//   - one approval from another reviewer, branch unprotected, we are still
+//     requested: GitHub says APPROVED.
+//   - the same shape, plus an older dismissed review: GitHub says null.
 //
 // Whatever separates those is not documented, so it is asked rather than
 // guessed. See ARCHITECTURE.md §8.

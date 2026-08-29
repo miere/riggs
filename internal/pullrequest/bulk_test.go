@@ -151,9 +151,9 @@ func equal(a, b []string) bool {
 // noticed it or how the refs happen to sort.
 func TestBulkPostsOldestFirst(t *testing.T) {
 	r := newBulkRig(t, bulkGH(
-		bulkPR("o/r#1", 1*time.Hour, "hjed"),
-		bulkPR("o/r#2", 72*time.Hour, "hjed"),
-		bulkPR("o/r#3", 24*time.Hour, "hjed"),
+		bulkPR("o/r#1", 1*time.Hour, "alex"),
+		bulkPR("o/r#2", 72*time.Hour, "alex"),
+		bulkPR("o/r#3", 24*time.Hour, "alex"),
 	), BulkOptions{})
 
 	r.run(t)
@@ -171,9 +171,9 @@ func TestBulkPostsOldestFirst(t *testing.T) {
 
 func TestBulkCapsTheDigest(t *testing.T) {
 	r := newBulkRig(t, bulkGH(
-		bulkPR("o/r#1", 4*time.Hour, "hjed"),
-		bulkPR("o/r#2", 3*time.Hour, "hjed"),
-		bulkPR("o/r#3", 2*time.Hour, "hjed"),
+		bulkPR("o/r#1", 4*time.Hour, "alex"),
+		bulkPR("o/r#2", 3*time.Hour, "alex"),
+		bulkPR("o/r#3", 2*time.Hour, "alex"),
 	), BulkOptions{MaxItems: 2})
 
 	report := r.run(t)
@@ -189,7 +189,7 @@ func TestBulkCapsTheDigest(t *testing.T) {
 // Rule (b)(i): inside the cooldown an item is not re-listed, and its row is
 // refreshed where it already is.
 func TestBulkRefreshesInPlaceWithinCooldown(t *testing.T) {
-	gh := bulkGH(bulkPR("o/r#1", time.Hour, "hjed"))
+	gh := bulkGH(bulkPR("o/r#1", time.Hour, "alex"))
 	r := newBulkRig(t, gh, BulkOptions{})
 	r.run(t)
 	r.slack.Reset()
@@ -214,8 +214,8 @@ func TestBulkRefreshesInPlaceWithinCooldown(t *testing.T) {
 // removed from the message it was in.
 func TestBulkRotatesACooledItemIntoANewPost(t *testing.T) {
 	gh := bulkGH(
-		bulkPR("o/r#1", 4*time.Hour, "hjed"),
-		bulkPR("o/r#2", 3*time.Hour, "hjed"),
+		bulkPR("o/r#1", 4*time.Hour, "alex"),
+		bulkPR("o/r#2", 3*time.Hour, "alex"),
 	)
 	r := newBulkRig(t, gh, BulkOptions{})
 	r.run(t)
@@ -243,8 +243,8 @@ func TestBulkRotatesACooledItemIntoANewPost(t *testing.T) {
 
 // A post that loses some but not all of its rows is updated, not deleted.
 func TestBulkUpdatesAPartiallyEmptiedPost(t *testing.T) {
-	old := bulkPR("o/r#1", 4*time.Hour, "hjed")
-	fresh := bulkPR("o/r#2", 3*time.Hour, "hjed")
+	old := bulkPR("o/r#1", 4*time.Hour, "alex")
+	fresh := bulkPR("o/r#2", 3*time.Hour, "alex")
 	gh := bulkGH(old, fresh)
 	r := newBulkRig(t, gh, BulkOptions{})
 	r.run(t)
@@ -284,7 +284,7 @@ func TestBulkUpdatesAPartiallyEmptiedPost(t *testing.T) {
 
 // A done row is struck through in place and loses everything but its link.
 func TestBulkStrikesADoneRowInPlace(t *testing.T) {
-	gh := bulkGH(bulkPR("o/r#1", time.Hour, "hjed"))
+	gh := bulkGH(bulkPR("o/r#1", time.Hour, "alex"))
 	r := newBulkRig(t, gh, BulkOptions{})
 	r.run(t)
 	r.slack.Reset()
@@ -316,7 +316,7 @@ func TestBulkStrikesADoneRowInPlace(t *testing.T) {
 // A done row does not rotate into a fresh digest; once its cooldown expires it
 // is purged, which is what eventually empties a post.
 func TestBulkPurgesADoneRowAfterItsCooldown(t *testing.T) {
-	gh := bulkGH(bulkPR("o/r#1", time.Hour, "hjed"))
+	gh := bulkGH(bulkPR("o/r#1", time.Hour, "alex"))
 	r := newBulkRig(t, gh, BulkOptions{})
 	r.run(t)
 	r.slack.Reset()
@@ -346,8 +346,8 @@ func TestBulkPurgesADoneRowAfterItsCooldown(t *testing.T) {
 // are rather than being removed with nowhere to go.
 func TestBulkHoldsWhatMissesTheCap(t *testing.T) {
 	gh := bulkGH(
-		bulkPR("o/r#1", 5*time.Hour, "hjed"),
-		bulkPR("o/r#2", 4*time.Hour, "hjed"),
+		bulkPR("o/r#1", 5*time.Hour, "alex"),
+		bulkPR("o/r#2", 4*time.Hour, "alex"),
 	)
 	r := newBulkRig(t, gh, BulkOptions{MaxItems: 2})
 	r.run(t)
@@ -381,7 +381,7 @@ func TestBulkHoldsWhatMissesTheCap(t *testing.T) {
 // whose checks flip all morning must still age out of the message it was first
 // announced in.
 func TestBulkRefreshDoesNotResetTheCooldown(t *testing.T) {
-	gh := bulkGH(bulkPR("o/r#1", time.Hour, "hjed"))
+	gh := bulkGH(bulkPR("o/r#1", time.Hour, "alex"))
 	r := newBulkRig(t, gh, BulkOptions{})
 	r.run(t)
 
@@ -406,7 +406,7 @@ func TestBulkRefreshDoesNotResetTheCooldown(t *testing.T) {
 func TestBulkOffersApproveAndMergeOnlyToDependabot(t *testing.T) {
 	r := newBulkRig(t, bulkGH(
 		bulkPR("o/r#1", 2*time.Hour, "dependabot[bot]"),
-		bulkPR("o/r#2", 1*time.Hour, "hjed"),
+		bulkPR("o/r#2", 1*time.Hour, "alex"),
 	), BulkOptions{})
 	r.run(t)
 
@@ -440,7 +440,7 @@ func TestIsDependabot(t *testing.T) {
 			t.Errorf("IsDependabot(%q) = false", login)
 		}
 	}
-	for _, login := range []string{"", "hjed", "notdependabot"} {
+	for _, login := range []string{"", "alex", "notdependabot"} {
 		if IsDependabot(login) {
 			t.Errorf("IsDependabot(%q) = true", login)
 		}
@@ -452,7 +452,7 @@ func TestIsDependabot(t *testing.T) {
 // Running a pass twice must cost GitHub reads and no Slack writes: the
 // fingerprint gate is what makes the every-minute schedule affordable.
 func TestBulkSecondPassWritesNothing(t *testing.T) {
-	r := newBulkRig(t, bulkGH(bulkPR("o/r#1", time.Hour, "hjed")), BulkOptions{})
+	r := newBulkRig(t, bulkGH(bulkPR("o/r#1", time.Hour, "alex")), BulkOptions{})
 	r.run(t)
 	r.slack.Reset()
 
@@ -466,7 +466,7 @@ func TestBulkSecondPassWritesNothing(t *testing.T) {
 
 // A dry run reports what would happen and touches neither Slack nor the ledger.
 func TestBulkDryRunIsHarmless(t *testing.T) {
-	r := newBulkRig(t, bulkGH(bulkPR("o/r#1", time.Hour, "hjed")), BulkOptions{})
+	r := newBulkRig(t, bulkGH(bulkPR("o/r#1", time.Hour, "alex")), BulkOptions{})
 
 	report, err := r.bulk.Run(context.Background(), target, true)
 	if err != nil {
@@ -485,7 +485,7 @@ func TestBulkDryRunIsHarmless(t *testing.T) {
 
 // A pull request that dies before it is ever worth showing is never announced.
 func TestBulkIgnoresADeadOnArrivalPR(t *testing.T) {
-	gh := bulkGH(bulkPR("o/r#1", time.Hour, "hjed"))
+	gh := bulkGH(bulkPR("o/r#1", time.Hour, "alex"))
 	gh.checks["sha-o/r#1"] = []github.Check{run("build", "COMPLETED", "FAILURE")}
 
 	r := newBulkRig(t, gh, BulkOptions{})
@@ -527,7 +527,7 @@ func TestBulkDefaultsToAThreeHourCooldown(t *testing.T) {
 // shapes have separate lifecycles, and sharing it would mean a change to one
 // silently re-rendering every card of the other.
 func TestDigestUsesItsOwnIcon(t *testing.T) {
-	r := newBulkRig(t, bulkGH(bulkPR("o/r#1", time.Hour, "hjed")), BulkOptions{})
+	r := newBulkRig(t, bulkGH(bulkPR("o/r#1", time.Hour, "alex")), BulkOptions{})
 	r.run(t)
 
 	raw, err := json.Marshal(r.slack.Posts()[0].Msg.Blocks)

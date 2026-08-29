@@ -165,8 +165,8 @@ func TestHappyPathWritesConfig(t *testing.T) {
 	s := happyScript("C0B29C20Z9S")
 	r := newRig(t, s, map[string]bool{"git.pr.fetch-reviews": true})
 	r.prs = []github.PullRequest{{
-		Repo: "UpsideRealty/upside", Number: 20069, Title: "Fix the resolver",
-		URL: "https://github.com/UpsideRealty/upside/pull/20069", Author: "hjed",
+		Repo: "acme/monolith", Number: 20069, Title: "Fix the resolver",
+		URL: "https://github.com/acme/monolith/pull/20069", Author: "alex",
 	}}
 
 	if err := r.Run(context.Background()); err != nil {

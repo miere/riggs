@@ -21,7 +21,7 @@ func newCompleterRig(t *testing.T) *completerRig {
 	t.Helper()
 	gh := bulkGH(
 		bulkPR("o/r#1", 3*time.Hour, "dependabot[bot]"),
-		bulkPR("o/r#2", 2*time.Hour, "hjed"),
+		bulkPR("o/r#2", 2*time.Hour, "alex"),
 	)
 	r := newBulkRig(t, gh, BulkOptions{})
 	r.run(t)
@@ -206,7 +206,7 @@ func TestFailReportsWhenThereIsNoDigest(t *testing.T) {
 
 // The last row leaving empties the post, which is deleted rather than blanked.
 func TestCompleteDeletesAPostThatEmpties(t *testing.T) {
-	gh := bulkGH(bulkPR("o/r#1", time.Hour, "hjed"))
+	gh := bulkGH(bulkPR("o/r#1", time.Hour, "alex"))
 	r := newBulkRig(t, gh, BulkOptions{})
 	r.run(t)
 	r.slack.Reset()

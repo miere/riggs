@@ -719,10 +719,10 @@ expose it, and it cannot be reconstructed from the review list — two attempts
 to derive it were wrong in opposite directions, and the parity check (§11)
 caught both against live data:
 
-| Pull request | Shape | GitHub says |
-| --- | --- | --- |
-| `gcp-jsm-bridge#80` | one approval from another reviewer, branch unprotected, we are still requested | `APPROVED` |
-| `nct-intelligence-beholder#1315` | the same, plus an older dismissed review | `null` |
+| Shape | GitHub says |
+| --- | --- |
+| one approval from another reviewer, branch unprotected, we are still requested | `APPROVED` |
+| the same, plus an older dismissed review | `null` |
 
 Whatever separates those is undocumented, so it is asked rather than guessed.
 One query per candidate pull request, against 164 points per tick for the
@@ -915,7 +915,7 @@ that was already posted, so "post" and "update" and "thread" are one mechanism,
 not three programs.
 
 `internal/notify` owns a ledger keyed by `<tool>:<identity>` (e.g.
-`git.pr:UpsideRealty/upside#20069`), storing `{profile, channel, ts,
+`git.pr:acme/monolith#20069`), storing `{profile, channel, ts,
 fingerprint, latches, updated_at}`. Two operations cover both automations:
 
 - **`Upsert(key, card)`** — post if the key is new; update **only** if the
