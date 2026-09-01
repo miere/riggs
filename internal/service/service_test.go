@@ -49,6 +49,14 @@ func (f *fakeRunner) didRun(sub string) bool {
 	return false
 }
 
+// systemd builds a manager whose unit path is guaranteed to be inside a
+// temporary directory.
+//
+// The pinning is not tidiness. UnitPath honours $XDG_CONFIG_HOME — deliberately,
+// because systemd does — so on any machine that sets it, a test that installs
+// would write a real unit file into the developer's own config directory and
+// leave it there. Setting HomeDir is not enough to prevent that, which is
+// exactly what CI caught.
 func systemd(t *testing.T, runner Runner, opts Options) *systemdManager {
 	t.Helper()
 	if opts.HomeDir == "" {
@@ -57,6 +65,7 @@ func systemd(t *testing.T, runner Runner, opts Options) *systemdManager {
 	if opts.BinaryPath == "" {
 		opts.BinaryPath = "/usr/local/bin/riggs"
 	}
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(opts.HomeDir, ".config"))
 	return &systemdManager{runner: runner, opts: opts.resolved()}
 }
 
@@ -110,10 +119,17 @@ func TestTheUnitQuotesEveryArgument(t *testing.T) {
 func TestTheUnitPathFollowsXDG(t *testing.T) {
 	home := t.TempDir()
 	m := systemd(t, newRunner(), Options{HomeDir: home})
+
+	// Unset, it falls back to ~/.config. Set explicitly rather than assumed:
+	// the variable is populated on plenty of machines, CI's included.
+	t.Setenv("XDG_CONFIG_HOME", "")
 	if want := filepath.Join(home, ".config", "systemd", "user", unitName); m.UnitPath() != want {
 		t.Fatalf("UnitPath = %q, want %q", m.UnitPath(), want)
 	}
 
+	// Set, it wins — because systemd itself honours it, and installing to
+	// ~/.config on a machine that has moved it writes a file systemd never
+	// reads.
 	xdg := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", xdg)
 	if want := filepath.Join(xdg, "systemd", "user", unitName); m.UnitPath() != want {
@@ -254,5 +270,31 @@ func writeExecutable(t *testing.T, path string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatalf("writing %s: %v", path, err)
+	}
+}
+
+// systemd may be installed without being PID 1 — the state inside many
+// containers and under WSL1, where every systemctl call fails with a message
+// about D-Bus that explains nothing. Refusing beats half-installing.
+func TestARefusalWhenSystemdIsNotInCharge(t *testing.T) {
+	original := systemdIsPID1
+	t.Cleanup(func() { systemdIsPID1 = original })
+	systemdIsPID1 = func() bool { return false }
+
+	_, err := newSystemd(newRunner(), Options{BinaryPath: "/usr/local/bin/riggs"}.resolved())
+	if err == nil {
+		t.Fatal("newSystemd accepted a machine with no systemd")
+	}
+	// It says what to do instead, rather than only what is wrong.
+	if !strings.Contains(err.Error(), "not running systemd") {
+		t.Errorf("err = %v", err)
+	}
+	if !strings.Contains(err.Error(), "/usr/local/bin/riggs daemon") {
+		t.Errorf("err = %v, want it to name the command to supervise", err)
+	}
+
+	systemdIsPID1 = func() bool { return true }
+	if _, err := newSystemd(newRunner(), Options{}.resolved()); err != nil {
+		t.Fatalf("newSystemd on a systemd machine: %v", err)
 	}
 }
