@@ -89,6 +89,12 @@ type Home struct {
 	// there a release to install", Admin is "may this viewer operate Riggs at
 	// all". Restarting is available whether or not anything is out of date.
 	Admin bool
+	// ShowJobs draws the Jobs section, empty state included. It is separate
+	// from a non-empty Jobs slice because "no jobs are scheduled" is a fact
+	// worth rendering and "this build cannot schedule anything" is not.
+	ShowJobs bool
+	// Jobs are the scheduled jobs, each on its own row with an overflow.
+	Jobs []HomeJob
 	// Prompts are the editable wordings, each on its own row with an overflow.
 	// Empty for a non-admin, and for a build with nothing to edit.
 	//
@@ -173,6 +179,10 @@ func (h Home) Blocks() []any {
 			ActionID: HomeMenuActionID,
 			Options: []menuOptionObj{
 				{Text: plainVerbatim("Restart"), Value: HomeRestartIntent},
+				// Directly below Restart, and on the same menu, because a
+				// job editor has nowhere else to live when there are no jobs
+				// yet — which is exactly when somebody goes looking for it.
+				{Text: plainVerbatim("New job…"), Value: HomeNewJobIntent},
 			},
 		}
 	}
@@ -181,6 +191,7 @@ func (h Home) Blocks() []any {
 		imageBlock{Type: "image", ImageURL: HomePortraitURL, AltText: HomePortraitAlt},
 		version,
 	}
+	blocks = append(blocks, h.jobBlocks()...)
 	blocks = append(blocks, h.promptBlocks()...)
 	if h.Update == nil {
 		return blocks

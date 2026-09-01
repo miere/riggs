@@ -11,6 +11,7 @@ import (
 
 	"github.com/miere/riggs-mcp/internal/config"
 	"github.com/miere/riggs-mcp/internal/github"
+	"github.com/miere/riggs-mcp/internal/notify"
 	"github.com/miere/riggs-mcp/internal/slack"
 	"github.com/miere/riggs-mcp/internal/slack/slacktest"
 )
@@ -67,33 +68,25 @@ func (s *script) Say(format string, args ...any) {
 
 func (s *script) transcript() string { return strings.Join(s.said, "\n") }
 
-// ran records one external command the installer executed.
-type ran struct {
-	name string
-	args []string
-}
-
 // rig assembles an installer with every seam faked.
 type rig struct {
 	*Installer
 	prompt  *script
 	slack   *slacktest.Fake
 	written map[string]string
-	cmds    []ran
+	dbPath  string
+	jobs    []notify.Job
 	users   map[string]string
 	prs     []github.PullRequest
 	prErr   error
 	authErr error
 }
 
-func newRig(t *testing.T, s *script, tools map[string]bool) *rig {
+func newRig(t *testing.T, s *script) *rig {
 	t.Helper()
 	r := &rig{prompt: s, slack: slacktest.New(), written: map[string]string{},
 		users: map[string]string{"murtaugh": "U0B6HK02YBB"}}
-	inst := New(s, Options{
-		RiggsPath: "/usr/local/bin/riggs",
-		ToolsFor:  func(string) (map[string]bool, error) { return tools, nil },
-	})
+	inst := New(s, Options{RiggsPath: "/usr/local/bin/riggs"})
 	inst.poster = r.slack
 	inst.ghAuth = func(context.Context) (github.Auth, error) {
 		if r.authErr != nil {
@@ -103,9 +96,9 @@ func newRig(t *testing.T, s *script, tools map[string]bool) *rig {
 	}
 	inst.newPRs = func(string) PRLister { return prLister{r} }
 	inst.writeCfg = func(path string, data []byte) error { r.written[path] = string(data); return nil }
-	inst.runCmd = func(_ context.Context, name string, args ...string) ([]byte, error) {
-		r.cmds = append(r.cmds, ran{name: name, args: args})
-		return nil, nil
+	inst.saveJobs = func(dbPath string, jobs []notify.Job) error {
+		r.dbPath, r.jobs = dbPath, jobs
+		return nil
 	}
 	inst.lookPath = func(string) (string, error) { return "/usr/local/bin/murtaugh", nil }
 	inst.stat = func(path string) (os.FileInfo, error) {
@@ -137,28 +130,26 @@ func (p prLister) ReviewRequested(context.Context, string, int) ([]github.PullRe
 // Indices into happyScript's answer list. Named because they are positional:
 // adding a prompt shifts everything after it, and a silently shifted index
 // makes a test assert against the wrong question.
-const (
-	answerConfigPath   = 0
-	answerMurtaughPath = 13
-)
+const answerConfigPath = 0
 
 func happyScript(extra ...string) *script {
 	return &script{
 		answers: append([]string{
-			"/tmp/riggs/config.yaml",               // config location
-			"miere",                                // github login
-			"U0B20G0ET9T",                          // slack user id
-			"miere@nurturecloud.com",               // jira email
-			"https://example.atlassian.net",        // jira tenant
-			"@murtaugh",                            // who assists with pull requests
-			"C0B24F579T4",                          // review-request channel
-			"@murtaugh",                            // who assists with tickets
-			"C0B29C20Z9S",                          // sme-assistance channel
-			"claude",                               // the AI command
-			"/home/m/Development",                  // where it runs
-			"",                                     // pull-request prompt: keep the default
-			"",                                     // ticket prompt: keep the default
-			"/home/m/.config/murtaugh/config.yaml", // murtaugh config
+			"/tmp/riggs/config.yaml",        // config location
+			"miere",                         // github login
+			"U0B20G0ET9T",                   // slack user id
+			"miere@nurturecloud.com",        // jira email
+			"https://example.atlassian.net", // jira tenant
+			"@murtaugh",                     // who assists with pull requests
+			"C0B24F579T4",                   // review-request channel
+			"@murtaugh",                     // who assists with tickets
+			"C0B29C20Z9S",                   // sme-assistance channel
+			"claude",                        // the AI command
+			"/home/m/Development",           // where it runs
+			"",                              // pull-request prompt: keep the default
+			"",                              // ticket prompt: keep the default
+			"C0B24F579T4", "default",        // review digest: channel, profile
+			"C0B29C20Z9S", "default", // ticket digest: channel, profile
 		}, extra...),
 		// bot, app, user, jira — in prompt order.
 		secrets:  []string{"xoxb-real-bot-token", "xapp-real-app-token", "", "jira-api-token"},
@@ -168,7 +159,7 @@ func happyScript(extra ...string) *script {
 
 func TestHappyPathWritesConfig(t *testing.T) {
 	s := happyScript("C0B29C20Z9S")
-	r := newRig(t, s, map[string]bool{"git.pr.fetch-reviews": true})
+	r := newRig(t, s)
 	r.prs = []github.PullRequest{{
 		Repo: "acme/monolith", Number: 20069, Title: "Fix the resolver",
 		URL: "https://github.com/acme/monolith/pull/20069", Author: "alex",
@@ -203,7 +194,7 @@ func TestHappyPathWritesConfig(t *testing.T) {
 func TestWrittenConfigIsLoadable(t *testing.T) {
 	s := happyScript()
 	s.confirms = []bool{false} // skip the test message
-	r := newRig(t, s, nil)
+	r := newRig(t, s)
 
 	dir := t.TempDir()
 	path := dir + "/config.yaml"
@@ -229,7 +220,7 @@ func TestWrittenConfigIsLoadable(t *testing.T) {
 func TestSecretsAreRedactedInTheTranscript(t *testing.T) {
 	s := happyScript()
 	s.confirms = []bool{false}
-	r := newRig(t, s, nil)
+	r := newRig(t, s)
 
 	if err := r.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -246,7 +237,7 @@ func TestSecretsAreRedactedInTheTranscript(t *testing.T) {
 func TestDeclinedOverwriteAborts(t *testing.T) {
 	s := happyScript()
 	s.confirms = []bool{false} // decline the overwrite
-	r := newRig(t, s, nil)
+	r := newRig(t, s)
 	r.Installer.stat = func(string) (os.FileInfo, error) { return nil, nil } // everything exists
 
 	err := r.Run(context.Background())
@@ -261,7 +252,7 @@ func TestDeclinedOverwriteAborts(t *testing.T) {
 func TestSlackUserIDIsRequired(t *testing.T) {
 	s := happyScript()
 	s.answers[2] = "<empty>"
-	r := newRig(t, s, nil)
+	r := newRig(t, s)
 
 	err := r.Run(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "Slack user id") {
@@ -272,7 +263,7 @@ func TestSlackUserIDIsRequired(t *testing.T) {
 func TestBotTokenIsRequired(t *testing.T) {
 	s := happyScript()
 	s.secrets = []string{"", "", ""}
-	r := newRig(t, s, nil)
+	r := newRig(t, s)
 
 	err := r.Run(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "bot token") {
@@ -286,7 +277,7 @@ func TestEmptySecretAdoptsEnvReference(t *testing.T) {
 	s := happyScript()
 	s.secrets = []string{"", "", ""}
 	s.confirms = []bool{false}
-	r := newRig(t, s, nil)
+	r := newRig(t, s)
 	r.Installer.getenv = func(k string) string {
 		if k == "SLACK_BOT_TOKEN" {
 			return "xoxb-from-env"
@@ -310,7 +301,7 @@ func TestEmptySecretAdoptsEnvReference(t *testing.T) {
 // fails, rather than leaving a broken setup that looks finished.
 func TestSmokeTestFailureAbortsTheInstall(t *testing.T) {
 	s := happyScript()
-	r := newRig(t, s, map[string]bool{"git.pr.fetch-reviews": true})
+	r := newRig(t, s)
 	r.prErr = errors.New("bad credentials")
 
 	err := r.Run(context.Background())
@@ -320,14 +311,14 @@ func TestSmokeTestFailureAbortsTheInstall(t *testing.T) {
 	if !strings.Contains(err.Error(), "test message failed") {
 		t.Errorf("err = %v, want it attributed to the test message", err)
 	}
-	if len(r.cmds) != 0 {
-		t.Error("jobs were registered after the smoke test failed")
+	if len(r.jobs) != 0 {
+		t.Error("jobs were scheduled after the smoke test failed")
 	}
 }
 
 func TestSlackFailureAbortsTheInstall(t *testing.T) {
 	s := happyScript()
-	r := newRig(t, s, nil)
+	r := newRig(t, s)
 	r.slack.PostErr = errors.New("invalid_auth")
 
 	err := r.Run(context.Background())
@@ -340,7 +331,7 @@ func TestSlackFailureAbortsTheInstall(t *testing.T) {
 // message says so.
 func TestSmokeTestWithNoPullRequestsStillSucceeds(t *testing.T) {
 	s := happyScript()
-	r := newRig(t, s, nil)
+	r := newRig(t, s)
 	r.prs = nil
 
 	if err := r.Run(context.Background()); err != nil {
@@ -357,7 +348,7 @@ func TestSmokeTestWithNoPullRequestsStillSucceeds(t *testing.T) {
 // The test message goes to the admin as a DM, per the brief.
 func TestSmokeTestDMsTheAdmin(t *testing.T) {
 	s := happyScript()
-	r := newRig(t, s, nil)
+	r := newRig(t, s)
 	r.prs = []github.PullRequest{{Repo: "o/r", Number: 1, Title: "T", URL: "u", Author: "a"}}
 
 	if err := r.Run(context.Background()); err != nil {
@@ -377,7 +368,7 @@ func TestSmokeTestDMsTheAdmin(t *testing.T) {
 func loadWritten(t *testing.T, s *script) *config.Config {
 	t.Helper()
 	s.confirms = []bool{false} // skip the test message
-	r := newRig(t, s, nil)
+	r := newRig(t, s)
 
 	path := t.TempDir() + "/config.yaml"
 	s.answers[answerConfigPath] = path
@@ -424,7 +415,7 @@ func TestWritesTheJiraTenant(t *testing.T) {
 // The three questions this phase adds, and what each of them writes.
 func TestInstallWritesTheSplitSections(t *testing.T) {
 	s := happyScript("C0B29C20Z9S")
-	r := newRig(t, s, map[string]bool{"git.pr.fetch-reviews": true})
+	r := newRig(t, s)
 	if err := r.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -468,22 +459,22 @@ func TestUnansweredQuestionsDisableTheOptions(t *testing.T) {
 	// everything after it move.
 	s := &script{
 		answers: []string{
-			"/tmp/riggs/config.yaml",               // config location
-			"miere",                                // github login
-			"U0B20G0ET9T",                          // slack user id
-			"miere@nurturecloud.com",               // jira email
-			"https://example.atlassian.net",        // jira tenant
-			"<empty>",                              // nobody assists with pull requests
-			"<empty>",                              // nobody assists with tickets
-			"<empty>",                              // no AI command
-			"/home/m/.config/murtaugh/config.yaml", // murtaugh config
-			"C0B29C20Z9S",                          // the digest job's channel
+			"/tmp/riggs/config.yaml",        // config location
+			"miere",                         // github login
+			"U0B20G0ET9T",                   // slack user id
+			"miere@nurturecloud.com",        // jira email
+			"https://example.atlassian.net", // jira tenant
+			"<empty>",                       // nobody assists with pull requests
+			"<empty>",                       // nobody assists with tickets
+			"<empty>",                       // no AI command
+			"C0B24F579T4", "default",        // review digest: channel, profile
+			"C0B29C20Z9S", "default", // ticket digest: channel, profile
 		},
 		secrets:  []string{"xoxb-real-bot-token", "xapp-real-app-token", "", "jira-api-token"},
 		confirms: []bool{true},
 	}
 
-	r := newRig(t, s, map[string]bool{"git.pr.fetch-reviews": true})
+	r := newRig(t, s)
 	if err := r.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -509,7 +500,7 @@ func TestUnansweredQuestionsDisableTheOptions(t *testing.T) {
 // invocation was chosen — the difference is invisible in the answer just typed.
 func TestTheInstallerShowsHowTheHarnessWillBeRun(t *testing.T) {
 	s := happyScript("C0B29C20Z9S")
-	r := newRig(t, s, map[string]bool{"git.pr.fetch-reviews": true})
+	r := newRig(t, s)
 	if err := r.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}

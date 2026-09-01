@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/miere/riggs-mcp/internal/blockkit"
 	"github.com/miere/riggs-mcp/internal/config"
@@ -78,6 +79,17 @@ type Deps struct {
 	Modals slack.ViewOpener
 	// Prompts is the wording store. Nil renders no prompt rows.
 	Prompts PromptStore
+	// Jobs is the schedule. Nil renders no Jobs section at all — which is not
+	// the same as an empty one: "nothing is scheduled" is a fact, and "this
+	// build cannot schedule anything" is a different fact.
+	Jobs JobStore
+	// Runner is the scheduler, for "Run now" and for what is due next. Nil
+	// still renders the rows: their definitions and their history are worth
+	// seeing even when nothing in this process is going to fire them.
+	Runner JobRunner
+	// Now is the clock the status lines are computed against. Nil selects
+	// time.Now.
+	Now func() time.Time
 	// Notify posts the outcome of an update. Optional; without it an update
 	// still runs and is still logged, it is just not narrated.
 	Notify slack.Poster
@@ -163,6 +175,8 @@ func (p *Publisher) render(ctx context.Context, userID string) blockkit.Home {
 	// to restart. The update section needs a release AND something able to
 	// install it.
 	home := blockkit.Home{Version: p.deps.Version, Admin: admin && p.deps.Restart != nil}
+	home.ShowJobs = admin && p.deps.Jobs != nil
+	home.Jobs = p.jobRows(ctx, admin)
 	home.Prompts = p.promptRows(admin)
 	if !admin || p.deps.Checker == nil || p.deps.Installer == nil {
 		return home
@@ -278,6 +292,11 @@ func (p *Publisher) writePrompt(ctx context.Context, userID, promptID, text, ver
 	p.republish(ctx, userID)
 	return nil
 }
+
+// slackReported marks an error whose cause the admin has already been shown, so
+// the daemon does not report it a second time. It is a thin alias so this
+// package's job controls read the same as its update ones.
+func slackReported(err error) error { return slack.Reported(err) }
 
 // ReleaseNotes converts a release body from GitHub-flavoured Markdown into what
 // Slack will actually render, and appends the numbered list of links the

@@ -64,6 +64,10 @@ type inputBlock struct {
 	Label   textObj  `json:"label"`
 	Element any      `json:"element"`
 	Hint    *textObj `json:"hint,omitempty"`
+	// Optional inverts Slack's default, which is that an input must be filled
+	// in. Only the job timeout uses it: everything else on either modal is a
+	// value the handler cannot invent.
+	Optional bool `json:"optional,omitempty"`
 }
 
 type modalView struct {
@@ -119,4 +123,102 @@ func (m PromptModal) label() string {
 		return l
 	}
 	return "Prompt"
+}
+
+// The job editor: the second modal, and the one that creates something.
+//
+// It shares the prompt editor's shape — an input block per field, the identity
+// in `private_metadata`, a callback_id the router matches exactly — and differs
+// in the one way that matters: a NEW job has no identity yet, so the name is a
+// field. On an existing job it is not, because a name is what the ledger keys
+// on and what the row's block_id carries, and "rename" is a different operation
+// from "edit" that nobody has asked for.
+
+const (
+	// JobModalCallbackID identifies a submission of the job editor.
+	JobModalCallbackID = "job_edit"
+	// The input blocks. Slack reports a submission's values under (block_id,
+	// action_id), so both are named and both are read back.
+	JobModalNameBlockID     = "job_name"
+	JobModalCommandBlockID  = "job_command"
+	JobModalScheduleBlockID = "job_schedule"
+	JobModalTimeoutBlockID  = "job_timeout"
+	// JobModalActionID names the input element inside each block.
+	JobModalActionID = "value"
+)
+
+// JobModal is the editor for one scheduled job.
+type JobModal struct {
+	// Name is the job being edited, and empty for a new one. It rides in
+	// private_metadata, so a submission knows which job it is about even though
+	// the name field may not be on the form.
+	Name string
+	// Command is the argument list as a line: "git pr --bulk miere".
+	Command string
+	// Schedule is the cadence as written.
+	Schedule string
+	// Timeout is the bound as written: "2m".
+	Timeout string
+}
+
+// New reports whether this modal creates a job rather than editing one.
+func (m JobModal) New() bool { return strings.TrimSpace(m.Name) == "" }
+
+// View renders the payload `views.open` takes.
+//
+// Only the timeout is optional. A job with no command runs nothing and a job
+// with no schedule runs never, and Slack refusing an empty box is a better
+// message than a handler explaining the same thing after the modal has closed.
+func (m JobModal) View() any {
+	var blocks []any
+	if m.New() {
+		blocks = append(blocks, jobInput(JobModalNameBlockID, "Name", "",
+			"Letters, digits, dot, dash and underscore. It identifies the job everywhere.", false))
+	}
+	blocks = append(blocks,
+		jobInput(JobModalCommandBlockID, "Command", m.Command,
+			"Arguments for riggs, e.g. `git pr --bulk miere`. Split on spaces; no quoting.", false),
+		jobInput(JobModalScheduleBlockID, "Schedule", m.Schedule,
+			"An interval like 3m, or a five-field calendar expression like 0 9 * * 1-5.", false),
+		jobInput(JobModalTimeoutBlockID, "Timeout", m.Timeout,
+			"How long one run may take, e.g. 2m. Empty uses the default.", true),
+	)
+
+	title := "New job"
+	if !m.New() {
+		title = m.Name
+	}
+	return modalView{
+		Type:            "modal",
+		CallbackID:      JobModalCallbackID,
+		PrivateMetadata: m.Name,
+		Title:           plain(Truncate(title, modalTitleLimit, modalTitleLimit-1)),
+		Submit:          plain("Save"),
+		Close:           plain("Cancel"),
+		Blocks:          blocks,
+	}
+}
+
+// jobInput builds one single-line input block.
+//
+// Single-line, unlike the prompt editor's: every one of these is a name, a
+// command or a duration, and a multiline box invites a newline that the value
+// cannot carry.
+func jobInput(blockID, label, value, hint string, optional bool) inputBlock {
+	block := inputBlock{
+		Type:    "input",
+		BlockID: blockID,
+		Label:   plain(label),
+		Element: plainTextInput{
+			Type:         "plain_text_input",
+			ActionID:     JobModalActionID,
+			InitialValue: value,
+		},
+		Optional: optional,
+	}
+	if hint != "" {
+		h := plain(hint)
+		block.Hint = &h
+	}
+	return block
 }

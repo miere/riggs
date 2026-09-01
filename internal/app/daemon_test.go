@@ -4,6 +4,7 @@ import (
 	"io"
 	"log/slog"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/miere/riggs-mcp/internal/apphome"
@@ -165,3 +166,82 @@ func assertRoutes(t *testing.T, got, want []string) {
 }
 
 func quietLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
+// The Jobs section's controls, and the editor coming back. Which job a click is
+// about rides in the row's block_id, exactly as a prompt and a pull request do.
+func TestDaemonRegistersTheJobControls(t *testing.T) {
+	a := &Application{cfg: &config.Config{}}
+	router := daemon.NewRouter()
+	a.registerJobInteractions(router, apphome.New(apphome.Deps{Logger: quietLogger()}))
+
+	want := []string{
+		blockkit.HomeJobActionID + "/" + blockkit.HomeJobDeleteIntent,
+		blockkit.HomeJobActionID + "/" + blockkit.HomeJobEditIntent,
+		blockkit.HomeJobActionID + "/" + blockkit.HomeJobRunIntent,
+		blockkit.HomeJobActionID + "/" + blockkit.HomeJobToggleIntent,
+		blockkit.HomeMenuActionID + "/" + blockkit.HomeNewJobIntent,
+		blockkit.JobModalCallbackID + "/" + slack.ViewSubmitIntent,
+	}
+	assertRoutes(t, router.Routes(), want)
+}
+
+// `New job…` and Restart share the controls menu, so they must not collide.
+func TestTheControlsMenuRoutesBothOfItsOptions(t *testing.T) {
+	a := &Application{cfg: &config.Config{}}
+	router := daemon.NewRouter()
+	home := apphome.New(apphome.Deps{Logger: quietLogger()})
+	// Registering the same (action_id, intent) twice panics at wiring time, so
+	// this passing IS the assertion that they are distinct.
+	a.registerHomeInteractions(router, home)
+	a.registerJobInteractions(router, home)
+
+	got := router.Routes()
+	var menu int
+	for _, route := range got {
+		if strings.HasPrefix(route, blockkit.HomeMenuActionID+"/") {
+			menu++
+		}
+	}
+	if menu != 2 {
+		t.Fatalf("controls-menu routes = %d, want Restart and New job: %v", menu, got)
+	}
+}
+
+// The daemon passes --config-file to its children only when the config is not
+// where Riggs would look anyway: passing it always puts an absolute path in
+// every log line, and never sends a daemon started with --config-file to the
+// wrong config in its own jobs.
+func TestJobConfigFlagOnlyWhenUnusual(t *testing.T) {
+	if got := (&Application{cfg: &config.Config{Path: config.DefaultPath()}}).jobConfigFlag(); got != "" {
+		t.Fatalf("jobConfigFlag = %q, want empty for the default location", got)
+	}
+	if got := (&Application{cfg: &config.Config{Path: config.NoFilePath}}).jobConfigFlag(); got != "" {
+		t.Fatalf("jobConfigFlag = %q, want empty when there is no config", got)
+	}
+	if got := (&Application{cfg: &config.Config{Path: "/etc/riggs.yaml"}}).jobConfigFlag(); got != "/etc/riggs.yaml" {
+		t.Fatalf("jobConfigFlag = %q", got)
+	}
+}
+
+// A nil pointer in a non-nil interface would make `Jobs != nil` true and panic
+// on the first read.
+func TestAnUnavailableLedgerLeavesTheJobsSurfaceUnwired(t *testing.T) {
+	if jobStoreOrNil(nil) != nil {
+		t.Fatal("a nil store became a non-nil interface")
+	}
+	if jobRunnerOrNil(nil) != nil {
+		t.Fatal("a nil scheduler became a non-nil interface")
+	}
+}
+
+// A job row's block_id is namespaced so a click on one is distinguishable from
+// any other block that carries an id.
+func TestJobNameStripsTheNamespace(t *testing.T) {
+	if got := jobName(blockkit.HomeJobBlockPrefix + "github-review-queue"); got != "github-review-queue" {
+		t.Fatalf("jobName = %q", got)
+	}
+	// A modal's private_metadata carries the bare name and must survive.
+	if got := jobName("github-review-queue"); got != "github-review-queue" {
+		t.Fatalf("jobName = %q", got)
+	}
+}

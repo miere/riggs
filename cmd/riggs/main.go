@@ -10,6 +10,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"slices"
@@ -20,6 +21,9 @@ import (
 	"github.com/miere/riggs-mcp/internal/installer"
 	"github.com/miere/riggs-mcp/internal/version"
 )
+
+// stderr is the diagnostic stream, named so tests can redirect it.
+var stderr io.Writer = os.Stderr
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -52,11 +56,21 @@ func run(args []string) error {
 		return runInstall(context.Background())
 	}
 
-	// `riggs launchd` mutates this machine's launch agents. Like install, it is
+	// `riggs service` mutates this machine's init. Like install, it is
 	// deliberately not a Tool: it has nothing to do with what Riggs exposes to
-	// an MCP client.
+	// an MCP client. `launchd` is its former name and still works.
+	if len(args) > 0 && args[0] == "service" {
+		return runService(context.Background(), args[1:], configPath)
+	}
 	if len(args) > 0 && args[0] == "launchd" {
-		return runLaunchd(context.Background(), args[1:], configPath)
+		return runLaunchdAlias(context.Background(), args[1:], configPath)
+	}
+
+	// `riggs jobs` reads and writes the schedule the daemon runs. It is a CLI
+	// rather than a Tool for the same reason: it is about operating this
+	// machine, not about what Riggs can do for a caller.
+	if len(args) > 0 && args[0] == "jobs" {
+		return runJobs(context.Background(), args[1:], configPath)
 	}
 
 	mode := app.ModeCLI
@@ -98,12 +112,9 @@ func runInstall(ctx context.Context) error {
 	}
 	self, err := os.Executable()
 	if err != nil {
-		return fmt.Errorf("locating this binary (needed as the job command): %w", err)
+		return fmt.Errorf("locating this binary: %w", err)
 	}
-	return installer.New(console, installer.Options{
-		RiggsPath: self,
-		ToolsFor:  app.ToolNames,
-	}).Run(ctx)
+	return installer.New(console, installer.Options{RiggsPath: self}).Run(ctx)
 }
 
 // configFlag selects the configuration file, overriding $RIGGS_CONFIG and the

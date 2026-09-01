@@ -135,7 +135,9 @@ func (a *Application) UsageLine() string {
 		sort.Strings(subs)
 		parts = append(parts, fmt.Sprintf("%s <%s>", ns, strings.Join(subs, "|")))
 	}
-	// The modes handled in main.go, outside the registry.
-	parts = append(parts, "mcp", "daemon", "launchd", "install")
+	// The modes handled in main.go, outside the registry. `launchd` is absent
+	// on purpose: it still works, but it is the old name for `service` and a
+	// usage line should name one way to do a thing.
+	parts = append(parts, "mcp", "daemon", "service", "jobs", "install")
 	return "usage: riggs <command>; commands: " + strings.Join(parts, ", ")
 }

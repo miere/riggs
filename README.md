@@ -11,9 +11,10 @@ stop, while **Run Code Review** and **Run AI Assistance** start a harness on thi
 machine that does the work. Each is optional, and an option whose setting is
 absent is not rendered at all.
 
-Riggs is always the callee. Murtaugh keeps owning the schedule and the Slack
-gateway, and invokes Riggs as a CLI (from a job or a workflow rule) or over MCP.
-It never opens a Socket Mode connection.
+Riggs runs its own schedule and its own Slack app. `riggs daemon` holds a Socket
+Mode connection open, answers the clicks on the messages it posted, and ticks the
+jobs it owns — so Murtaugh is no longer in the chain. It is still perfectly
+invokable as a CLI or over MCP.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the structural decisions.
 
@@ -22,6 +23,42 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the structural decisions.
 ```sh
 go build -o ~/.local/bin/riggs ./cmd/riggs
 ```
+
+## Supervise it
+
+The daemon has to keep running: it holds the Slack connection AND the schedule,
+so a Riggs that is down has neither working buttons nor firing jobs.
+
+```sh
+riggs service install
+```
+
+One command, both platforms — a launch agent on macOS, a systemd **user** unit on
+Linux. It reports the two things that otherwise fail silently: tools missing from
+the supervised PATH, and systemd lingering being off, which stops a user unit the
+moment you log out (`sudo loginctl enable-linger $USER`). `riggs service status`
+says what the supervisor thinks; `riggs launchd` is the old name and forwards.
+
+## Jobs
+
+Riggs schedules its own work. Jobs live in the ledger, are edited from the **App
+Home tab** — a Jobs section with Edit, Run now, Disable and Delete on each row,
+and **New job…** under Restart in the controls menu — and from the terminal:
+
+```sh
+riggs jobs list
+riggs jobs add nightly "0 9 * * 1-5" jira tickets --bulk
+riggs jobs run nightly
+riggs jobs import <github-login>    # adopt the jobs Murtaugh used to run
+```
+
+A schedule is one field in either of two dialects: an interval (`3m`) or a
+five-field calendar expression (`0 9 * * 1-5`, local time). A job runs the riggs
+binary again as a child process, so what it does is exactly what typing the same
+command would do. Missed runs are skipped rather than caught up, and a job that
+overruns its own cadence is skipped rather than started twice.
+
+If Murtaugh still has copies of the imported jobs, remove them — both would run.
 
 ## Configure
 

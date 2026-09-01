@@ -6,7 +6,10 @@ import (
 	"testing"
 )
 
-func modalOf(t *testing.T, m PromptModal) map[string]any {
+// viewer is anything that renders a modal payload. Both modals do.
+type viewer interface{ View() any }
+
+func modalOf(t *testing.T, m viewer) map[string]any {
 	t.Helper()
 	raw, err := json.Marshal(m.View())
 	if err != nil {
