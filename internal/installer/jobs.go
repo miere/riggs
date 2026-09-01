@@ -13,23 +13,23 @@ import (
 
 // Seeding Riggs' own schedule.
 //
-// This replaces the step that registered jobs with Murtaugh through its CLI.
-// Riggs now runs its own (§9c), so the install writes them into the ledger it
-// is about to hand the daemon — one fewer tool in the chain, and one fewer
-// place for the two of them to disagree about what is running.
+// This replaces the step that registered jobs with an external scheduler
+// through its CLI. Riggs now runs its own (§9c), so the install writes them
+// into the ledger it is about to hand the daemon — one fewer tool in the chain,
+// and one fewer place for the two of them to disagree about what is running.
 //
-// It is deliberately not silent about the handover. Two schedulers driving one
-// digest is noise rather than redundancy: every pull request announced twice,
-// by two processes racing each other to write the same ledger rows. Nothing
-// here can remove Murtaugh's copies — that is its config, not ours — so the
-// install prints the commands and says why.
+// If this machine still has the same jobs defined under another scheduler, they
+// will both run. That is worth knowing and is NOT asserted here: nothing on
+// this side can see another tool's configuration, and a warning that describes
+// a state it has not checked is how a tool teaches people to ignore its output.
+// `riggs jobs list` says what Riggs runs; the other scheduler says what it runs.
 
 // gatherJobs asks about, builds and stores the schedule.
 func (i *Installer) gatherJobs(ctx context.Context, configPath string) error {
 	i.p.Say("")
 	i.p.Say("Riggs runs its own schedule now, inside the daemon. These are the two")
-	i.p.Say("jobs it takes over from Murtaugh; both can be edited later from the")
-	i.p.Say("App Home tab, or with `riggs jobs`.")
+	i.p.Say("standard jobs; both can be edited later from the App Home tab, or")
+	i.p.Say("with `riggs jobs`.")
 
 	install, err := i.p.Confirm("Set them up?", true)
 	if err != nil {
@@ -40,7 +40,7 @@ func (i *Installer) gatherJobs(ctx context.Context, configPath string) error {
 		return nil
 	}
 
-	jobs, skipped, err := schedule.Adopted(i.ghLogin, "")
+	jobs, skipped, err := schedule.Standard(i.ghLogin, "")
 	if err != nil {
 		return err
 	}
@@ -64,13 +64,6 @@ func (i *Installer) gatherJobs(ctx context.Context, configPath string) error {
 	}
 	for _, note := range skipped {
 		i.p.Say("  skipped   %s", note)
-	}
-	if len(jobs) > 0 {
-		i.p.Say("")
-		i.p.Say("Riggs owns these now. If Murtaugh still has copies, remove them or both will run:")
-		for _, name := range schedule.AdoptedNames {
-			i.p.Say("  murtaugh jobs remove --name %s", name)
-		}
 	}
 	return nil
 }

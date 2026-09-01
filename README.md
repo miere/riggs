@@ -49,7 +49,7 @@ and **New job…** under Restart in the controls menu — and from the terminal:
 riggs jobs list
 riggs jobs add nightly "0 9 * * 1-5" jira tickets --bulk
 riggs jobs run nightly
-riggs jobs import <github-login>    # adopt the jobs Murtaugh used to run
+riggs jobs seed <github-login>     # create the two standard jobs
 ```
 
 A schedule is one field in either of two dialects: an interval (`3m`) or a
@@ -58,7 +58,8 @@ binary again as a child process, so what it does is exactly what typing the same
 command would do. Missed runs are skipped rather than caught up, and a job that
 overruns its own cadence is skipped rather than started twice.
 
-If Murtaugh still has copies of the imported jobs, remove them — both would run.
+If the same jobs are also defined in another scheduler, remove them there — both
+would run, racing each other to write the same rows.
 
 ## Configure
 

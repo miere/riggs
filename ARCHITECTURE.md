@@ -1297,19 +1297,31 @@ handful of rows.
 - **An unreadable stored schedule is reported and skipped**, not fatal — the
   alternative is a job that silently never runs.
 
-### Migration
+### The standard jobs
 
-`riggs jobs import` materialises the adopted jobs from `schedule.Adopted`, this
-repository's own declaration of what they are, rather than reading Murtaugh's
-database. Riggs cannot see that schema and has no business learning it; the two
-definitions are the ones `riggs install` has been registering all along, so
-copying them reproduces exactly what was running from a source this repo can be
-held to. The names are kept, so a moved job is not mistaken for a new one.
+`riggs jobs seed` creates the two jobs `riggs install` has always set up, from
+`schedule.Standard` — one declaration, so the installer and the command cannot
+drift apart. The names are kept, so a machine that had them under another
+scheduler recognises them rather than gaining two lookalikes. An existing job is
+left alone: running it twice must not undo an edit made in between.
 
-Nothing on this side can remove Murtaugh's copies — that is its config — so the
-import and the installer both **print the commands and say why**: two schedulers
-driving one digest is noise rather than redundancy, announcing every pull request
-twice from two processes racing to write the same rows.
+**It is a seed, not an import, and it was briefly named as though it were one.**
+The argument gave that away — a genuine import would already know the GitHub
+login, because the login is *inside* the job being imported. Having to pass it
+is proof that nothing is being read.
+
+A real import was possible: Murtaugh exposes `cfg job list`, `cfg job show` and
+`cfg export`. It was rejected because it would couple Riggs to another tool's
+output format at the exact moment the dependency on that tool is being removed —
+and because `cfg job list` has no JSON output, so the coupling would be to
+human-readable text.
+
+**Neither the seed nor the installer asserts what another scheduler holds.**
+Riggs cannot see another tool's configuration, and a warning describing a state
+it has not checked is how a tool teaches people to ignore its output. If the
+same jobs are defined in two places they will both run, and both will race to
+write the same ledger rows; `riggs jobs list` says what Riggs runs, and the
+other scheduler says what it runs.
 
 ## 9b. The item ledger (bulk digests)
 

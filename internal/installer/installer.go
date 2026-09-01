@@ -1,15 +1,15 @@
 // Package installer provisions a working Riggs: it writes the config, proves
-// the Slack path end to end against real data, and — if Murtaugh is present —
-// registers the scheduled jobs.
+// the Slack path end to end against real data, and seeds the schedule the
+// daemon will run.
 //
 // It is interactive, so it lives outside the tool registry and is never
 // exposed over MCP. `riggs install` is handled in cmd/riggs before mode
 // parsing, the same treatment the blueprint gives its `auth` command.
 //
-// Murtaugh is configured exclusively through its CLI (`murtaugh cfg job set`).
-// Riggs never writes Murtaugh's database: that command re-validates the whole
-// assembled config and rolls back a change that would break it, which a
-// hand-written row would bypass.
+// It used to register those jobs with Murtaugh through its CLI, and never
+// touched anything but its own files even then. Riggs owns the schedule now
+// (§9c), so there is no second tool to configure and nothing here reaches
+// outside this machine's Riggs config and ledger.
 package installer
 
 import (

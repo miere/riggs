@@ -8,7 +8,7 @@ import (
 	"github.com/miere/riggs-mcp/internal/schedule"
 )
 
-// The install now writes Riggs' own schedule instead of registering Murtaugh's.
+// The install writes Riggs' own schedule rather than registering it elsewhere.
 func TestInstallSchedulesTheAdoptedJobs(t *testing.T) {
 	s := happyScript()
 	r := newRig(t, s)
@@ -53,19 +53,17 @@ func TestInstallSchedulesTheAdoptedJobs(t *testing.T) {
 	}
 }
 
-// Nothing here can remove Murtaugh's copies — that is its config, not ours — so
-// the install has to say so. Two schedulers driving one digest is noise.
-func TestInstallSaysHowToRetireMurtaughsJobs(t *testing.T) {
+// It says nothing about any other scheduler. Nothing on this side can see
+// another tool's configuration, and a warning describing a state it has not
+// checked is how a tool teaches people to ignore its output.
+func TestInstallDoesNotAssertWhatAnotherSchedulerHolds(t *testing.T) {
 	s := happyScript()
 	r := newRig(t, s)
 	if err := r.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	transcript := s.transcript()
-	for _, name := range schedule.AdoptedNames {
-		if !strings.Contains(transcript, "murtaugh jobs remove --name "+name) {
-			t.Errorf("the transcript does not say how to retire %s:\n%s", name, transcript)
-		}
+	if strings.Contains(strings.ToLower(s.transcript()), "murtaugh jobs remove") {
+		t.Errorf("the install claims another scheduler has copies:\n%s", s.transcript())
 	}
 }
 
