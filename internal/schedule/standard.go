@@ -2,28 +2,21 @@ package schedule
 
 import "fmt"
 
-// The jobs Riggs takes over from Murtaugh.
+// The standard jobs: the two Riggs schedules for itself unless told otherwise.
 //
-// They are declared here, in the package that runs them, rather than being read
-// out of Murtaugh's database. Riggs cannot see that database's schema and has
-// no business learning it: the two definitions below are the ones `riggs
-// install` has been registering all along — same names, same commands, same
-// cadence — so materialising them here reproduces exactly what was running,
-// from a source this repository can be held to.
+// They are declared here so that `riggs install` and `riggs jobs seed` create
+// the same thing, from one definition, rather than each carrying its own copy
+// of a command line that has to stay in step with the tools it invokes.
 //
-// The names are deliberately the ones Murtaugh used. Not for compatibility —
-// nothing reads them across the boundary — but because they are what the
-// operator has been looking at, and a migration that also renames everything
-// makes it impossible to tell a moved job from a new one.
+// This is a SEED, not an import. Nothing is read from anywhere: these are the
+// two jobs `riggs install` has been setting up all along — same names, same
+// commands, same cadence — and the names are kept so a machine that had them
+// under another scheduler recognises them rather than gaining two lookalikes.
 
 // DefaultTicketJQL is the query the ticket digest has always advertised.
 const DefaultTicketJQL = `project = NYX AND labels = "ai-able" AND assignee IS EMPTY AND status = "Ready"`
 
-// AdoptedNames are the Murtaugh job names Riggs replaces, so a migration can
-// tell the operator exactly what to remove.
-var AdoptedNames = []string{"github-review-queue", "quick-coding-tasks-poll"}
-
-// Adopted builds the job set Riggs takes over.
+// Standard builds the default job set.
 //
 // login is the GitHub user whose review queue the digest mirrors. It is a
 // parameter rather than a setting for the reason §14 gives at length: as
@@ -33,7 +26,7 @@ var AdoptedNames = []string{"github-review-queue", "quick-coding-tasks-poll"}
 //
 // An empty login yields only the ticket job, and says so, rather than a review
 // digest that fetches nobody's reviews.
-func Adopted(login, jql string) ([]Job, []string, error) {
+func Standard(login, jql string) ([]Job, []string, error) {
 	if jql == "" {
 		jql = DefaultTicketJQL
 	}

@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"strings"
@@ -22,7 +21,7 @@ const jobsUsage = `usage: riggs jobs <command>
   rm <name>                             forget a job and its history
   enable|disable <name>                 pause or resume without forgetting it
   run <name>                            run one now, whatever its schedule says
-  import [github-login]                 adopt the jobs Murtaugh used to run`
+  seed [github-login]                   create the two standard jobs`
 
 // runJobs is the command-line half of the schedule.
 //
@@ -71,8 +70,8 @@ func runJobs(ctx context.Context, args []string, configPath string) error {
 		return oneNamed(ctx, rest, "run", func(name string) error {
 			return runJobNow(ctx, cfg, store, name)
 		})
-	case "import":
-		return importJobs(ctx, store, rest)
+	case "seed":
+		return seedJobs(ctx, store, rest)
 	default:
 		return fmt.Errorf("unknown jobs command %q\n%s", action, jobsUsage)
 	}
@@ -85,7 +84,7 @@ func listJobs(ctx context.Context, store *notify.Store) error {
 		return err
 	}
 	if len(jobs) == 0 {
-		fmt.Println("Nothing is scheduled. `riggs jobs import` adopts the jobs Murtaugh used to run.")
+		fmt.Println("Nothing is scheduled. `riggs jobs seed` creates the two standard jobs.")
 		return nil
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
@@ -209,66 +208,43 @@ func jobConfigFlag(cfg *config.Config) string {
 	return cfg.Path
 }
 
-// importJobs adopts the jobs Murtaugh used to run.
+// seedJobs creates the two standard jobs.
 //
-// It materialises them from this repository's own declaration of what they are
-// (schedule.Adopted) rather than reading Murtaugh's database. Riggs cannot see
-// that schema and has no business learning it; the definitions being copied are
-// the ones `riggs install` has been registering all along.
+// A SEED, not an import: nothing is read from anywhere. It materialises
+// schedule.Standard, which is this repository's own declaration of the two jobs
+// `riggs install` has always set up. The name was `import` for one commit, which
+// was wrong in a way the argument gave away — a genuine import would already
+// know the GitHub login, because the login is inside the job being imported.
 //
-// An existing job is left alone rather than overwritten. Running this twice
-// must not undo an edit made in between.
-func importJobs(ctx context.Context, store *notify.Store, args []string) error {
+// An existing job is left alone rather than overwritten. Running this twice must
+// not undo an edit made in between.
+func seedJobs(ctx context.Context, store *notify.Store, args []string) error {
 	login := ""
 	if len(args) > 0 {
 		login = args[0]
 	}
-	jobs, skipped, err := schedule.Adopted(login, "")
+	jobs, skipped, err := schedule.Standard(login, "")
 	if err != nil {
 		return err
 	}
 
-	var added, existing []string
 	for _, job := range jobs {
 		if _, exists, err := store.Job(ctx, job.Name); err != nil {
 			return err
 		} else if exists {
-			existing = append(existing, job.Name)
+			fmt.Printf("  kept    %s (already defined; not overwritten)\n", job.Name)
 			continue
 		}
 		job.UpdatedAt = time.Now()
 		if err := store.SaveJob(ctx, job); err != nil {
 			return err
 		}
-		added = append(added, job.Name)
-	}
-
-	report(os.Stdout, added, existing, skipped)
-	return nil
-}
-
-// report prints what an import did, and what the operator has to do next.
-func report(w io.Writer, added, existing, skipped []string) {
-	for _, name := range added {
-		fmt.Fprintf(w, "  added    %s\n", name)
-	}
-	for _, name := range existing {
-		fmt.Fprintf(w, "  kept     %s (already defined here; not overwritten)\n", name)
+		fmt.Printf("  created %s: %s, %s\n", job.Name, schedule.Command(job), job.Spec)
 	}
 	for _, note := range skipped {
-		fmt.Fprintf(w, "  skipped  %s\n", note)
+		fmt.Printf("  skipped %s\n", note)
 	}
-	if len(added) == 0 {
-		return
-	}
-	// The one thing an import cannot do for them, and the one thing that
-	// matters: two schedulers driving one digest is noise, not redundancy —
-	// every pull request announced twice, every ledger row written by two
-	// processes racing each other.
-	fmt.Fprintf(w, "\nRiggs now owns these. Remove Murtaugh's copies, or both will run:\n")
-	for _, name := range schedule.AdoptedNames {
-		fmt.Fprintf(w, "  murtaugh jobs remove --name %s\n", name)
-	}
+	return nil
 }
 
 // oneNamed runs fn against exactly one job name.
