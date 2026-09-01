@@ -43,13 +43,15 @@ func bulkEngineForTickets(cfg *config.Config, jql string, opts ticket.BulkOption
 	if err != nil {
 		return nil, nil, err
 	}
+	opts.Actions = ticketRowActions(cfg)
 	notifier := notify.New(store, slack.NewAPI())
 	return ticket.NewBulkEngine(jiraClient(cfg), store, notifier, jql, opts), store, nil
 }
 
-// assistAskerFor assembles the assistance-request poster for one invocation.
+// assistAskerFor assembles the SME assistance-request poster for one
+// invocation.
 //
-// Its destination and wording come from `ai-assistance`, never from
+// Its destination and wording come from `sme-assistance`, never from
 // `review-request`: the two actions look identical and answer different
 // questions, so they are configured apart (§10).
 func assistAskerFor(cfg *config.Config) (*ticket.Asker, io.Closer, error) {
@@ -59,8 +61,21 @@ func assistAskerFor(cfg *config.Config) (*ticket.Asker, io.Closer, error) {
 	}
 	api := slack.NewAPI()
 	asker := ticket.NewAsker(jiraClient(cfg), notify.New(store, api), api,
-		cfg.AssistUser(), cfg.AIAssistance.Channel, cfg.AssistPrompt()).WithResolver(api)
+		cfg.SMEUser(), cfg.SMEAssistance.Channel, cfg.SMEPrompt()).WithResolver(api)
 	return asker, store, nil
+}
+
+// ticketRowActions reads which optional verbs a ticket row may offer.
+//
+// Resolved here, in the composition root, rather than inside the digest: the
+// domain renders what it is told to and the config is what decides. Both
+// default to off, so an installation that answered neither question gets a row
+// with a link on it and nothing that cannot work.
+func ticketRowActions(cfg *config.Config) ticket.RowActions {
+	return ticket.RowActions{
+		AskAssist: cfg.SMEEnabled(),
+		RunAssist: cfg.AIEnabled(),
+	}
 }
 
 // registerJiraTools wires the ticket verbs, when Jira is configured.

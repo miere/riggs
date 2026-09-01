@@ -37,8 +37,28 @@ const (
 	// Intents. Bare tokens, identical on every row, so the daemon's router can
 	// match them exactly (§7b).
 	IntentOpenBrowser = "open_browser"
-	IntentAskAssist   = "ask_assist"
+	// IntentAskAssist asks a PERSON. The token keeps its original spelling even
+	// though the label no longer says "AI": digests already sitting in Slack
+	// carry it in their option values, and renaming it would turn every one of
+	// those menus into a button the router does not answer.
+	IntentAskAssist = "ask_assist"
+	// IntentRunAssist runs the local harness over the ticket.
+	IntentRunAssist = "run_assist"
 )
+
+// RowActions says which of a row's optional verbs this installation may offer.
+//
+// The ticket digest's counterpart to the pull-request digest's type of the same
+// name, and separate from it for the same reason those two config sections are
+// separate: they are configured independently and a shared type would mean one
+// growing a field for the other's benefit.
+type RowActions struct {
+	// AskAssist offers handing the ticket to a person — a subject-matter
+	// expert — to say whether it is actionable. Needs sme-assistance.user-id.
+	AskAssist bool
+	// RunAssist offers running the local harness over it. Needs ai.command.
+	RunAssist bool
+}
 
 // DefaultCooldown is how long a ticket must sit before it may move into a new
 // digest — and how long a struck-through row lingers before it is purged.
@@ -96,6 +116,8 @@ type BulkOptions struct {
 	MaxItems int
 	// Cooldown is the rolling window. Zero takes the default.
 	Cooldown time.Duration
+	// Actions selects which optional verbs a row offers.
+	Actions RowActions
 }
 
 // resolved fills in the blanks from the environment and the defaults.
@@ -128,7 +150,7 @@ func NewBulkEngine(src Source, store *notify.Store, n *notify.Notifier,
 
 	opts = opts.resolved()
 	return &BulkEngine{Engine: bulk.New(
-		bulkDomain{jira: src, jql: jql}, store, n,
+		bulkDomain{jira: src, jql: jql, actions: opts.Actions}, store, n,
 		bulk.Options{MaxItems: opts.MaxItems, Cooldown: opts.Cooldown},
 	)}
 }
@@ -144,6 +166,8 @@ func (b *BulkEngine) WithClock(now func() time.Time) *BulkEngine {
 type bulkDomain struct {
 	jira Source
 	jql  string
+	// actions is what this installation is configured to offer on a live row.
+	actions RowActions
 }
 
 // The ledger identity of this digest family.
@@ -175,7 +199,7 @@ func (bulkDomain) Fallback(rows []blockkit.Row) string { return bulkFallback(row
 // control that silently does nothing is worse than one that is not there. The
 // verb behind it (jira.tickets.assign) already exists, so adding the option is
 // two lines and one route the day it is wanted.
-func (bulkDomain) Row(c bulk.Candidate) blockkit.Row {
+func (d bulkDomain) Row(c bulk.Candidate) blockkit.Row {
 	row := blockkit.Row{
 		BlockID:  c.ID,
 		Title:    c.Title,
@@ -189,8 +213,18 @@ func (bulkDomain) Row(c bulk.Candidate) blockkit.Row {
 	if c.Done {
 		return row
 	}
-	row.Options = append(row.Options,
-		blockkit.MenuOption{Text: blockkit.MarkerAsk + "  Ask for AI Assistance", Value: IntentAskAssist})
+	// "Ask for SME Assistance", not "Ask for AI Assistance", which is what this
+	// said while it tagged a colleague and started nothing. The label was the
+	// bug: everyone who read it expected an agent, and got a person. The agent
+	// is the option below it now, and it is a different verb.
+	if d.actions.AskAssist {
+		row.Options = append(row.Options,
+			blockkit.MenuOption{Text: blockkit.MarkerAsk + "  Ask for SME Assistance", Value: IntentAskAssist})
+	}
+	if d.actions.RunAssist {
+		row.Options = append(row.Options,
+			blockkit.MenuOption{Text: blockkit.MarkerRun + "  Run AI Assistance", Value: IntentRunAssist})
+	}
 	return row
 }
 

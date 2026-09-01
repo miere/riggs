@@ -146,3 +146,100 @@ func TestLedgerProbeCountsCards(t *testing.T) {
 		t.Errorf("card count missing from the report:\n%s", Report{Ledger: got}.String())
 	}
 }
+
+// Every one of the four verbs is optional now, and a row quietly missing an
+// option is exactly the absence this tool exists to explain.
+func TestReportNamesTheSettingBehindEveryAction(t *testing.T) {
+	cfg := &config.Config{}
+	report := invoke(t, probes(cfg, nil, nil))
+
+	if len(report.Actions) != 4 {
+		t.Fatalf("actions = %d, want the four verbs", len(report.Actions))
+	}
+	want := map[string]string{
+		"Ask for Code Review":    "review-request.user-id",
+		"Ask for SME Assistance": "sme-assistance.user-id",
+		"Run Code Review":        "ai.command",
+		"Run AI Assistance":      "ai.command",
+	}
+	for _, a := range report.Actions {
+		setting, known := want[a.Name]
+		if !known {
+			t.Fatalf("unexpected action %q", a.Name)
+		}
+		if a.Enabled {
+			t.Errorf("%s is enabled on an empty config", a.Name)
+		}
+		if !strings.Contains(a.Detail, setting) {
+			t.Errorf("%s: detail = %q, want it to name %s", a.Name, a.Detail, setting)
+		}
+	}
+}
+
+// Asking a person and running a harness are separately configured, and the
+// report has to show that rather than collapsing them into "assistance: on".
+func TestReportSeparatesAskingFromRunning(t *testing.T) {
+	cfg := &config.Config{
+		ReviewRequest: config.ReviewRequest{UserID: "U-someone"},
+		AI:            config.AI{Command: "claude", WorkDir: "/work"},
+	}
+	report := invoke(t, probes(cfg, nil, nil))
+
+	byName := map[string]Action{}
+	for _, a := range report.Actions {
+		byName[a.Name] = a
+	}
+	if !byName["Ask for Code Review"].Enabled {
+		t.Error("a configured reviewer did not enable the ask")
+	}
+	if byName["Ask for SME Assistance"].Enabled {
+		t.Error("the ticket ask was enabled by the pull-request setting")
+	}
+	if !byName["Run Code Review"].Enabled || !byName["Run AI Assistance"].Enabled {
+		t.Error("one harness did not enable both Run options")
+	}
+	if !strings.Contains(byName["Run Code Review"].Detail, "/work") {
+		t.Errorf("the harness detail does not say where it runs: %q", byName["Run Code Review"].Detail)
+	}
+
+	// A misspelled harness renders the options and fails every run, which is
+	// invisible until somebody clicks — so it is probed by name.
+	var found bool
+	for _, be := range report.Backends {
+		if be.Name == "claude" {
+			found = true
+			if be.Available {
+				t.Error("claude was reported as available by a probe that finds nothing")
+			}
+		}
+	}
+	if !found {
+		t.Errorf("the harness binary was not probed: %+v", report.Backends)
+	}
+}
+
+// The retired section name still works, and saying so once beats every reader
+// of the file having to work it out.
+func TestReportNotesTheRetiredSectionName(t *testing.T) {
+	cfg, err := config.Load(writeTempConfig(t, "ai-assistance:\n  user-id: U-expert\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	report := invoke(t, probes(cfg, nil, nil))
+	if len(report.Notes) == 0 || !strings.Contains(report.Notes[0], "sme-assistance") {
+		t.Fatalf("notes = %v", report.Notes)
+	}
+	if !strings.Contains(report.String(), "note:") {
+		t.Fatalf("the rendered report does not carry the note:\n%s", report.String())
+	}
+}
+
+// writeTempConfig lays a config file down and returns its path.
+func writeTempConfig(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("writing %s: %v", path, err)
+	}
+	return path
+}

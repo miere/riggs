@@ -62,6 +62,7 @@ func bulkEngineFor(cfg *config.Config, login string, opts pullrequest.BulkOption
 	if err != nil {
 		return nil, nil, err
 	}
+	opts.Actions = reviewRowActions(cfg)
 	gh, err := githubClient(context.Background(), store)
 	if err != nil {
 		store.Close()
@@ -99,7 +100,9 @@ func completerFor(cfg *config.Config) (*pullrequest.Completer, io.Closer, error)
 		return nil, nil, err
 	}
 	api := slack.NewAPI()
-	completer := pullrequest.NewCompleter(store, notify.New(store, api), api)
+	// The same actions the digest engine renders with. A rebuild drawn under
+	// different rules would change the menu on every row in the message.
+	completer := pullrequest.NewCompleter(store, notify.New(store, api), api, reviewRowActions(cfg))
 
 	// The digest renders from the ledger, but an ask card has to be redrawn
 	// from the pull request. A GitHub client that cannot be built is not fatal:
@@ -122,6 +125,18 @@ func approverFor(cfg *config.Config) (*pullrequest.Approver, io.Closer, error) {
 		return nil, nil, err
 	}
 	return pullrequest.NewApprover(gh, store, slack.NewAPI()), store, nil
+}
+
+// reviewRowActions reads which optional verbs a pull-request row may offer.
+//
+// Resolved in the composition root, like its ticket counterpart, and off by
+// default: "Ask for Code Review" needs somebody to ask and "Run Code Review"
+// needs a harness to run, and neither is rendered without one.
+func reviewRowActions(cfg *config.Config) pullrequest.RowActions {
+	return pullrequest.RowActions{
+		AskReview: cfg.ReviewEnabled(),
+		RunReview: cfg.AIEnabled(),
+	}
 }
 
 // registerGitHubTools wires the pull-request tools, when the prerequisites

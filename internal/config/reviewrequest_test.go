@@ -16,16 +16,41 @@ func TestReviewPromptFallsBackToTheDefault(t *testing.T) {
 	}
 }
 
-// Asking yourself is a defensible default; silently tagging a stranger is not.
-func TestReviewReviewerFallsBackToTheAdmin(t *testing.T) {
+// The admin fallback is gone. It was defensible while "Ask for Code Review" was
+// the only verb on the row — asking yourself at least reaches somebody — and is
+// not beside "Run Code Review", where a menu entry that quietly means "send
+// myself a card" reads as a bug next to one that does the work.
+func TestReviewReviewerHasNoAdminFallback(t *testing.T) {
 	cfg := &Config{Admin: Admin{SlackUserID: "U-admin"}}
-	if got := cfg.ReviewReviewer(); got != "U-admin" {
-		t.Fatalf("ReviewReviewer = %q, want the admin", got)
+	if got := cfg.ReviewReviewer(); got != "" {
+		t.Fatalf("ReviewReviewer = %q, want empty: an unanswered setting disables the option", got)
+	}
+	if cfg.ReviewEnabled() {
+		t.Fatal("ReviewEnabled with nobody configured")
 	}
 
 	cfg.ReviewRequest.UserID = "U-someone"
 	if got := cfg.ReviewReviewer(); got != "U-someone" {
 		t.Fatalf("ReviewReviewer = %q", got)
+	}
+	if !cfg.ReviewEnabled() {
+		t.Fatal("ReviewEnabled is false with a reviewer configured")
+	}
+}
+
+// The same rule on the ticket side, and it is a separate assertion because the
+// two settings are deliberately never defaulted from one another.
+func TestSMEUserHasNoAdminFallback(t *testing.T) {
+	cfg := &Config{Admin: Admin{SlackUserID: "U-admin"}}
+	if got := cfg.SMEUser(); got != "" {
+		t.Fatalf("SMEUser = %q, want empty", got)
+	}
+	if cfg.SMEEnabled() {
+		t.Fatal("SMEEnabled with nobody configured")
+	}
+	cfg.SMEAssistance.UserID = "U-expert"
+	if !cfg.SMEEnabled() || cfg.SMEUser() != "U-expert" {
+		t.Fatalf("SMEUser = %q, enabled = %v", cfg.SMEUser(), cfg.SMEEnabled())
 	}
 }
 

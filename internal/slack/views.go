@@ -18,6 +18,32 @@ type ViewPublisher interface {
 	PublishHome(ctx context.Context, token, userID string, view any) error
 }
 
+// ViewOpener opens a modal over whatever surface a click came from.
+//
+// Separate from ViewPublisher for the same reason that one is separate from
+// Poster: a modal is addressed by a TRIGGER, not by a user and not by a
+// conversation, and the trigger expires. Nothing that publishes a Home tab has
+// one, and nothing that has one is publishing a Home tab.
+type ViewOpener interface {
+	// OpenView opens view against triggerID.
+	OpenView(ctx context.Context, token, triggerID string, view any) error
+}
+
+// OpenView implements ViewOpener against the live Web API.
+//
+// Slack gives a trigger_id about three seconds to live. That is why the daemon
+// acknowledges a socket request before handling it (§7b) and why this handler
+// does no work first: a modal opened after a ledger read and a GitHub call is a
+// modal that does not open, and the failure Slack reports for it says only
+// "expired_trigger_id".
+func (a *API) OpenView(ctx context.Context, token, triggerID string, view any) error {
+	if triggerID == "" {
+		return fmt.Errorf("slack: views.open needs a trigger id")
+	}
+	body := map[string]any{"trigger_id": triggerID, "view": view}
+	return a.call(ctx, token, "views.open", body, nil)
+}
+
 // PublishHome implements ViewPublisher against the live Web API.
 //
 // It takes a bare bot token rather than a Target because there is no

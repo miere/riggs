@@ -40,8 +40,29 @@ const (
 	// match them exactly (§7b).
 	IntentOpenBrowser  = "open_browser"
 	IntentAskReview    = "ask_review"
+	IntentRunReview    = "run_review"
 	IntentApproveMerge = "approve_merge"
 )
+
+// RowActions says which of a row's optional verbs this installation may offer.
+//
+// Both are configuration, and both default to OFF. "Ask for Code Review" needs
+// somebody to ask (review-request.user-id); "Run Code Review" needs a harness to
+// run (ai.command). Neither is rendered without one, on the rule this codebase
+// applies everywhere else: a control that cannot act is worse than one that was
+// never there, because it invites a click and then explains why it will not
+// work.
+//
+// It is passed to the digest engine AND to the completer, rather than read from
+// the config in each. The completer redraws a digest from the ledger after a
+// click, and a redraw that disagreed with the pass that drew it would silently
+// add or remove options from rows nobody touched.
+type RowActions struct {
+	// AskReview offers handing the pull request to a person.
+	AskReview bool
+	// RunReview offers running the local harness over it.
+	RunReview bool
+}
 
 // DefaultCooldown is how long an item must sit before it may move into a new
 // digest — and how long a struck-through row lingers before it is purged.
@@ -74,6 +95,8 @@ type BulkOptions struct {
 	MaxItems int
 	// Cooldown is the rolling window. Zero takes the default.
 	Cooldown time.Duration
+	// Actions selects which optional verbs a row offers.
+	Actions RowActions
 }
 
 // resolved fills in the blanks from the environment and the defaults.
@@ -100,7 +123,7 @@ type BulkEngine struct {
 func NewBulkEngine(e *Engine, store *notify.Store, n *notify.Notifier, opts BulkOptions) *BulkEngine {
 	opts = opts.resolved()
 	return &BulkEngine{Engine: bulk.New(
-		bulkDomain{engine: e}, store, n,
+		bulkDomain{engine: e, actions: opts.Actions}, store, n,
 		bulk.Options{MaxItems: opts.MaxItems, Cooldown: opts.Cooldown},
 	)}
 }
@@ -113,7 +136,11 @@ func (b *BulkEngine) WithClock(now func() time.Time) *BulkEngine {
 
 // bulkDomain is the pull-request half of a digest: what the items are, and how
 // a row draws.
-type bulkDomain struct{ engine *Engine }
+type bulkDomain struct {
+	engine *Engine
+	// actions is what this installation is configured to offer on a live row.
+	actions RowActions
+}
 
 // The ledger identity of this digest family.
 func (bulkDomain) Stream() string     { return BulkStream }
@@ -137,7 +164,7 @@ func (bulkDomain) Fallback(rows []blockkit.Row) string { return bulkFallback(row
 //
 // A done row keeps only the link: there is nothing left to approve or ask about
 // on a pull request that has been reviewed, merged or closed.
-func (bulkDomain) Row(c bulk.Candidate) blockkit.Row {
+func (d bulkDomain) Row(c bulk.Candidate) blockkit.Row {
 	row := blockkit.Row{
 		BlockID:  c.ID,
 		Title:    c.Title,
@@ -151,8 +178,18 @@ func (bulkDomain) Row(c bulk.Candidate) blockkit.Row {
 	if c.Done {
 		return row
 	}
-	row.Options = append(row.Options,
-		blockkit.MenuOption{Text: blockkit.MarkerAsk + "  Ask for Code Review", Value: IntentAskReview})
+	// The two are separate verbs and read as such. "Ask" hands the pull request
+	// to a person and stops; "Run" starts a harness on this machine that
+	// actually reviews it. They were one option for a long time, labelled as the
+	// first and understood by nobody as the second.
+	if d.actions.AskReview {
+		row.Options = append(row.Options,
+			blockkit.MenuOption{Text: blockkit.MarkerAsk + "  Ask for Code Review", Value: IntentAskReview})
+	}
+	if d.actions.RunReview {
+		row.Options = append(row.Options,
+			blockkit.MenuOption{Text: blockkit.MarkerRun + "  Run Code Review", Value: IntentRunReview})
+	}
 	// Approve is deliberately absent: it is specified but not implemented, and
 	// a button that silently does nothing is worse than one that is not there.
 	//
@@ -261,7 +298,11 @@ func bulkFallback(rows []blockkit.Row) string {
 
 // bulkRenderer is the draw-only half, for callers with no upstream client —
 // the completer, which rebuilds a message from the ledger after a click.
-func bulkRenderer() bulk.Renderer { return bulkDomain{} }
+//
+// It takes the same RowActions the engine was given, and must: a rebuild is the
+// same rows redrawn, and one drawn under different rules would quietly change
+// the menu on every row in the message.
+func bulkRenderer(actions RowActions) bulk.Renderer { return bulkDomain{actions: actions} }
 
 // Guard: the domain must satisfy both halves of the contract.
 var _ bulk.Domain = bulkDomain{}

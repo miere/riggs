@@ -196,3 +196,129 @@ func TestHomeFingerprintTracksWhatIsVisible(t *testing.T) {
 		}
 	}
 }
+
+// --- the prompts -----------------------------------------------------------
+
+func promptRows() []HomePrompt {
+	return []HomePrompt{
+		{ID: "review_request", Label: "Code review request", Text: "Hey {reviewer}, mind to review this?"},
+		{ID: "ai_review", Label: "AI code review", Text: "Review {ref}.", Overridden: true},
+	}
+}
+
+// The prompts sit above the update divider, because they are about how Riggs
+// behaves rather than about which release it is.
+func TestHomeRendersThePromptRows(t *testing.T) {
+	blocks := homeBlocks(t, Home{Version: "v0.1.0", Admin: true, Prompts: promptRows()})
+
+	if got := strings.Join(blockTypes(blocks), ","); got != "image,section,divider,header,section,section" {
+		t.Fatalf("blocks = %s", got)
+	}
+	if header := blocks[3]["text"].(map[string]any); header["text"] != "Prompts" {
+		t.Fatalf("header = %v", header)
+	}
+
+	row := blocks[4]
+	if row["block_id"] != HomePromptBlockPrefix+"review_request" {
+		t.Fatalf("block_id = %v, want the prompt's identity", row["block_id"])
+	}
+	text := row["text"].(map[string]any)["text"].(string)
+	if !strings.Contains(text, "*Code review request*") {
+		t.Fatalf("row text = %q", text)
+	}
+	if !strings.Contains(text, "Hey {reviewer}") {
+		t.Fatalf("the row does not show the wording in force: %q", text)
+	}
+}
+
+// A default and an override that happens to match it are indistinguishable
+// otherwise — and only one of them follows a later change to the default.
+func TestAPromptOnItsDefaultSaysSoAndOffersNoReset(t *testing.T) {
+	blocks := homeBlocks(t, Home{Version: "v0.1.0", Admin: true, Prompts: promptRows()})
+
+	def := blocks[4]
+	if text := def["text"].(map[string]any)["text"].(string); !strings.Contains(text, "(default)") {
+		t.Fatalf("a default prompt does not say so: %q", text)
+	}
+	if got := optionValues(t, def); len(got) != 1 || got[0] != HomePromptEditIntent {
+		t.Fatalf("options = %v, want Edit alone: there is nothing to reset", got)
+	}
+
+	overridden := blocks[5]
+	if text := overridden["text"].(map[string]any)["text"].(string); strings.Contains(text, "(default)") {
+		t.Fatalf("an overridden prompt claims to be the default: %q", text)
+	}
+	if got := optionValues(t, overridden); len(got) != 2 || got[1] != HomePromptResetIntent {
+		t.Fatalf("options = %v, want Edit and Reset", got)
+	}
+}
+
+// The audience split is the design: everything that operates Riggs is the
+// admin's alone, and a non-admin is shown nothing rather than a control that
+// would refuse them.
+func TestThePromptRowsAreAdminOnly(t *testing.T) {
+	blocks := homeBlocks(t, Home{Version: "v0.1.0", Prompts: promptRows()})
+	if got := strings.Join(blockTypes(blocks), ","); got != "image,section" {
+		t.Fatalf("blocks = %s, want the portrait and the version alone", got)
+	}
+}
+
+// A "Prompts" header with nothing under it says a feature exists and is broken.
+func TestNoPromptsMeansNoHeader(t *testing.T) {
+	blocks := homeBlocks(t, Home{Version: "v0.1.0", Admin: true})
+	if got := strings.Join(blockTypes(blocks), ","); got != "image,section" {
+		t.Fatalf("blocks = %s", got)
+	}
+}
+
+// Four prompts each carrying a paragraph would push the update section off the
+// screen. The whole text is in the editor, one click away.
+func TestALongPromptIsCutForDisplay(t *testing.T) {
+	long := strings.Repeat("a", 500)
+	blocks := homeBlocks(t, Home{Version: "v0.1.0", Admin: true,
+		Prompts: []HomePrompt{{ID: "ai_review", Label: "AI code review", Text: long}}})
+
+	text := blocks[4]["text"].(map[string]any)["text"].(string)
+	if len([]rune(text)) > homePromptLimit+len("*AI code review*  _(default)_\n")+2 {
+		t.Fatalf("row text is %d runes", len([]rune(text)))
+	}
+	if !strings.Contains(text, "…") {
+		t.Fatalf("a cut row does not say it was cut: %q", text)
+	}
+}
+
+// A prompt is prose somebody typed. An `&` in it would re-open the row's own
+// bold run and garble everything after it.
+func TestAPromptRowEscapesItsText(t *testing.T) {
+	blocks := homeBlocks(t, Home{Version: "v0.1.0", Admin: true,
+		Prompts: []HomePrompt{{ID: "ai_review", Label: "AI & review", Text: "a < b & c"}}})
+
+	text := blocks[4]["text"].(map[string]any)["text"].(string)
+	if strings.Contains(text, "a < b & c") {
+		t.Fatalf("the wording was not escaped: %q", text)
+	}
+	if !strings.Contains(text, "&amp;") || !strings.Contains(text, "&lt;") {
+		t.Fatalf("row text = %q", text)
+	}
+}
+
+// optionValues lists an overflow accessory's option values.
+func optionValues(t *testing.T, block map[string]any) []string {
+	t.Helper()
+	acc, ok := block["accessory"].(map[string]any)
+	if !ok {
+		t.Fatalf("no accessory on %v", block)
+	}
+	if acc["action_id"] != HomePromptActionID {
+		t.Fatalf("action_id = %v", acc["action_id"])
+	}
+	raw, ok := acc["options"].([]any)
+	if !ok {
+		t.Fatalf("no options on %v", acc)
+	}
+	out := make([]string, 0, len(raw))
+	for _, o := range raw {
+		out = append(out, o.(map[string]any)["value"].(string))
+	}
+	return out
+}

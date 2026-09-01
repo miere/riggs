@@ -14,7 +14,7 @@ import (
 	"github.com/miere/riggs-mcp/internal/slackmd"
 )
 
-// "Ask for AI Assistance": hand one ticket to somebody else to scope.
+// "Ask for SME Assistance": hand one ticket to a person to scope.
 //
 // The same shape as the pull-request queue's "Ask for Code Review", and for the
 // same reasons: the ask is a CARD about the ticket, with the tag in its thread,
@@ -25,6 +25,12 @@ import (
 // at work that does not exist yet and say whether it is ready to be picked up.
 // So the card carries no verb at all — only the link. Nothing is delegated, no
 // agent is started, and Jira is not touched.
+//
+// It was called "Ask for AI Assistance" until this phase, which was the one
+// thing it never did. Everyone who read the label expected an agent to pick the
+// ticket up; what actually happened was that a colleague got tagged. Running an
+// agent is now a separate option on the same menu (internal/ai), and this one
+// says who it reaches.
 
 const (
 	// AskActionID names the ask card's link button. Nothing routes it — Slack
@@ -87,13 +93,13 @@ func (a *Asker) userID(ctx context.Context, target slack.Target) (string, error)
 	case ref.IsID():
 		return ref.ID, nil
 	case ref.Handle == "":
-		return "", fmt.Errorf("cannot ask for assistance: nobody configured (set ai-assistance.user-id or admin.slack-user-id)")
+		return "", fmt.Errorf("cannot ask for assistance: nobody configured (set sme-assistance.user-id)")
 	case a.resolver == nil:
-		return "", fmt.Errorf("ai-assistance.user-id is %q, which is a handle rather than a Slack id, and nothing is wired to resolve it", a.user)
+		return "", fmt.Errorf("sme-assistance.user-id is %q, which is a handle rather than a Slack id, and nothing is wired to resolve it", a.user)
 	}
 	id, err := a.resolver.LookupUserID(ctx, target, ref.Handle)
 	if err != nil {
-		return "", fmt.Errorf("ai-assistance.user-id %q: %w", a.user, err)
+		return "", fmt.Errorf("sme-assistance.user-id %q: %w", a.user, err)
 	}
 	return id, nil
 }
@@ -239,7 +245,7 @@ func AskFallbackText(issue jira.Issue, url string) string {
 // so the guarantee cannot drift between them.
 func AskTagText(user, requester, prompt string) string {
 	if prompt == "" {
-		prompt = config.DefaultAssistPrompt
+		prompt = config.DefaultSMEPrompt
 	}
 	return ask.TagText(user, requester, prompt)
 }

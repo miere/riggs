@@ -40,6 +40,14 @@ const (
 	// MarkerAsk heads the "ask someone" menu label. U+270E LOWER RIGHT PENCIL —
 	// not U+270F, which is the pencil emoji.
 	MarkerAsk = "✎"
+	// MarkerRun heads the "run it here" menu labels, and distinguishes them at
+	// a glance from the MarkerAsk ones directly above: a pencil writes to
+	// somebody, a play triangle starts something.
+	//
+	// U+25B8 BLACK RIGHT-POINTING SMALL TRIANGLE — not U+25B6, its full-size
+	// sibling, which is the play-button emoji and is in the list below for
+	// exactly that reason.
+	MarkerRun = "▸"
 )
 
 // emojiPresentation lists the BMP codepoints Slack renders as a colour image

@@ -33,6 +33,24 @@ const (
 	// HomeRestartIntent is the menu's restart option.
 	HomeRestartIntent = "restart"
 
+	// HomePromptActionID is the action_id of the overflow beside each editable
+	// prompt. One id for all of them, like a digest's rows: the router matches
+	// (action_id, intent) and recovers WHICH prompt from the block_id, because
+	// an overflow click reports its own block_id and not its siblings' values
+	// (§7b).
+	HomePromptActionID = "app_prompt"
+	// HomePromptEditIntent opens the editor.
+	HomePromptEditIntent = "edit"
+	// HomePromptResetIntent drops the override and goes back to the built-in
+	// wording. Rendered only on a prompt that HAS an override — there is
+	// nothing to reset otherwise, and an option that does nothing is the
+	// mistake this file keeps not making.
+	HomePromptResetIntent = "reset"
+	// HomePromptBlockPrefix namespaces a prompt row's block_id, so a click on
+	// one is distinguishable from any other block that might ever carry an id
+	// on this surface.
+	HomePromptBlockPrefix = "prompt:"
+
 	// HomeUpdateActionID is the action_id of the Update button.
 	HomeUpdateActionID = "home_update"
 	// HomeUpdateIntent is its value: a bare token, like every other control
@@ -51,6 +69,15 @@ const (
 	// notes routinely run past it; a payload that exceeds it is rejected
 	// wholesale, so the notes are cut rather than the tab going blank.
 	homeNotesLimit = 2900
+
+	// homePromptLimit is how much of a prompt the tab shows, in runes.
+	//
+	// Enough to recognise which prompt this is and see roughly what it says;
+	// not so much that four of them push the update section off the screen. The
+	// whole text is in the editor, one click away, which is where it is read
+	// properly anyway.
+	homePromptLimit = 220
+	homePromptKeep  = 217
 )
 
 // Home is the App Home view.
@@ -62,9 +89,31 @@ type Home struct {
 	// there a release to install", Admin is "may this viewer operate Riggs at
 	// all". Restarting is available whether or not anything is out of date.
 	Admin bool
+	// Prompts are the editable wordings, each on its own row with an overflow.
+	// Empty for a non-admin, and for a build with nothing to edit.
+	//
+	// They sit ABOVE the update divider rather than below it, because they are
+	// about how Riggs behaves rather than about which release it is — the same
+	// distinction that put the controls menu on the version line.
+	Prompts []HomePrompt
 	// Update, when set, appends the divider and everything after it. Nil is
 	// the ordinary state: up to date, or a viewer with no business seeing it.
 	Update *HomeUpdate
+}
+
+// HomePrompt is one editable wording on the Home tab.
+type HomePrompt struct {
+	// ID is the prompt's token. It rides in the row's block_id and comes back
+	// on the click.
+	ID string
+	// Label names it: "AI code review".
+	Label string
+	// Text is the wording in force — configured, or the built-in default.
+	Text string
+	// Overridden reports that Text came from the config rather than the
+	// default, which is what decides whether Reset is offered and what the row
+	// says about itself.
+	Overridden bool
 }
 
 // HomeUpdate is the available release.
@@ -132,6 +181,7 @@ func (h Home) Blocks() []any {
 		imageBlock{Type: "image", ImageURL: HomePortraitURL, AltText: HomePortraitAlt},
 		version,
 	}
+	blocks = append(blocks, h.promptBlocks()...)
 	if h.Update == nil {
 		return blocks
 	}
@@ -154,6 +204,70 @@ func (h Home) Blocks() []any {
 			Accessory: button,
 		},
 	)
+}
+
+// promptBlocks renders the editable prompts, under their own divider and
+// header.
+//
+// Nothing at all when there are none, rather than an empty heading: a "Prompts"
+// header with nothing under it says a feature exists and is broken, which is
+// the opposite of what an unconfigured install should read as.
+func (h Home) promptBlocks() []any {
+	// The admin gate is re-applied here, not left to the caller that filled
+	// Prompts. It is the same rule the controls menu on the version line
+	// obeys, and one surface with two places to get the audience wrong is one
+	// too many.
+	if !h.Admin || len(h.Prompts) == 0 {
+		return nil
+	}
+	blocks := []any{
+		dividerBlock{Type: "divider"},
+		headerBlock{Type: "header", Text: plainEmoji("Prompts"), Level: 1},
+	}
+	for _, p := range h.Prompts {
+		blocks = append(blocks, p.block())
+	}
+	return blocks
+}
+
+// block renders one prompt row: what it is, what it currently says, and the
+// menu that changes it.
+func (p HomePrompt) block() accessorySection {
+	options := []menuOptionObj{
+		{Text: plainVerbatim(MarkerAsk + "  Edit"), Value: HomePromptEditIntent},
+	}
+	if p.Overridden {
+		options = append(options,
+			menuOptionObj{Text: plainVerbatim(MarkerFailed + "  Reset to default"), Value: HomePromptResetIntent})
+	}
+	return accessorySection{
+		Type:    "section",
+		BlockID: HomePromptBlockPrefix + p.ID,
+		Text:    mrkdwn(p.text()),
+		Accessory: &menuElem{
+			Type: "overflow", ActionID: HomePromptActionID, Options: options,
+		},
+	}
+}
+
+// text is the row body: the label, then the wording in force.
+//
+// Escaped, on the same rule a digest row is: a prompt is prose somebody typed,
+// and an `&` or a `<` in it would otherwise re-open the row's own bold run and
+// garble everything after it.
+func (p HomePrompt) text() string {
+	label := "*" + escapeMrkdwn(p.Label) + "*"
+	if !p.Overridden {
+		// Said explicitly. Without it, a default and an override that happens to
+		// match it are indistinguishable — and only one of them follows a later
+		// change to the default.
+		label += "  _(default)_"
+	}
+	body := escapeMrkdwn(Truncate(strings.TrimSpace(p.Text), homePromptLimit, homePromptKeep))
+	if body == "" {
+		return label
+	}
+	return label + "\n" + body
 }
 
 // View renders the payload `views.publish` takes.

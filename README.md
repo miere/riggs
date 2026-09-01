@@ -1,9 +1,15 @@
 # riggs-mcp
 
 A single Go binary that carries Murtaugh's automations: mirroring GitHub review
-requests into Slack, approving and merging PRs from a button, and advertising
-`ai-able` Jira tickets. It replaces the Python layer under
-`~/.config/murtaugh/automations/`.
+requests into Slack, approving and merging PRs from a button, running a local AI
+review on demand, and advertising `ai-able` Jira tickets. It replaces the Python
+layer under `~/.config/murtaugh/automations/`.
+
+Every digest row offers up to four verbs, and the split between them is the
+point: **Ask for Code Review** and **Ask for SME Assistance** tag a person and
+stop, while **Run Code Review** and **Run AI Assistance** start a harness on this
+machine that does the work. Each is optional, and an option whose setting is
+absent is not rendered at all.
 
 Riggs is always the callee. Murtaugh keeps owning the schedule and the Slack
 gateway, and invokes Riggs as a CLI (from a job or a workflow rule) or over MCP.
@@ -26,11 +32,15 @@ riggs install
 ```
 
 It asks where the config should live, collects the credentials without echoing
-them, sends a **real** test card for a **real** pull request to your Slack DM —
-failing the install if that does not work — and then, if Murtaugh is installed,
-registers the scheduled jobs through `murtaugh cfg job set`. Jobs whose tool
-this build does not yet expose are skipped and reported rather than installed
-to fail on a schedule.
+them, asks who assists with pull requests, who assists with tickets and which
+command runs an AI review, sends a **real** test card for a **real** pull request
+to your Slack DM — failing the install if that does not work — and then, if
+Murtaugh is installed, registers the scheduled jobs through `murtaugh cfg job
+set`. Jobs whose tool this build does not yet expose are skipped and reported
+rather than installed to fail on a schedule.
+
+Every one of those three answers may be left empty, which turns the corresponding
+option off rather than falling back to something.
 
 It needs a terminal, and will refuse to run without one rather than echo a
 pasted token into your scrollback.
@@ -53,8 +63,18 @@ Check what's live:
 riggs capabilities
 ```
 
-It names the exact setting or binary behind anything that is disabled. A
-missing credential disables a feature; it never stops the binary.
+It names the exact setting or binary behind anything that is disabled, including
+each of the four row actions and the AI harness it would shell out to. A missing
+credential disables a feature; it never stops the binary.
+
+## Prompts
+
+The four wordings Riggs sends on your behalf — the two asks and the two harness
+instructions — are editable from the **App Home tab**, admin only. Each has its
+own row with an Edit control, and a Reset that drops the override so the built-in
+default applies again. An edit is written back to `config.yaml` in place, keeping
+its comments and its `${ENV}` references, and takes effect on the next click
+rather than the next restart.
 
 ## Use
 
