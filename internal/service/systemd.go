@@ -40,13 +40,22 @@ type systemdManager struct {
 // systemctl call fails with a message about D-Bus that explains nothing.
 func newSystemd(runner Runner, opts Options) (Manager, error) {
 	m := &systemdManager{runner: runner, opts: opts}
-	if _, err := os.Stat("/run/systemd/system"); err != nil {
+	if !systemdIsPID1() {
 		return nil, fmt.Errorf(
 			"this machine is not running systemd, so there is nothing here to install into.\n"+
 				"Run `%s daemon` under whatever supervisor you do have — it needs to stay up, "+
 				"restart on exit, and keep the PATH it was started with.", opts.BinaryPath)
 	}
 	return m, nil
+}
+
+// systemdIsPID1 reports whether systemd is actually running this machine.
+//
+// A package variable so the refusal above can be tested on a developer's laptop,
+// which is the one place it will never happen naturally.
+var systemdIsPID1 = func() bool {
+	_, err := os.Stat("/run/systemd/system")
+	return err == nil
 }
 
 // Name is the supervisor.
