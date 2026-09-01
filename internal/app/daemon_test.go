@@ -1,8 +1,13 @@
 package app
 
 import (
+	"io"
+	"log/slog"
+	"sort"
 	"testing"
 
+	"github.com/miere/riggs-mcp/internal/apphome"
+	"github.com/miere/riggs-mcp/internal/blockkit"
 	"github.com/miere/riggs-mcp/internal/config"
 	"github.com/miere/riggs-mcp/internal/daemon"
 	"github.com/miere/riggs-mcp/internal/pullrequest"
@@ -92,3 +97,71 @@ func TestDaemonProfileRejectsBadArguments(t *testing.T) {
 		}
 	}
 }
+
+// The two options that RUN are registered only when there is a harness to run.
+// A route with no control can only ever answer a click on a digest posted
+// before the harness was removed.
+func TestTheRunRoutesFollowTheHarness(t *testing.T) {
+	off := &Application{cfg: &config.Config{}}
+	router := daemon.NewRouter()
+	off.registerRunInteractions(router, slack.Credentials{}, quietLogger())
+	if got := router.Routes(); len(got) != 0 {
+		t.Fatalf("routes = %v, want none with no ai.command", got)
+	}
+
+	on := &Application{cfg: &config.Config{AI: config.AI{Command: "claude"}}}
+	router = daemon.NewRouter()
+	on.registerRunInteractions(router, slack.Credentials{}, quietLogger())
+
+	want := []string{
+		ticket.BulkActionID + "/" + ticket.IntentRunAssist,
+		pullrequest.BulkActionID + "/" + pullrequest.IntentRunReview,
+	}
+	assertRoutes(t, router.Routes(), want)
+}
+
+// The Home tab's controls, including the prompt editor and the modal coming
+// back. A submission is in the same table as a click because it is the same
+// kind of thing: the callback_id is the control, the private_metadata the item.
+func TestDaemonRegistersTheHomeControls(t *testing.T) {
+	a := &Application{cfg: &config.Config{}}
+	router := daemon.NewRouter()
+	a.registerHomeInteractions(router, apphome.New(apphome.Deps{Logger: quietLogger()}))
+
+	want := []string{
+		blockkit.HomeMenuActionID + "/" + blockkit.HomeRestartIntent,
+		blockkit.HomePromptActionID + "/" + blockkit.HomePromptEditIntent,
+		blockkit.HomePromptActionID + "/" + blockkit.HomePromptResetIntent,
+		blockkit.HomeUpdateActionID + "/" + blockkit.HomeUpdateIntent,
+		blockkit.PromptModalCallbackID + "/" + slack.ViewSubmitIntent,
+	}
+	assertRoutes(t, router.Routes(), want)
+}
+
+// Which prompt a click is about rides in the row's block_id, namespaced so it
+// is distinguishable from any other block that might carry an id.
+func TestPromptIDStripsTheNamespace(t *testing.T) {
+	if got := promptID(blockkit.HomePromptBlockPrefix + "ai_review"); got != "ai_review" {
+		t.Fatalf("promptID = %q", got)
+	}
+	// A modal's private_metadata carries the bare id and must survive untouched.
+	if got := promptID("ai_review"); got != "ai_review" {
+		t.Fatalf("promptID = %q", got)
+	}
+}
+
+// assertRoutes compares a router's registered pairs against an expected set.
+func assertRoutes(t *testing.T, got, want []string) {
+	t.Helper()
+	sort.Strings(want)
+	if len(got) != len(want) {
+		t.Fatalf("routes = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("routes = %v, want %v", got, want)
+		}
+	}
+}
+
+func quietLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }

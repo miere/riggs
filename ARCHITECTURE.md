@@ -221,10 +221,14 @@ The names are the ones Murtaugh's `.env` already uses, so nothing needs
 re-provisioning at cutover.
 
 GitHub credentials come from the authenticated `gh` CLI — Riggs never stores a
-GitHub token of its own — but Riggs owns the HTTP calls (§8). Card summaries
-shell out to `claude -p`. Both `gh` and `claude` are reached through an
-injected runner, never a raw `exec.Command` at the call site, so every loop
-that touches them is fakeable.
+GitHub token of its own — but Riggs owns the HTTP calls (§8). The AI harness
+behind the two Run options (§7bb) is shelled out to in full, and holds its own
+auth the same way. Both are reached through an injected runner, never a raw
+`exec.Command` at the call site, so every loop that touches them is fakeable.
+
+The harness is configured, not discovered: there is no default command, because
+a machine quietly shelling out to whatever happened to be on its PATH is worse
+than one that offers no Run option at all.
 
 Rules:
 
@@ -338,21 +342,115 @@ Slack ──ws──► SocketListener ──► Daemon ──► Router ──�
 
 ## 7bb. The digests' actions
 
-Two digests, one pattern. On the pull-request digest, three options render on a
-live row and two are answered by the daemon:
+Two digests, one pattern. On the pull-request digest, four options can render on
+a live row and three are answered by the daemon:
 
 | Option | Intent | Handler |
 | --- | --- | --- |
 | ⧉ Open on Browser | `open_browser` | none — the option carries a `url` and Slack opens it |
-| ✎ Ask for Code Review | `ask_review` | `pullrequest.Asker` |
+| ✎ Ask for Code Review | `ask_review` | `pullrequest.Asker` — tags a person, starts nothing |
+| ▸ Run Code Review | `run_review` | `ai.Runner` — runs the local harness |
 | ✓ Approve and Merge | `approve_merge` | `pullrequest.Approver`, rebase-only (§8) |
 
-On the ticket digest, two:
+On the ticket digest, three:
 
 | Option | Intent | Handler |
 | --- | --- | --- |
 | ⧉ Open on Browser | `open_browser` | none — same as above |
-| ✎ Ask for AI Assistance | `ask_assist` | `ticket.Asker` |
+| ✎ Ask for SME Assistance | `ask_assist` | `ticket.Asker` — tags a person, starts nothing |
+| ▸ Run AI Assistance | `run_assist` | `ai.Runner` — runs the local harness |
+
+### Asking is not running
+
+The two are separate verbs, and for a long time they were one option that read
+as the wrong one. "Ask for AI Assistance" tagged a colleague and started nothing:
+everyone who read the label expected an agent to pick the ticket up, and what
+actually happened was that a person got mentioned in a thread. The label was the
+bug. The pull-request side had the same shape with an honest name — "Ask for
+Code Review" does ask — but no way to do the work either.
+
+So each pair is now two options, and both halves of each pair are optional:
+
+- **Ask** needs somebody to ask (`review-request.user-id`, `sme-assistance.user-id`).
+- **Run** needs a harness to run (`ai.command`).
+
+**Neither has a fallback.** The asks used to fall back to the admin, which was
+defensible while asking was the only verb on the row — asking yourself at least
+reaches somebody. It is not defensible beside Run: a menu whose first entry
+quietly means "send myself a card" reads as a bug next to one that does the work.
+An unanswered installer question turns the option off, which is also the only
+reading under which the two are honestly distinct.
+
+**The option is not rendered when its setting is absent**, which is the rule this
+surface applies everywhere else — a control that cannot act is worse than one
+that was never there, because it invites a click and then explains why it will
+not work. `riggs capabilities` reports all four and names the setting behind each.
+
+**`RowActions` is passed to the digest engine AND to the completer.** The
+completer redraws a digest from the ledger after an approval; given a different
+answer about what may be offered, it would silently add or remove options from
+every row in a message nobody touched.
+
+**The intent token `ask_assist` keeps its original spelling** even though its
+label no longer says "AI". Digests already sitting in Slack carry it in their
+option values, and renaming it would turn every one of those menus into a button
+the router does not answer.
+
+### Running one
+
+`internal/ai` is the harness: a configured command line, a working directory, a
+timeout, and the process seam every external binary in this codebase goes behind
+(§11). The package name is the one Phase 21 retired — that `internal/ai` shelled
+out to `claude -p` for a one-paragraph card summary, and was removed because a
+summary is not worth 8.6 seconds on the click path, a hard dependency on a local
+binary, and output that changed between renders (§7d). None of those objections
+survives here: this **is** the work, nothing is waiting on a render, and a
+machine without the binary is told the option is off rather than shown one that
+cannot fire.
+
+- **A known harness gets its own prompt flag; anything else is handed the prompt
+  as its first argument.** The list has one entry, `claude`, and is short on
+  purpose: guessing another tool's calling convention from its name is how a
+  review prompt ends up being read as a filename. The program is matched on its
+  base name, so `/opt/homebrew/bin/claude` is the same harness as `claude`.
+- **The command is split on whitespace, with no quote handling.** An invocation
+  needing more than that wants a wrapper script, which is one line and legible
+  from the outside — unlike a quoting dialect invented here.
+- **The working directory is asked for, never assumed.** It is the setting that
+  decides whether the feature works at all: Claude Code reads the project it is
+  standing in — its CLAUDE.md, its permissions, its git remote — and a launch
+  agent inherits a working directory of `/`. A harness started in the wrong place
+  is not slightly worse; it is a review of nothing.
+- **The prompt's subject is guaranteed, the wording is not.** `{ref}`/`{key}` and
+  `{url}` place them; a prompt naming neither still gets both appended on their
+  own line. This is the same guarantee `internal/ask` makes about its two
+  mentions and it is made for the same reason: a wording edited to drop the
+  reference fails *silently*. The harness still starts, still runs, and still
+  reports success — having reviewed whatever it found in the working directory.
+- **One status line, updated in place.** Posted before the harness starts,
+  because a run takes minutes and an option that shows nothing for four of them
+  reads as one that did not work. Rewritten with the outcome when it finishes.
+  Three messages saying "started", "still going", "finished" would bury the
+  digest under its own progress report.
+- **A failure quotes the tail of the output**, last twelve lines and 1200
+  characters, fenced. The end rather than the beginning: a harness that failed
+  says why last, after however much progress it narrated first.
+- **The run is bounded** (`ai.timeout`, default 15m). This runs under a daemon
+  nobody is watching, where a hung harness is indistinguishable from one thinking
+  hard right up until the machine runs out of them. A timeout and a failure get
+  different words, because one is a review that went wrong and the other may
+  still have been going.
+- **The same item cannot run twice at once.** That is a double-click, and the
+  second run is pure waste that would also race the first to comment. Different
+  items run concurrently, and there is deliberately **no global cap**: these are
+  started by hand, one click at a time, and a limit that silently refused the
+  second is a worse failure than two processes on a machine that can afford them.
+  The claim lives in the runner, which is therefore the one handler built once
+  and held rather than per click — a runner rebuilt per click could not tell that
+  the same pull request is already being reviewed.
+- **Nothing about the run reaches GitHub or Jira from Riggs.** The harness's own
+  output goes wherever the prompt sent it, under the admin's own credentials, and
+  the Common Rule applies to the prompt as it does to everything else.
 
 - **Both action ids are distinct** (`pr_bulk_overflow`, `jira_bulk_overflow`), so
   one dispatch table answers both without either digest having to know the
@@ -398,9 +496,10 @@ On the ticket digest, two:
 
 ### The ask
 
-Both digests can hand one item to somebody else, and both do it the same way:
-post a card about the thing, then tag a person in its thread. `internal/ask`
-owns the one part that must not differ.
+Both digests can hand one item to a person, and both do it the same way: post a
+card about the thing, then tag them in its thread. `internal/ask` owns the one
+part that must not differ. Neither of these starts anything — that is the pair
+of Run options above, and the whole reason they are separate.
 
 The wording is configuration. The two mentions in it are not:
 
@@ -416,9 +515,9 @@ click carried no user, because an empty mention reaches Slack as a literal
 `<@>`.
 
 The ticket ask carries **no verb at all** — only the link. A review request asks
-somebody to look at code that exists and offers Approve; this asks somebody
-whether work that does not exist yet is ready to be picked up, and there is
-nothing on that card for them to press.
+somebody to look at code that exists and offers Approve; this asks a
+subject-matter expert whether work that does not exist yet is ready to be picked
+up, and there is nothing on that card for them to press.
 
 ### Glyphs
 
@@ -555,9 +654,9 @@ body and neither says anything.
 rather than about somebody's pull requests, and `internal/updates` is what makes
 its single control mean anything.
 
-The view, top to bottom: the portrait, the running version with a controls
-menu beside it, and then — behind a divider — the latest release's notes with an
-**Update** button beside them.
+The view, top to bottom: the portrait, the running version with a controls menu
+beside it, then — behind a divider — the four editable prompts, and then, behind
+another, the latest release's notes with an **Update** button beside them.
 
 ### The audience split is the design
 
@@ -660,6 +759,105 @@ The menu is `app_menu` rather than a second `home_*` id because it is Riggs'
 own controls, as opposed to the Update button, which belongs to a release. New
 operations go in here as options; a bare token value each, so the routing table
 keeps matching them exactly.
+
+### The prompts
+
+Riggs sends four pieces of prose on the admin's behalf: the wording of each ask
+(§7bb) and the instruction handed to the harness for each Run. All four are
+editable here, admin-only like everything else past the divider.
+
+They live on the Home tab rather than in the config file alone because a prompt
+is judged by its output. The install is not when anybody knows what it should
+say; the moment after reading a review that missed the point is. Making that a
+file edit and a daemon restart means it does not happen.
+
+- **One row per prompt, each with its own overflow.** Which prompt a click is
+  about rides in the row's `block_id`, exactly as a pull request rides in a
+  digest row's — an overflow click reports its own block_id and not its
+  siblings' values (§7b), so it is the only place a per-row identity can travel.
+  The options are bare tokens (`edit`, `reset`) that the router matches exactly.
+- **Reset is only drawn on a prompt that has an override.** There is nothing to
+  reset otherwise, and an option that does nothing is the mistake this surface
+  keeps not making. A prompt running on its default says so, because a default
+  and an override that happens to match it are otherwise indistinguishable —
+  and only one of them follows a later change to the default.
+- **The row shows the wording in force**, cut at 220 runes and escaped like a
+  digest row: a prompt is prose somebody typed, and an `&` in it would re-open
+  the row's own bold run and garble everything after it.
+- **The registry is `config.Prompts`**, not a table in this package. A second
+  description of the config — ids, labels, defaults, getters, YAML paths — is
+  one that has to be kept in step, and nothing would warn when it drifted.
+
+### The editor
+
+`views.open` is the one modal Riggs opens, and a view submission is the one
+inbound callback that is not a click. Both go through the machinery that already
+exists rather than beside it:
+
+- **A submission is routed by the same table.** Its callback_id becomes the
+  `action_id` and its `private_metadata` becomes the item, which is exactly the
+  split a click already makes. It is the same kind of thing — a control Riggs
+  rendered, operated by a human, delivered to the app that drew it — and that it
+  arrived from a modal rather than a message changes where it came from, not what
+  dispatching it means. `internal/daemon` needed no new event path at all.
+- **The prompt id is in `private_metadata`, not the callback_id.** The router
+  matches the callback_id exactly, and a table cannot match a value that varies
+  per prompt — the same constraint that keeps every option value a bare token.
+- **The trigger id lives about three seconds.** The edit handler opens the modal
+  and does nothing else first. That is also why the socket listener acknowledges
+  before it dispatches (§7b): a modal opened after a ledger read is a modal that
+  does not open, and the only symptom is `expired_trigger_id` in a log nobody is
+  reading.
+- **The input is required**, which is Slack's default and is left that way. An
+  empty submission would have to mean either "reset" or "a prompt that says
+  nothing", and Reset is already an option on the row — so Slack refuses the
+  empty box before it reaches the handler, and the handler refuses it again.
+- **A submission has no channel**, so a failure is DMed rather than posted: the
+  click reporter reads an empty channel as "this person, privately", which for a
+  modal is the only place left to reach them.
+
+### Writing a prompt back
+
+`config.SetPrompt` is the only path that modifies the config file, and both of
+its rules come from the file it is editing.
+
+**Nothing is marshalled.** The file holds `${ENV}` *references* and the loaded
+`Config` holds their expanded values, so writing the struct back over the file
+would put live bot tokens into it, in plain text, as a side effect of somebody
+rewording a prompt.
+
+**The edit is textual, guided by the parser.** A `yaml.Node` round-trip keeps the
+comments but silently drops the blank lines between sections, reflowing a
+carefully laid-out file a little further on every save. So the parser locates the
+value and its `Line`/`Column` drive a replacement of those lines alone: the
+touched span changes and the rest of the file is byte-identical. An entry's
+extent is its own line plus every following line indented deeper than its key,
+which is the extent of a block scalar, a nested mapping or a wrapped plain scalar
+without having to tell them apart.
+
+The rest follows from that:
+
+- **The value is always double-quoted and always on one line.** A prompt can hold
+  a colon, a leading brace, a `#`, or a newline from the multiline input, and
+  every one of those changes what a plain scalar means. Quoting unconditionally
+  means the writer never has to be right about which of them needed it.
+- **Reset deletes the key** rather than writing the default's own words, so
+  "never overridden" stays distinguishable from "overridden to whatever the
+  default said that day" — and a later change to the default reaches the machine.
+- **A missing key is inserted as the section's first**, not appended after its
+  last: appending would have to decide whether a trailing comment block belongs
+  to this section or heads the next one, and that is not decidable from the text.
+  A missing section is appended whole; a section declared with nothing under it
+  has its own line rewritten, because a second `ai:` would make the file
+  unloadable.
+- **The result is re-parsed before it is kept**, then written through a temporary
+  file in the same directory at mode 0600 and renamed. A bug in the surgery is
+  caught here rather than at the next start-up, by which time the daemon has
+  exited and the file it cannot read is the only copy.
+- **The in-memory value is updated only after the file takes it**, so the daemon
+  never acts on a prompt that vanishes at the next restart. That in-memory write
+  is why `Config` has a mutex: those four fields are the only ones that change
+  after load, and it covers them and nothing else.
 
 ### The Update button
 
@@ -1063,8 +1261,9 @@ Rules:
 
 ## 10. Configuration file
 
-`internal/config` owns the admin identity and the Slack profiles. It is loaded
-once, in the composition root.
+`internal/config` owns the admin identity, the Slack profiles, the two ask
+sections and the AI harness. It is loaded once, in the composition root — and,
+uniquely among them, its four prompts can be written back (§7e).
 
 Precedence, first hit wins:
 
@@ -1087,15 +1286,36 @@ Rules:
 - Structural problems are reported **all at once**, so fixing a config takes
   one edit rather than one round-trip per mistake.
 - An empty token is a capability gap, not a config error (§6).
-- **`review-request` and `ai-assistance` are independent, and neither is ever
+- **`review-request` and `sme-assistance` are independent, and neither is ever
   defaulted from the other.** They are the same three settings — channel, user,
   prompt — for two actions that look identical and answer different questions:
-  one asks a human to review code that exists, the other asks somebody whether
-  work that does not exist yet is ready to be picked up. In practice they are
-  pointed at different channels and different people, so a shared setting would
-  mean changing one silently moved the other. An unset value falls back to the
-  admin, never sideways. The installer asks for both, separately, for the same
-  reason.
+  one asks a human to review code that exists, the other asks a subject-matter
+  expert whether work that does not exist yet is ready to be picked up. In
+  practice they are pointed at different channels and different people, so a
+  shared setting would mean changing one silently moved the other. The installer
+  asks for both, separately, for the same reason.
+- **An unset user disables its action; it does not fall back to the admin**
+  (§7bb).
+- **`ai-assistance` is the retired name for `sme-assistance`,** and is parsed as
+  an alias rather than refused. Unlike `admin.github-login` — which was refused
+  by name because leaving it in place would silently steer the review queue at
+  somebody else — this key means exactly what it always meant, so refusing to
+  boot over the spelling would cost a working install for nothing. `riggs
+  capabilities` reports the deprecation. A file carrying both spellings keeps the
+  new one's values field by field and fills only what it left blank: the other
+  reading would let a forgotten old key silently override a deliberate new one.
+- **`ai` is one command and two prompts.** One command because it is one harness;
+  two prompts because reviewing code that exists and scoping work that does not
+  are different instructions, and that is the same reason the two sections above
+  are separate. Its `timeout` is validated at load — `20` parses as nothing,
+  falls back to fifteen minutes, and the operator who wrote it believes runs are
+  capped at twenty.
+- **`ai.command` and `ai.workdir` are `${ENV}`-expanded; the prompts are not.** A
+  prompt is prose the admin wrote, and a `$` in it is a dollar sign.
+- **The four prompts are the only fields that change after load**, written back
+  in place by the App Home tab (§7e). They are also the only ones behind the
+  `Config` mutex; everything else is written once during `Load` and read for the
+  life of the process.
 
 ## 11. Testing conventions
 
@@ -1168,6 +1388,23 @@ Rules:
   buttons will not respond until one exists.
 - **The Jira tenant is asked for, never guessed** (§13's removal of the default).
   A config written without it leaves the `jira.*` tools unregistered.
+- **Three questions decide the row actions** (§7bb): who assists with pull
+  requests, who assists with tickets, and which command runs an AI review. Each
+  may be left empty, which turns that option off — there is no fallback, and an
+  empty answer writes no section rather than an empty one for somebody to fill in
+  and wonder why nothing changed. The two people are resolved to Slack ids here,
+  for the reason the reviewer always was: a handle that matches nobody would
+  otherwise not be discovered until someone pressed the button.
+- **The harness invocation is echoed back** (`will run: claude -p <prompt>`), and
+  its binary is probed on PATH. The difference between a known harness and a
+  custom one is invisible in the answer just typed and decides whether the prompt
+  arrives behind a flag or as a bare argument.
+- **The working directory is asked for**, defaulting to `$HOME`. It is what makes
+  the feature work at all (§7bb), and a directory that does not exist yet is
+  noted rather than refused — it may well be created before the first click.
+- **A prompt left at its default is not written.** An answer equal to the default
+  is stored as empty, so a later change to the default reaches the machine
+  instead of being pinned to whatever it said the day of the install.
 
 ### 12c. Decommissioning the card job
 
@@ -1305,6 +1542,7 @@ one *would* live at still decides, which is the state a fresh machine and
 | 25 | Retire the idle nudge (§8c) | done |
 | 26 | The Home tab's controls menu: Restart (§7e) | done |
 | 27 | The ticket digest: rotation extracted to `internal/bulk`, `jira.tickets.bulk`, Ask for AI Assistance (§8d) | done |
+| 28 | Asking split from running: `internal/ai` revived, `sme-assistance`, editable prompts on the Home tab (§7bb, §7e) | done |
 
 ## 13b. Cutover
 
@@ -1330,6 +1568,34 @@ Rollback: the previous job and rule definitions are captured under
 `/tmp/riggs-cutover-backup/` and can be restored with the same commands.
 
 ## 14. Change log
+
+- **unreleased** — Phase 28. Asking somebody and doing the work stop being the
+  same option (§7bb). "Ask for AI Assistance" tagged a colleague and started
+  nothing, which is the one thing its label promised; it is now "Ask for SME
+  Assistance", and **Run AI Assistance** beside it starts a local harness that
+  actually does it. The pull-request row gains the same pair. `internal/ai`
+  returns — the package Phase 21 retired for summarising cards, now running the
+  work itself — with the process seam, the prompt-subject guarantee, the in-place
+  status line and the per-item claim.
+
+  Every one of the four verbs is now optional and none of them falls back to the
+  admin: an unanswered installer question turns the option off and it is not
+  rendered. `RowActions` carries that decision to the digest engine and to the
+  completer, so a redraw cannot disagree with the pass that drew it.
+
+  The config gains `ai` (one command, two prompts, a working directory and a
+  bound) and renames `ai-assistance` to `sme-assistance`, keeping the old key as
+  a working alias — that section always meant a person, so refusing to boot over
+  the spelling would cost a working install for nothing. `riggs capabilities`
+  reports all four actions, the harness binary, and the deprecation.
+
+  The four prompts become editable from the App Home tab (§7e), which brings
+  Riggs' first modal and its first view submission — routed by the *same* table
+  as a click, since the callback_id is the control and the private_metadata is
+  the item. `config.SetPrompt` writes one value back into the YAML by textual
+  surgery guided by the parser: a marshal would put the expanded `${ENV}` tokens
+  on disk in plain text, and a `yaml.Node` round-trip would quietly eat the blank
+  lines out of a file whose comments are the reason it can be fixed.
 
 - **unreleased** — Phase 27. The ticket queue becomes a bulk digest (§8d).
   The rotation moves out of `internal/pullrequest` into `internal/bulk` (§9b),

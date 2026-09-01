@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/miere/riggs-mcp/internal/ai"
 	"github.com/miere/riggs-mcp/internal/blockkit"
 	"github.com/miere/riggs-mcp/internal/config"
 	"github.com/miere/riggs-mcp/internal/github"
@@ -233,15 +234,24 @@ func (i *Installer) gather(ctx context.Context) (*config.Config, error) {
 	if err := i.gatherReviewRequest(ctx, cfg); err != nil {
 		return nil, err
 	}
-	if err := i.gatherAIAssistance(ctx, cfg); err != nil {
+	if err := i.gatherSMEAssistance(ctx, cfg); err != nil {
+		return nil, err
+	}
+	if err := i.gatherAI(cfg); err != nil {
 		return nil, err
 	}
 
 	return cfg, nil
 }
 
-// gatherReviewRequest collects where "Ask for Code Review" sends its card and
-// who it tags.
+// gatherReviewRequest collects who assists with pull requests: where "Ask for
+// Code Review" sends its card, and whom it tags.
+//
+// An empty answer DISABLES the option rather than falling back to the admin.
+// The fallback was defensible while this was the only verb on the row — asking
+// yourself at least reaches somebody. It is not defensible beside "Run Code
+// Review": a menu whose first entry quietly means "send myself a card" reads as
+// a bug next to one that does the work.
 //
 // The reviewer is RESOLVED here, so the written config holds an id. A handle
 // would otherwise be resolved on every click, and — worse — a handle that
@@ -249,80 +259,172 @@ func (i *Installer) gather(ctx context.Context) (*config.Config, error) {
 // no message arrived.
 func (i *Installer) gatherReviewRequest(ctx context.Context, cfg *config.Config) error {
 	i.p.Say("")
-	i.p.Say("\"Ask for Code Review\" posts a card and tags a reviewer under it.")
-	i.p.Say("Leave the channel empty to DM the reviewer instead.")
+	i.p.Say("Who should assist with PULL REQUESTS?")
+	i.p.Say("\"Ask for Code Review\" posts a card and tags them under it. It asks a")
+	i.p.Say("person and stops — nothing is delegated and no review is started.")
+	i.p.Say("Leave it empty to leave the option off the menu entirely.")
 
-	channel, err := i.p.Ask("  Channel id", "")
+	reviewer, err := i.p.Ask("  Reviewer (@handle or Slack id; empty = disabled)", "")
 	if err != nil {
 		return err
 	}
-	reviewer, err := i.p.Ask("  Reviewer (@handle or Slack id; empty = you)", "")
+	if strings.TrimSpace(reviewer) == "" {
+		i.p.Say("    disabled: rows will not offer \"Ask for Code Review\".")
+		return nil
+	}
+	i.p.Say("  Leave the channel empty to DM the reviewer instead.")
+	channel, err := i.p.Ask("  Channel id", "")
 	if err != nil {
 		return err
 	}
 	cfg.ReviewRequest = config.ReviewRequest{Channel: strings.TrimSpace(channel)}
-
-	ref := slack.ParseUserRef(reviewer)
-	switch {
-	case ref.IsID():
-		cfg.ReviewRequest.UserID = ref.ID
-	case ref.Handle != "":
-		id, err := i.resolveUser(ctx, cfg, ref.Handle)
-		if err != nil {
-			// Not fatal: the ask is one action, and refusing to finish an
-			// install over it would be out of proportion. But it is said out
-			// loud, because a handle left in the config resolves on every click
-			// and fails on every click if it is wrong.
-			i.p.Say("    could not resolve @%s: %v", ref.Handle, err)
-			i.p.Say("    storing the handle as written; it is resolved on each ask.")
-			cfg.ReviewRequest.UserID = reviewer
-			return nil
-		}
-		i.p.Say("    @%s is %s", ref.Handle, id)
-		cfg.ReviewRequest.UserID = id
-	}
+	cfg.ReviewRequest.UserID = i.resolveTagged(ctx, cfg, reviewer)
 	return nil
 }
 
-// gatherAIAssistance collects where "Ask for AI Assistance" sends its card and
-// who it tags.
+// gatherSMEAssistance collects who assists with tickets.
 //
 // Asked separately from the review request, and never defaulted from it. The
 // two look identical and answer different questions — one asks a human to
-// review code that exists, the other asks somebody to look at work that does
-// not — so they end up pointed at different channels and different people, and
-// a shared answer would mean changing one silently moved the other.
-func (i *Installer) gatherAIAssistance(ctx context.Context, cfg *config.Config) error {
+// review code that exists, the other asks a subject-matter expert whether work
+// that does not exist yet is worth picking up — so they end up pointed at
+// different channels and different people, and a shared answer would mean
+// changing one silently moved the other.
+func (i *Installer) gatherSMEAssistance(ctx context.Context, cfg *config.Config) error {
 	i.p.Say("")
-	i.p.Say("\"Ask for AI Assistance\" does the same for a Jira ticket, and is")
-	i.p.Say("configured separately. Leave the channel empty to DM the person instead.")
+	i.p.Say("Who should assist with TICKETS?")
+	i.p.Say("\"Ask for SME Assistance\" does the same for a Jira ticket: it tags a")
+	i.p.Say("person, and starts nothing. Leave it empty to leave the option off.")
 
+	who, err := i.p.Ask("  Person to tag (@handle or Slack id; empty = disabled)", "")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(who) == "" {
+		i.p.Say("    disabled: rows will not offer \"Ask for SME Assistance\".")
+		return nil
+	}
+	i.p.Say("  Leave the channel empty to DM them instead.")
 	channel, err := i.p.Ask("  Channel id", "")
 	if err != nil {
 		return err
 	}
-	who, err := i.p.Ask("  Person to tag (@handle or Slack id; empty = you)", "")
+	cfg.SMEAssistance = config.SMEAssistance{Channel: strings.TrimSpace(channel)}
+	cfg.SMEAssistance.UserID = i.resolveTagged(ctx, cfg, who)
+	return nil
+}
+
+// gatherAI collects the local harness that backs "Run Code Review" and "Run AI
+// Assistance" — the two options that do the work rather than asking somebody to.
+//
+// One command serves both, because it is one harness; the prompts are asked for
+// separately, because reviewing code that exists and scoping work that does not
+// are different instructions. Both prompts can be left at their defaults here
+// and reworded later from the App Home tab (§7e), which is where they will
+// actually be tuned: a prompt is judged by its output, and there is none yet.
+func (i *Installer) gatherAI(cfg *config.Config) error {
+	i.p.Say("")
+	i.p.Say("Which command runs an AI review on this machine?")
+	i.p.Say("It runs HERE, under Riggs, and reports back in the digest's thread.")
+	i.p.Say("A known harness gets its own prompt flag; anything else is handed the")
+	i.p.Say("prompt as its first argument. Empty leaves both \"Run …\" options off.")
+
+	command, err := i.p.Ask("  Command (e.g. claude; empty = disabled)", "")
 	if err != nil {
 		return err
 	}
-	cfg.AIAssistance = config.AIAssistance{Channel: strings.TrimSpace(channel)}
+	command = strings.TrimSpace(command)
+	if command == "" {
+		i.p.Say("    disabled: rows will not offer \"Run Code Review\" or \"Run AI Assistance\".")
+		return nil
+	}
+	cfg.AI = config.AI{Command: command}
+	i.describeHarness(command)
 
-	ref := slack.ParseUserRef(who)
-	switch {
-	case ref.IsID():
-		cfg.AIAssistance.UserID = ref.ID
-	case ref.Handle != "":
-		id, err := i.resolveUser(ctx, cfg, ref.Handle)
-		if err != nil {
-			i.p.Say("    could not resolve @%s: %v", ref.Handle, err)
-			i.p.Say("    storing the handle as written; it is resolved on each ask.")
-			cfg.AIAssistance.UserID = who
-			return nil
+	i.p.Say("  Where should it run? Claude Code reads the project it is standing in,")
+	i.p.Say("  and a launch agent inherits no working directory worth having.")
+	workdir, err := i.p.Ask("  Working directory", i.getenv("HOME"))
+	if err != nil {
+		return err
+	}
+	cfg.AI.WorkDir = strings.TrimSpace(expandHome(workdir))
+	if cfg.AI.WorkDir != "" {
+		if _, err := i.stat(cfg.AI.WorkDir); err != nil {
+			// Said, not refused. The directory may be created before the first
+			// click, and an install that aborts over it is out of proportion.
+			i.p.Say("    note: %s does not exist yet.", cfg.AI.WorkDir)
 		}
-		i.p.Say("    @%s is %s", ref.Handle, id)
-		cfg.AIAssistance.UserID = id
+	}
+
+	cfg.AI.ReviewPrompt, err = i.gatherPrompt("pull request", config.DefaultAIReviewPrompt)
+	if err != nil {
+		return err
+	}
+	cfg.AI.AssistPrompt, err = i.gatherPrompt("ticket", config.DefaultAIAssistPrompt)
+	if err != nil {
+		return err
 	}
 	return nil
+}
+
+// describeHarness says how the configured command will actually be invoked.
+//
+// Worth a line: the difference between a known harness and a custom one is
+// invisible in the answer just typed, and it decides whether the prompt arrives
+// behind a flag or as a bare argument. It also probes PATH, because a
+// misspelled binary otherwise goes unnoticed until somebody clicks.
+func (i *Installer) describeHarness(command string) {
+	harness := ai.New(command, "", 0)
+	argv := harness.Argv("<prompt>")
+	i.p.Say("    will run: %s", strings.Join(argv, " "))
+	if _, err := i.lookPath(harness.Program()); err != nil {
+		i.p.Say("    note: %s is not on PATH; the options are rendered but every run will fail.",
+			harness.Program())
+	}
+}
+
+// gatherPrompt offers one harness prompt for override.
+//
+// An answer equal to the default is stored as EMPTY, not as the default's own
+// words. That keeps "never overridden" distinguishable from "overridden to
+// whatever the default said the day I installed", and means a later change to
+// the default reaches this machine.
+func (i *Installer) gatherPrompt(noun, def string) (string, error) {
+	i.p.Say("  Default %s prompt:", noun)
+	i.p.Say("    %s", def)
+	answer, err := i.p.Ask("  Override it? (empty = keep the default)", "")
+	if err != nil {
+		return "", err
+	}
+	answer = strings.TrimSpace(answer)
+	if answer == "" || answer == def {
+		return "", nil
+	}
+	return answer, nil
+}
+
+// resolveTagged normalises a typed reviewer or expert into a Slack id.
+//
+// A handle that cannot be resolved is stored AS WRITTEN rather than failing the
+// install: the ask is one action, and refusing to finish over it would be out
+// of proportion. It is said out loud, because a handle left in the config is
+// resolved on every click and fails on every click if it is wrong.
+func (i *Installer) resolveTagged(ctx context.Context, cfg *config.Config, typed string) string {
+	ref := slack.ParseUserRef(typed)
+	switch {
+	case ref.IsID():
+		return ref.ID
+	case ref.Handle == "":
+		return strings.TrimSpace(typed)
+	}
+	id, err := i.resolveUser(ctx, cfg, ref.Handle)
+	if err != nil {
+		i.p.Say("    could not resolve @%s: %v", ref.Handle, err)
+		i.p.Say("    storing the handle as written; it is resolved on each ask.")
+		return strings.TrimSpace(typed)
+	}
+	i.p.Say("    @%s is %s", ref.Handle, id)
+	return id
 }
 
 // resolveUser looks a handle up through the bot token just collected.
@@ -390,22 +492,57 @@ func render(cfg *config.Config) string {
 	}
 	b.WriteString("\n")
 
-	if cfg.AIAssistance.Channel != "" || cfg.AIAssistance.UserID != "" {
-		b.WriteString("ai-assistance:\n")
-		if cfg.AIAssistance.Channel != "" {
-			fmt.Fprintf(&b, "  channel: %s\n", yamlValue(cfg.AIAssistance.Channel))
-		}
-		if cfg.AIAssistance.UserID != "" {
-			fmt.Fprintf(&b, "  user-id: %s\n", yamlValue(cfg.AIAssistance.UserID))
-		}
-	}
-	if cfg.ReviewRequest.Channel != "" || cfg.ReviewRequest.UserID != "" {
+	// Written only when configured. An empty section is not the same as an
+	// absent one here: absent means the option is off, and a file full of empty
+	// keys invites somebody to fill one in and wonder why nothing changed.
+	if cfg.ReviewRequest.UserID != "" {
+		b.WriteString("# Who assists with pull requests. \"Ask for Code Review\" tags them\n")
+		b.WriteString("# and stops; a human reads it and decides. Remove user-id to turn the\n")
+		b.WriteString("# option off. An empty channel DMs them.\n")
 		b.WriteString("review-request:\n")
 		if cfg.ReviewRequest.Channel != "" {
 			fmt.Fprintf(&b, "  channel: %s\n", yamlValue(cfg.ReviewRequest.Channel))
 		}
-		if cfg.ReviewRequest.UserID != "" {
-			fmt.Fprintf(&b, "  user-id: %s\n", yamlValue(cfg.ReviewRequest.UserID))
+		fmt.Fprintf(&b, "  user-id: %s\n", yamlValue(cfg.ReviewRequest.UserID))
+		if cfg.ReviewRequest.Prompt != "" {
+			fmt.Fprintf(&b, "  prompt: %s\n", yamlValue(cfg.ReviewRequest.Prompt))
+		}
+		b.WriteString("\n")
+	}
+
+	if cfg.SMEAssistance.UserID != "" {
+		b.WriteString("# Who assists with tickets. \"Ask for SME Assistance\" tags a person —\n")
+		b.WriteString("# a subject-matter expert — and starts nothing. Configured separately\n")
+		b.WriteString("# from review-request on purpose: same shape, different question.\n")
+		b.WriteString("sme-assistance:\n")
+		if cfg.SMEAssistance.Channel != "" {
+			fmt.Fprintf(&b, "  channel: %s\n", yamlValue(cfg.SMEAssistance.Channel))
+		}
+		fmt.Fprintf(&b, "  user-id: %s\n", yamlValue(cfg.SMEAssistance.UserID))
+		if cfg.SMEAssistance.Prompt != "" {
+			fmt.Fprintf(&b, "  prompt: %s\n", yamlValue(cfg.SMEAssistance.Prompt))
+		}
+		b.WriteString("\n")
+	}
+
+	if cfg.AI.Command != "" {
+		b.WriteString("# The local harness behind \"Run Code Review\" and \"Run AI Assistance\".\n")
+		b.WriteString("# These RUN, on this machine, and report back in the digest's thread.\n")
+		b.WriteString("# A known harness (claude) gets its own prompt flag; anything else is\n")
+		b.WriteString("# handed the prompt as its first argument.\n")
+		b.WriteString("#\n")
+		b.WriteString("# The prompts are editable from the App Home tab. An absent prompt uses\n")
+		b.WriteString("# the built-in default, which is the point of leaving it absent.\n")
+		b.WriteString("ai:\n")
+		fmt.Fprintf(&b, "  command: %s\n", yamlValue(cfg.AI.Command))
+		if cfg.AI.WorkDir != "" {
+			fmt.Fprintf(&b, "  workdir: %s\n", yamlValue(cfg.AI.WorkDir))
+		}
+		if cfg.AI.ReviewPrompt != "" {
+			fmt.Fprintf(&b, "  pull-request-prompt: %s\n", yamlValue(cfg.AI.ReviewPrompt))
+		}
+		if cfg.AI.AssistPrompt != "" {
+			fmt.Fprintf(&b, "  ticket-prompt: %s\n", yamlValue(cfg.AI.AssistPrompt))
 		}
 		b.WriteString("\n")
 	}

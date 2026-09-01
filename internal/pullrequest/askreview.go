@@ -142,7 +142,7 @@ func (a *Asker) reviewerID(ctx context.Context, target slack.Target) (string, er
 	case ref.IsID():
 		return ref.ID, nil
 	case ref.Handle == "":
-		return "", fmt.Errorf("cannot ask for a review: no reviewer configured (set review-request.user-id or admin.slack-user-id)")
+		return "", fmt.Errorf("cannot ask for a review: no reviewer configured (set review-request.user-id)")
 	case a.resolver == nil:
 		return "", fmt.Errorf("review-request.user-id is %q, which is a handle rather than a Slack id, and nothing is wired to resolve it", a.reviewer)
 	}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -407,7 +408,7 @@ func TestBulkOffersApproveAndMergeOnlyToDependabot(t *testing.T) {
 	r := newBulkRig(t, bulkGH(
 		bulkPR("o/r#1", 2*time.Hour, "dependabot[bot]"),
 		bulkPR("o/r#2", 1*time.Hour, "alex"),
-	), BulkOptions{})
+	), BulkOptions{Actions: RowActions{AskReview: true}})
 	r.run(t)
 
 	got := rows(t, r.slack.Posts()[0])
@@ -545,4 +546,65 @@ func TestDigestUsesItsOwnIcon(t *testing.T) {
 	if bulkIconURL == iconURL {
 		t.Error("the digest and the legacy card share an icon const")
 	}
+}
+
+// Asking a person and running a harness are two verbs, and the row says so.
+// They were one option for a long time, labelled as the first and understood by
+// nobody as the second.
+func TestBulkRowSeparatesAskingFromRunning(t *testing.T) {
+	r := newBulkRig(t, bulkGH(bulkPR("o/r#1", time.Hour, "alex")),
+		BulkOptions{Actions: RowActions{AskReview: true, RunReview: true}})
+	r.run(t)
+
+	row := rows(t, r.slack.Posts()[0])[0]
+	if !equal(optionsOf(t, row), []string{IntentOpenBrowser, IntentAskReview, IntentRunReview}) {
+		t.Fatalf("options = %v", optionsOf(t, row))
+	}
+	labels := optionLabels(t, row)
+	if !strings.Contains(labels[1], "Ask for Code Review") {
+		t.Fatalf("ask label = %q", labels[1])
+	}
+	if !strings.Contains(labels[2], "Run Code Review") {
+		t.Fatalf("run label = %q", labels[2])
+	}
+}
+
+// Both are configuration and both default to off: one needs somebody to ask,
+// the other needs a harness to run, and a control that cannot act is worse than
+// one that was never there.
+func TestBulkRowOffersOnlyWhatIsConfigured(t *testing.T) {
+	for name, tc := range map[string]struct {
+		actions RowActions
+		want    []string
+	}{
+		"nothing configured": {RowActions{}, []string{IntentOpenBrowser}},
+		"only a reviewer":    {RowActions{AskReview: true}, []string{IntentOpenBrowser, IntentAskReview}},
+		"only a harness":     {RowActions{RunReview: true}, []string{IntentOpenBrowser, IntentRunReview}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newBulkRig(t, bulkGH(bulkPR("o/r#1", time.Hour, "alex")),
+				BulkOptions{Actions: tc.actions})
+			r.run(t)
+			got := optionsOf(t, rows(t, r.slack.Posts()[0])[0])
+			if !equal(got, tc.want) {
+				t.Fatalf("options = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// optionLabels lists a row's menu labels, in order.
+func optionLabels(t *testing.T, row map[string]any) []string {
+	t.Helper()
+	acc, ok := row["accessory"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	raw, _ := acc["options"].([]any)
+	out := make([]string, 0, len(raw))
+	for _, o := range raw {
+		text := o.(map[string]any)["text"].(map[string]any)
+		out = append(out, text["text"].(string))
+	}
+	return out
 }

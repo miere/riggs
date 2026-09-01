@@ -41,10 +41,15 @@ type Completer struct {
 }
 
 // NewCompleter builds the completer.
-func NewCompleter(store *notify.Store, n *notify.Notifier, poster slack.Poster) *Completer {
+//
+// actions is required rather than defaulted, and is the same value the digest
+// engine was built with. This redraws a message the engine drew; given a
+// different answer it would silently add or remove options on every row in it.
+func NewCompleter(store *notify.Store, n *notify.Notifier, poster slack.Poster,
+	actions RowActions) *Completer {
 	return &Completer{
 		store: store, notifier: n, poster: poster,
-		rebuilder: bulk.NewRebuilder(bulkRenderer(), store, n),
+		rebuilder: bulk.NewRebuilder(bulkRenderer(actions), store, n),
 		now:       time.Now,
 	}
 }

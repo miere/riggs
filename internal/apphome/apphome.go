@@ -22,6 +22,7 @@ import (
 	"sync"
 
 	"github.com/miere/riggs-mcp/internal/blockkit"
+	"github.com/miere/riggs-mcp/internal/config"
 	"github.com/miere/riggs-mcp/internal/slack"
 	"github.com/miere/riggs-mcp/internal/slackmd"
 	"github.com/miere/riggs-mcp/internal/updates"
@@ -39,6 +40,24 @@ type Installer interface {
 	Install(ctx context.Context, tag string) (updates.Result, error)
 }
 
+// PromptStore is the editable wordings the tab reads and writes.
+//
+// *config.Config satisfies it. It is an interface so this package can be tested
+// without a config file on disk — writing one is config's own business, and its
+// tests are where the YAML surgery is proved.
+//
+// The list of prompts is deliberately NOT on here: it is a constant table
+// (config.Prompts), not state, and putting it behind a seam would invite a fake
+// that disagrees with the real one about which prompts exist.
+type PromptStore interface {
+	// PromptText is the wording in force: configured, or the built-in default.
+	PromptText(id config.PromptID) string
+	// PromptOverridden reports whether it is configured rather than default.
+	PromptOverridden(id config.PromptID) bool
+	// SetPrompt rewrites it. An empty text resets it to the default.
+	SetPrompt(id config.PromptID, text string) error
+}
+
 // Deps is the explicit dependency bundle passed to New.
 type Deps struct {
 	// Version is the running build, as version.String() reported it.
@@ -53,6 +72,12 @@ type Deps struct {
 	AdminUserID string
 	// Views publishes the rendered view.
 	Views slack.ViewPublisher
+	// Modals opens the prompt editor. Nil renders no prompt rows: an Edit
+	// option that cannot open anything is the same mistake as an Update button
+	// with no installer behind it.
+	Modals slack.ViewOpener
+	// Prompts is the wording store. Nil renders no prompt rows.
+	Prompts PromptStore
 	// Notify posts the outcome of an update. Optional; without it an update
 	// still runs and is still logged, it is just not narrated.
 	Notify slack.Poster
@@ -138,6 +163,7 @@ func (p *Publisher) render(ctx context.Context, userID string) blockkit.Home {
 	// to restart. The update section needs a release AND something able to
 	// install it.
 	home := blockkit.Home{Version: p.deps.Version, Admin: admin && p.deps.Restart != nil}
+	home.Prompts = p.promptRows(admin)
 	if !admin || p.deps.Checker == nil || p.deps.Installer == nil {
 		return home
 	}
@@ -153,6 +179,104 @@ func (p *Publisher) render(ctx context.Context, userID string) blockkit.Home {
 	}
 	home.Update = &blockkit.HomeUpdate{Tag: rel.Tag, Notes: ReleaseNotes(rel)}
 	return home
+}
+
+// promptRows renders the editable wordings for the admin.
+//
+// Nothing for anybody else, and nothing at all without both a store to read
+// and a way to open the editor. The audience split is the same one the rest of
+// this surface obeys: a non-admin sees the portrait and the version, and is not
+// shown a control that would refuse them.
+func (p *Publisher) promptRows(admin bool) []blockkit.HomePrompt {
+	if !admin || p.deps.Prompts == nil || p.deps.Modals == nil {
+		return nil
+	}
+	specs := config.Prompts()
+	rows := make([]blockkit.HomePrompt, 0, len(specs))
+	for _, spec := range specs {
+		rows = append(rows, blockkit.HomePrompt{
+			ID:         string(spec.ID),
+			Label:      spec.Label,
+			Text:       p.deps.Prompts.PromptText(spec.ID),
+			Overridden: p.deps.Prompts.PromptOverridden(spec.ID),
+		})
+	}
+	return rows
+}
+
+// EditPrompt opens the editor for one prompt.
+//
+// It opens the modal and does nothing else first. A trigger id lives about
+// three seconds, so anything done before views.open is time spent on a modal
+// that will not open — and the only symptom is Slack reporting
+// "expired_trigger_id" to a log nobody is reading.
+//
+// The admin gate is re-checked, as it is on every control here. The overflow is
+// only ever rendered for the admin, but an action_id and a block_id are just
+// strings in a payload, and this one leads to a write.
+func (p *Publisher) EditPrompt(ctx context.Context, userID, promptID, triggerID string) error {
+	if !p.IsAdmin(userID) {
+		p.deps.Logger.Warn("denied a prompt edit from a non-admin", "user", userID, "prompt", promptID)
+		return fmt.Errorf("apphome: %s is not the admin", userID)
+	}
+	if p.deps.Modals == nil || p.deps.Prompts == nil {
+		return fmt.Errorf("apphome: prompt editing is not configured")
+	}
+	spec, ok := config.LookupPrompt(config.PromptID(promptID))
+	if !ok {
+		// A Home tab published by an older build, clicked after an update. The
+		// row is real, the prompt is not this build's.
+		return fmt.Errorf("apphome: %q is not an editable prompt", promptID)
+	}
+	return p.deps.Modals.OpenView(ctx, p.deps.BotToken, triggerID, blockkit.PromptModal{
+		ID:    string(spec.ID),
+		Label: spec.Label,
+		Hint:  spec.Hint,
+		Value: p.deps.Prompts.PromptText(spec.ID),
+	}.View())
+}
+
+// SavePrompt records a submitted wording and redraws the tab.
+//
+// The redraw is forced rather than left to the next open. The admin has just
+// pressed Save and is looking at the surface the change lands on; a tab that
+// still shows the old wording reads as a Save that did not take.
+func (p *Publisher) SavePrompt(ctx context.Context, userID, promptID, text string) error {
+	return p.writePrompt(ctx, userID, promptID, text, "saved")
+}
+
+// ResetPrompt drops an override, so the built-in default applies again.
+//
+// It writes an EMPTY value rather than the default's own words: config deletes
+// the key, which keeps "never overridden" distinguishable from "overridden to
+// whatever the default said that day" — and means a later change to the default
+// reaches this machine.
+func (p *Publisher) ResetPrompt(ctx context.Context, userID, promptID string) error {
+	return p.writePrompt(ctx, userID, promptID, "", "reset")
+}
+
+// writePrompt is the shared half of Save and Reset: gate, validate, write,
+// redraw.
+func (p *Publisher) writePrompt(ctx context.Context, userID, promptID, text, verb string) error {
+	if !p.IsAdmin(userID) {
+		p.deps.Logger.Warn("denied a prompt write from a non-admin",
+			"user", userID, "prompt", promptID, "verb", verb)
+		return fmt.Errorf("apphome: %s is not the admin", userID)
+	}
+	if p.deps.Prompts == nil {
+		return fmt.Errorf("apphome: prompt editing is not configured")
+	}
+	spec, ok := config.LookupPrompt(config.PromptID(promptID))
+	if !ok {
+		return fmt.Errorf("apphome: %q is not an editable prompt", promptID)
+	}
+	if err := p.deps.Prompts.SetPrompt(spec.ID, text); err != nil {
+		p.deps.Logger.Error("could not write a prompt", "prompt", promptID, "verb", verb, "error", err)
+		return err
+	}
+	p.deps.Logger.Info("prompt "+verb, "prompt", promptID, "user", userID)
+	p.republish(ctx, userID)
+	return nil
 }
 
 // ReleaseNotes converts a release body from GitHub-flavoured Markdown into what

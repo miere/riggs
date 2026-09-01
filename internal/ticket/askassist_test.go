@@ -88,8 +88,8 @@ func TestAskNamesNoTool(t *testing.T) {
 			t.Fatalf("message names the tool: %q", c.Msg.Text)
 		}
 	}
-	if strings.Contains(strings.ToLower(config.DefaultAssistPrompt), "riggs") {
-		t.Fatalf("the default prompt names the tool: %q", config.DefaultAssistPrompt)
+	if strings.Contains(strings.ToLower(config.DefaultSMEPrompt), "riggs") {
+		t.Fatalf("the default prompt names the tool: %q", config.DefaultSMEPrompt)
 	}
 }
 
@@ -168,7 +168,7 @@ func TestAskRefusesAnUnresolvableHandle(t *testing.T) {
 	if err == nil {
 		t.Fatal("Ask succeeded with an unresolvable handle")
 	}
-	if !strings.Contains(err.Error(), "ai-assistance.user-id") {
+	if !strings.Contains(err.Error(), "sme-assistance.user-id") {
 		t.Fatalf("error = %v, want it to name the setting", err)
 	}
 	if len(fake.Calls) != 0 {

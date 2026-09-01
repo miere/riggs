@@ -27,7 +27,7 @@ func newCompleterRig(t *testing.T) *completerRig {
 	r.run(t)
 	r.slack.Reset()
 
-	c := NewCompleter(r.store, r.notifier, r.slack).
+	c := NewCompleter(r.store, r.notifier, r.slack, testActions).
 		WithClock(func() time.Time { return r.clock })
 	return &completerRig{bulkRig: r, completer: c}
 }
@@ -215,7 +215,7 @@ func TestCompleteDeletesAPostThatEmpties(t *testing.T) {
 	if err := r.store.DeleteItem(context.Background(), BulkItemPrefix+"o/r#1"); err != nil {
 		t.Fatalf("DeleteItem: %v", err)
 	}
-	c := NewCompleter(r.store, r.notifier, r.slack)
+	c := NewCompleter(r.store, r.notifier, r.slack, testActions)
 	if err := c.rebuilder.Rebuild(context.Background(), BulkPostPrefix+"1", target); err != nil {
 		t.Fatalf("rebuild: %v", err)
 	}
@@ -240,7 +240,7 @@ func settleRig(t *testing.T) (*Completer, *slacktest.Fake, *detailer) {
 	}
 	fake.Reset()
 
-	return NewCompleter(store, n, fake).WithDetailer(d), fake, d
+	return NewCompleter(store, n, fake, testActions).WithDetailer(d), fake, d
 }
 
 func TestSettleCollapsesTheAskCard(t *testing.T) {
@@ -322,7 +322,12 @@ func TestSettleNeedsADetailer(t *testing.T) {
 		t.Fatalf("Ask: %v", err)
 	}
 
-	if _, err := NewCompleter(store, n, fake).Settle(context.Background(), "o/r#7", "Approved", target); err == nil {
+	if _, err := NewCompleter(store, n, fake, testActions).Settle(context.Background(), "o/r#7", "Approved", target); err == nil {
 		t.Fatal("Settle succeeded with nothing wired to read the pull request")
 	}
 }
+
+// testActions is what these tests redraw with: everything on, so a rebuilt row
+// carries every option a live one can and an assertion about the menu is about
+// the completer rather than about the configuration behind it.
+var testActions = RowActions{AskReview: true, RunReview: true}

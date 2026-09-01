@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
+	"github.com/miere/riggs-mcp/internal/ai"
 	"github.com/miere/riggs-mcp/internal/config"
 	"github.com/miere/riggs-mcp/internal/notify"
 )
@@ -93,6 +94,23 @@ type Report struct {
 	Admin      Admin     `json:"admin"`
 	Slack      []Profile `json:"slack_profiles"`
 	Backends   []Backend `json:"backends"`
+	// Actions are the four verbs a digest row can offer. They are reported
+	// because every one of them is now optional, and a row quietly missing an
+	// option is precisely the kind of absence this tool exists to explain.
+	Actions []Action `json:"actions"`
+	// Notes are deprecations and other things worth saying once. Empty is the
+	// ordinary state.
+	Notes []string `json:"notes,omitempty"`
+}
+
+// Action is one verb a digest row may offer, and what turns it on.
+type Action struct {
+	// Name is the label as it appears on the menu.
+	Name string `json:"name"`
+	// Enabled reports whether the option is rendered at all.
+	Enabled bool `json:"enabled"`
+	// Detail names the setting behind it — the whole point of this tool.
+	Detail string `json:"detail"`
 }
 
 // EnvFile reports which dotenv file supplied the ${VAR} references, and
@@ -157,8 +175,51 @@ func (t *Tool) Invoke(context.Context, map[string]any) (any, error) {
 		},
 		Slack:    t.slackProfiles(),
 		Backends: t.backends(),
+		Actions:  t.actions(),
+	}
+	if t.cfg.SMEDeprecated() {
+		r.Notes = append(r.Notes,
+			"the `ai-assistance` section is the retired name for `sme-assistance`; it still works, and renaming it is one edit")
 	}
 	return r, nil
+}
+
+// actions reports the four optional verbs and what would enable each.
+//
+// Both pairs are deliberately reported side by side. The whole point of the
+// split is that asking a person and running a harness are different verbs, and
+// a report that listed only "assistance: on" would put them back together.
+func (t *Tool) actions() []Action {
+	harness := "set ai.command"
+	if t.cfg.AIEnabled() {
+		harness = "runs " + t.cfg.AICommand()
+		if dir := t.cfg.AIWorkDir(); dir != "" {
+			harness += " in " + dir
+		}
+	}
+	return []Action{
+		{
+			Name:    "Ask for Code Review",
+			Enabled: t.cfg.ReviewEnabled(),
+			Detail:  enabledDetail(t.cfg.ReviewEnabled(), "tags a person", "set review-request.user-id"),
+		},
+		{Name: "Run Code Review", Enabled: t.cfg.AIEnabled(), Detail: harness},
+		{
+			Name:    "Ask for SME Assistance",
+			Enabled: t.cfg.SMEEnabled(),
+			Detail:  enabledDetail(t.cfg.SMEEnabled(), "tags a person", "set sme-assistance.user-id"),
+		},
+		{Name: "Run AI Assistance", Enabled: t.cfg.AIEnabled(), Detail: harness},
+	}
+}
+
+// enabledDetail picks the wording for an action, without ever echoing the
+// configured value: this report is meant to be safe to paste anywhere.
+func enabledDetail(enabled bool, on, off string) string {
+	if enabled {
+		return on
+	}
+	return off
 }
 
 // slackProfiles reports each configured profile in a stable order.
@@ -182,12 +243,22 @@ func (t *Tool) slackProfiles() []Profile {
 	return out
 }
 
-// backends probes the external dependencies. `gh` is the GitHub *credential*
-// provider — Riggs makes the HTTP calls itself — and card summaries shell out
-// Nothing else is shelled out to: card bodies are derived from the description
-// now rather than summarised by an LLM (§7d).
+// backends probes the external dependencies.
+//
+// `gh` is the GitHub *credential* provider — Riggs makes the HTTP calls itself.
+// The other is the AI harness, which is shelled out to in full: it is the thing
+// "Run Code Review" and "Run AI Assistance" actually are. Card bodies are still
+// derived from the description rather than summarised by an LLM (§7d); this is
+// the work, not the rendering.
 func (t *Tool) backends() []Backend {
 	out := []Backend{t.binary("gh", "the GitHub token comes from the authenticated gh CLI")}
+
+	// The harness is probed by NAME rather than assumed, because "the option is
+	// rendered and every run fails" is the one failure mode a misspelling here
+	// produces, and it is invisible until somebody clicks.
+	if program := ai.New(t.cfg.AICommand(), "", 0).Program(); program != "" {
+		out = append(out, t.binary(program, "the AI harness behind the two Run options"))
+	}
 
 	email := t.getenv(config.JiraEmailEnv)
 	token := t.getenv(config.JiraTokenEnv)
@@ -288,6 +359,19 @@ func (r Report) String() string {
 			mark = "!!"
 		}
 		fmt.Fprintf(&b, "  [%s] %-7s %s\n", mark, be.Name, be.Detail)
+	}
+
+	b.WriteString("\nrow actions:\n")
+	for _, a := range r.Actions {
+		mark := "ok"
+		if !a.Enabled {
+			mark = "--"
+		}
+		fmt.Fprintf(&b, "  [%s] %-22s %s\n", mark, a.Name, a.Detail)
+	}
+
+	for _, note := range r.Notes {
+		fmt.Fprintf(&b, "\nnote: %s\n", note)
 	}
 	return strings.TrimRight(b.String(), "\n")
 }

@@ -400,7 +400,8 @@ func itemPostedAt(t *testing.T, r *bulkRig, key string) time.Time {
 // specified but explicitly not for this pass, and a control that silently does
 // nothing is worse than one that is not there.
 func TestTicketBulkRowOffersTheLinkAndTheAsk(t *testing.T) {
-	r := newBulkRig(t, bulkJira(ticketAged("NYX-1", time.Hour)), BulkOptions{})
+	r := newBulkRig(t, bulkJira(ticketAged("NYX-1", time.Hour)),
+		BulkOptions{Actions: RowActions{AskAssist: true}})
 	r.run(t)
 
 	row := bulkRows(t, r.slack.Posts()[0])[0]
@@ -509,4 +510,66 @@ func TestTicketBulkDefaultsToAThreeHourCooldown(t *testing.T) {
 	if got := (BulkOptions{}).resolved().Cooldown; got != 3*time.Hour {
 		t.Fatalf("Cooldown = %s, want 3h", got)
 	}
+}
+
+// The label was the bug. "Ask for AI Assistance" tagged a colleague and started
+// nothing, and everyone who read it expected an agent.
+func TestTicketBulkRowSeparatesTheExpertFromTheAgent(t *testing.T) {
+	r := newBulkRig(t, bulkJira(ticketAged("NYX-1", time.Hour)),
+		BulkOptions{Actions: RowActions{AskAssist: true, RunAssist: true}})
+	r.run(t)
+
+	row := bulkRows(t, r.slack.Posts()[0])[0]
+	if got := bulkOptionsOf(t, row); !sameStrings(got, []string{IntentOpenBrowser, IntentAskAssist, IntentRunAssist}) {
+		t.Fatalf("options = %v", got)
+	}
+	labels := bulkOptionLabels(t, row)
+	if !strings.Contains(labels[1], "Ask for SME Assistance") {
+		t.Fatalf("the human ask still claims to be an AI: %q", labels[1])
+	}
+	if !strings.Contains(labels[2], "Run AI Assistance") {
+		t.Fatalf("run label = %q", labels[2])
+	}
+	for _, label := range labels {
+		if strings.Contains(label, "Ask for AI") {
+			t.Fatalf("the retired label survives: %q", label)
+		}
+	}
+}
+
+func TestTicketBulkRowOffersOnlyWhatIsConfigured(t *testing.T) {
+	for name, tc := range map[string]struct {
+		actions RowActions
+		want    []string
+	}{
+		"nothing configured": {RowActions{}, []string{IntentOpenBrowser}},
+		"only an expert":     {RowActions{AskAssist: true}, []string{IntentOpenBrowser, IntentAskAssist}},
+		"only a harness":     {RowActions{RunAssist: true}, []string{IntentOpenBrowser, IntentRunAssist}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newBulkRig(t, bulkJira(ticketAged("NYX-1", time.Hour)),
+				BulkOptions{Actions: tc.actions})
+			r.run(t)
+			got := bulkOptionsOf(t, bulkRows(t, r.slack.Posts()[0])[0])
+			if !sameStrings(got, tc.want) {
+				t.Fatalf("options = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// bulkOptionLabels lists a row's menu labels, in order.
+func bulkOptionLabels(t *testing.T, row map[string]any) []string {
+	t.Helper()
+	acc, ok := row["accessory"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	raw, _ := acc["options"].([]any)
+	out := make([]string, 0, len(raw))
+	for _, o := range raw {
+		text := o.(map[string]any)["text"].(map[string]any)
+		out = append(out, text["text"].(string))
+	}
+	return out
 }

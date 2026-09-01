@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/miere/riggs-mcp/internal/ai"
 	"github.com/miere/riggs-mcp/internal/apphome"
 	"github.com/miere/riggs-mcp/internal/blockkit"
 	"github.com/miere/riggs-mcp/internal/daemon"
@@ -42,6 +43,7 @@ func (a *Application) runDaemon(ctx context.Context) error {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel()}))
 	router := daemon.NewRouter()
 	a.registerInteractions(router, creds)
+	a.registerRunInteractions(router, creds, logger)
 
 	home := a.appHome(creds, logger)
 	a.registerHomeInteractions(router, home)
@@ -107,11 +109,17 @@ func (a *Application) appHome(creds slack.Credentials, logger *slog.Logger) *app
 		BotToken:    creds.BotToken,
 		AdminUserID: a.cfg.Admin.SlackUserID,
 		Views:       slack.NewAPI(),
+		Modals:      slack.NewAPI(),
 		Notify:      slack.NewAPI(),
-		Checker:     checker,
-		Installer:   updates.NewInstaller(checker),
-		Restart:     restartViaLaunchd,
-		Logger:      logger,
+		// The loaded config IS the store. An edit therefore lands in the file
+		// and in the struct this process is already reading from, which is what
+		// makes a reworded prompt take effect on the next click rather than the
+		// next restart.
+		Prompts:   a.cfg,
+		Checker:   checker,
+		Installer: updates.NewInstaller(checker),
+		Restart:   restartViaLaunchd,
+		Logger:    logger,
 	})
 }
 
@@ -131,6 +139,86 @@ func (a *Application) registerHomeInteractions(router *daemon.Router, home *apph
 	router.Handle(blockkit.HomeMenuActionID, blockkit.HomeRestartIntent,
 		daemon.HandlerFunc(func(ctx context.Context, in slack.Interaction) error {
 			return home.Restart(ctx, in.UserID)
+		}))
+
+	// Which prompt a click is about rides in the row's block_id, exactly as a
+	// pull request rides in a digest row's — an overflow reports its own
+	// block_id and not its siblings' values, so it is the only place a per-row
+	// identity can travel.
+	router.Handle(blockkit.HomePromptActionID, blockkit.HomePromptEditIntent,
+		daemon.HandlerFunc(func(ctx context.Context, in slack.Interaction) error {
+			return home.EditPrompt(ctx, in.UserID, promptID(in.Item), in.TriggerID)
+		}))
+
+	router.Handle(blockkit.HomePromptActionID, blockkit.HomePromptResetIntent,
+		daemon.HandlerFunc(func(ctx context.Context, in slack.Interaction) error {
+			return home.ResetPrompt(ctx, in.UserID, promptID(in.Item))
+		}))
+
+	// The modal coming back. It is in the same table as the clicks because it
+	// is the same kind of thing (§7b): the callback_id is the control and the
+	// private_metadata is the item, which is the split a click already makes.
+	router.Handle(blockkit.PromptModalCallbackID, slack.ViewSubmitIntent,
+		daemon.HandlerFunc(func(ctx context.Context, in slack.Interaction) error {
+			text := slack.ViewInput(in.Raw, blockkit.PromptModalBlockID, blockkit.PromptModalActionID)
+			if strings.TrimSpace(text) == "" {
+				// Slack's own required-input validation should have caught this
+				// before it was sent. If it ever does not, an empty save would
+				// silently RESET the prompt, and a reset the admin did not ask
+				// for is worse than a refused save.
+				return fmt.Errorf("the prompt was empty; use Reset to default to clear it")
+			}
+			return home.SavePrompt(ctx, in.UserID, in.Item, text)
+		}))
+}
+
+// promptID strips the namespace a prompt row's block_id carries.
+func promptID(blockID string) string {
+	return strings.TrimPrefix(blockID, blockkit.HomePromptBlockPrefix)
+}
+
+// registerRunInteractions installs the two options that RUN the local harness,
+// as opposed to the two that ask a person.
+//
+// Their runner is built ONCE and held, unlike every handler above it. Those
+// build a ledger and a GitHub client per click because both go stale between
+// the handful of clicks a week anyone makes; this holds a command line, a
+// timeout and the set of items currently running — and that last one is the
+// whole reason it is held. A runner rebuilt per click could not tell that the
+// same pull request is already being reviewed by the process next door.
+//
+// Nothing is registered when no harness is configured. The options are not
+// rendered either (§7bb), and a route with no control is a route that can only
+// ever answer a click on a digest posted before the harness was removed.
+func (a *Application) registerRunInteractions(router *daemon.Router, creds slack.Credentials, logger *slog.Logger) {
+	if !a.cfg.AIEnabled() {
+		logger.Info("no AI command configured; the Run options are off",
+			"setting", "ai.command")
+		return
+	}
+	harness := ai.New(a.cfg.AICommand(), a.cfg.AIWorkDir(), a.cfg.AITimeout())
+	api := slack.NewAPI()
+
+	// The prompts are read per run rather than captured here, so an edit on the
+	// Home tab reaches the next click rather than the next restart.
+	reviews := ai.NewRunner(harness, api, "a code review", a.cfg.AIReviewPrompt)
+	assists := ai.NewRunner(harness, api, "AI assistance", a.cfg.AIAssistPrompt)
+
+	router.Handle(pullrequest.BulkActionID, pullrequest.IntentRunReview,
+		daemon.HandlerFunc(func(ctx context.Context, in slack.Interaction) error {
+			item := ai.Item{Ref: in.Item, URL: pullrequest.RefURL(in.Item)}
+			_, err := reviews.Run(ctx, item, a.targetFor(creds, in), in.MessageTS)
+			return err
+		}))
+
+	router.Handle(ticket.BulkActionID, ticket.IntentRunAssist,
+		daemon.HandlerFunc(func(ctx context.Context, in slack.Interaction) error {
+			key := ticket.TicketKeyFromBlockID(in.Item)
+			// Derived, not fetched: the browse URL is the tenant and the key,
+			// and a run should not need a Jira round trip to start.
+			item := ai.Item{Ref: key, URL: jiraClient(a.cfg).BrowseURL(key)}
+			_, err := assists.Run(ctx, item, a.targetFor(creds, in), in.MessageTS)
+			return err
 		}))
 }
 
@@ -200,7 +288,7 @@ func (a *Application) registerInteractions(router *daemon.Router, creds slack.Cr
 
 	// The ticket digest's only verb. It reaches a different person, in a
 	// different channel, with different wording — all of which come from
-	// `ai-assistance`, never from the pull-request queue's `review-request`.
+	// `sme-assistance`, never from the pull-request queue's `review-request`.
 	//
 	// "Assign to Me" is deliberately unregistered, because it is deliberately
 	// not rendered (§7bb). The verb behind it exists; the option does not.

@@ -28,6 +28,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"gopkg.in/yaml.v3"
 )
@@ -50,7 +51,23 @@ type Config struct {
 	Slack         Slack         `yaml:"slack"`
 	Jira          Jira          `yaml:"jira"`
 	ReviewRequest ReviewRequest `yaml:"review-request"`
-	AIAssistance  AIAssistance  `yaml:"ai-assistance"`
+	SMEAssistance SMEAssistance `yaml:"sme-assistance"`
+	AI            AI            `yaml:"ai"`
+
+	// LegacyAIAssistance is the old spelling of SMEAssistance, kept only so an
+	// existing config still loads.
+	//
+	// The section was called `ai-assistance` when the ticket action was called
+	// "Ask for AI Assistance" — which asked a *person*, and never involved an
+	// LLM at all. That name is now taken by something that genuinely does run
+	// one, so the human ask became `sme-assistance` and this is the alias.
+	//
+	// Parsed rather than refused, unlike `admin.github-login`. That key was
+	// refused because leaving it in place would silently steer the review queue
+	// at somebody else; this one means exactly what it always meant, so refusing
+	// to boot over the spelling would cost a working install for nothing.
+	// `riggs capabilities` reports the deprecation instead.
+	LegacyAIAssistance SMEAssistance `yaml:"ai-assistance"`
 
 	// EnvFile is a dotenv file loaded before ${VAR} references are expanded.
 	//
@@ -76,6 +93,21 @@ type Config struct {
 	// existed. Both are reported by `riggs capabilities`.
 	envPath   string
 	envLoaded bool
+
+	// smeDeprecated records that the SME section arrived under its retired
+	// `ai-assistance` name, so the deprecation can be reported once rather than
+	// guessed at by every reader of the file.
+	smeDeprecated bool
+
+	// mu guards the four prompts, which are the only fields that change after
+	// load: the App Home tab edits them in place so a running daemon acts on a
+	// reworded prompt without being restarted (§7e).
+	//
+	// It covers those fields and nothing else. Everything else in here is
+	// written once during Load and read for the life of the process, and
+	// putting a lock in front of it would suggest a mutability that does not
+	// exist.
+	mu sync.RWMutex
 }
 
 // Admin identifies the single human Riggs acts for. It exists because that
@@ -188,70 +220,71 @@ type ReviewRequest struct {
 const DefaultReviewPrompt = "Hey {reviewer}, mind to review this Pull Request?"
 
 // ReviewPrompt is the configured prompt, or the default.
-func (c *Config) ReviewPrompt() string {
-	if strings.TrimSpace(c.ReviewRequest.Prompt) == "" {
-		return DefaultReviewPrompt
-	}
-	return c.ReviewRequest.Prompt
-}
+func (c *Config) ReviewPrompt() string { return c.PromptText(PromptReviewRequest) }
 
-// ReviewReviewer is the Slack user the ask tags, falling back to the admin.
+// ReviewReviewer is the Slack user the ask tags. Empty means nobody is
+// configured, and the action is not offered at all.
+//
+// It used to fall back to the admin, on the grounds that asking yourself is a
+// defensible default. It is not one any more: the row now offers "Ask for Code
+// Review" *beside* "Run Code Review", and a menu whose first option quietly
+// means "send myself a card" reads as a mistake next to one that actually does
+// the work. An unanswered installer question now disables the option instead —
+// which is also the only reading under which the two are honestly distinct.
 func (c *Config) ReviewReviewer() string {
-	if id := strings.TrimSpace(c.ReviewRequest.UserID); id != "" {
-		return id
-	}
-	return c.Admin.SlackUserID
+	return strings.TrimSpace(c.ReviewRequest.UserID)
 }
 
-// AIAssistance configures the "Ask for AI Assistance" action on a ticket row:
+// ReviewEnabled reports whether "Ask for Code Review" can be offered.
+func (c *Config) ReviewEnabled() bool { return c.ReviewReviewer() != "" }
+
+// SMEAssistance configures the "Ask for SME Assistance" action on a ticket row:
 // where the ask is posted, who is tagged in it, and what it says.
+//
+// It asks a HUMAN — a subject-matter expert — whether work that does not exist
+// yet is ready to be picked up. Nothing here runs an agent; that is `ai` below,
+// and keeping them apart is the whole point of this section's name.
 //
 // It is a SEPARATE section from ReviewRequest, deliberately, and the two are
 // never defaulted from one another. They look identical today and answer
 // different questions — one asks a human to review code that exists, the other
-// asks somebody to pick up work that does not — so they will be pointed at
+// asks somebody to scope work that does not — so they will be pointed at
 // different channels and different people, and a shared setting would mean
 // changing one silently moved the other.
-type AIAssistance struct {
+type SMEAssistance struct {
 	// Channel is where the ask is posted. Empty DMs the tagged user.
 	Channel string `yaml:"channel"`
-	// UserID is the Slack user tagged in the ask. Empty falls back to the
-	// admin — asking yourself is a defensible default and never silently tags a
-	// stranger.
+	// UserID is the Slack user tagged in the ask. Empty disables the action,
+	// on the same rule as review-request.user-id.
 	//
-	// An id, a pasted mention or a handle are all accepted, on the same rules as
-	// review-request.user-id.
+	// An id, a pasted mention or a handle are all accepted.
 	UserID string `yaml:"user-id"`
-	// Prompt is the wording of the ask. Empty uses DefaultAssistPrompt.
+	// Prompt is the wording of the ask. Empty uses DefaultSMEPrompt.
 	//
 	// `{user}` and `{requester}` are replaced with the corresponding mentions.
 	// A prompt that mentions neither still gets both (see internal/ask).
 	Prompt string `yaml:"prompt"`
 }
 
-// DefaultAssistPrompt is the ask, used when the config defines none:
+// DefaultSMEPrompt is the ask, used when the config defines none:
 //
 //	<@user>, <@requester> needs your help check if this ticket is actionable as it is
 //
 // It places both mentions itself, so nothing is prefixed and no `c/c` is
 // appended — the guarantee in internal/ask only adds what the wording left out.
-const DefaultAssistPrompt = "{user}, {requester} needs your help check if this ticket is actionable as it is"
+const DefaultSMEPrompt = "{user}, {requester} needs your help check if this ticket is actionable as it is"
 
-// AssistPrompt is the configured prompt, or the default.
-func (c *Config) AssistPrompt() string {
-	if strings.TrimSpace(c.AIAssistance.Prompt) == "" {
-		return DefaultAssistPrompt
-	}
-	return c.AIAssistance.Prompt
+// SMEPrompt is the configured prompt, or the default.
+func (c *Config) SMEPrompt() string { return c.PromptText(PromptSMEAssistance) }
+
+// SMEUser is the Slack user a ticket ask tags. Empty disables the action, for
+// the reason ReviewReviewer gives.
+func (c *Config) SMEUser() string {
+	return strings.TrimSpace(c.SMEAssistance.UserID)
 }
 
-// AssistUser is the Slack user a ticket ask tags, falling back to the admin.
-func (c *Config) AssistUser() string {
-	if id := strings.TrimSpace(c.AIAssistance.UserID); id != "" {
-		return id
-	}
-	return c.Admin.SlackUserID
-}
+// SMEEnabled reports whether "Ask for SME Assistance" can be offered.
+func (c *Config) SMEEnabled() bool { return c.SMEUser() != "" }
 
 // Slack holds the named accounts Riggs can deliver through.
 type Slack struct {
@@ -345,6 +378,7 @@ func parse(path string, data []byte) (*Config, error) {
 		cfg.Path = NoFilePath
 	}
 	cfg.dbPath = deriveDBPath(path)
+	cfg.adoptLegacySME()
 	// Before expansion, not after: the dotenv file is where the ${VAR}
 	// references are meant to resolve from.
 	if err := cfg.loadEnvFile(path); err != nil {
@@ -378,6 +412,11 @@ func (c *Config) expand() {
 	// `base-url: ${ATLASSIAN_BASE_URL}` resolve to that string *literally* —
 	// every Jira request then went to "${ATLASSIAN_BASE_URL}/rest/api/3/...".
 	c.Jira.BaseURL = os.ExpandEnv(c.Jira.BaseURL)
+	// The harness invocation and its working directory, so `workdir:
+	// ${HOME}/Development` resolves. The PROMPTS are deliberately left alone: a
+	// prompt is prose the admin wrote, and a `$` in it is a dollar sign.
+	c.AI.Command = os.ExpandEnv(c.AI.Command)
+	c.AI.WorkDir = os.ExpandEnv(c.AI.WorkDir)
 	for name, p := range c.Slack.Profiles {
 		p.BotToken = os.ExpandEnv(p.BotToken)
 		p.UserToken = os.ExpandEnv(p.UserToken)
@@ -411,11 +450,44 @@ func (c *Config) validate() error {
 		problems = append(problems,
 			fmt.Sprintf("jira.base-url %q is not an absolute http(s) URL (e.g. https://example.atlassian.net)", url))
 	}
+	problems = append(problems, c.validateAI()...)
 	if len(problems) == 0 {
 		return nil
 	}
 	return errors.New(strings.Join(problems, "; "))
 }
+
+// adoptLegacySME folds a config still spelling the section `ai-assistance` into
+// SMEAssistance.
+//
+// Field by field rather than wholesale, so a file carrying BOTH spellings —
+// which a half-finished hand edit produces — keeps the new one's values and
+// fills only what it left blank. The alternative, "the legacy section wins when
+// the new one is empty", would let a forgotten old key silently override a
+// deliberate new one.
+//
+// SMEDeprecated records that it happened, so `riggs capabilities` can say so.
+// Nothing else reads it: the alias is honoured in full, not half-honoured.
+func (c *Config) adoptLegacySME() {
+	legacy := c.LegacyAIAssistance
+	if legacy == (SMEAssistance{}) {
+		return
+	}
+	c.smeDeprecated = true
+	if strings.TrimSpace(c.SMEAssistance.Channel) == "" {
+		c.SMEAssistance.Channel = legacy.Channel
+	}
+	if strings.TrimSpace(c.SMEAssistance.UserID) == "" {
+		c.SMEAssistance.UserID = legacy.UserID
+	}
+	if strings.TrimSpace(c.SMEAssistance.Prompt) == "" {
+		c.SMEAssistance.Prompt = legacy.Prompt
+	}
+}
+
+// SMEDeprecated reports whether this config was read from the retired
+// `ai-assistance` key.
+func (c *Config) SMEDeprecated() bool { return c.smeDeprecated }
 
 // isAbsoluteHTTPURL reports whether s is a parseable absolute http(s) URL with
 // a host.

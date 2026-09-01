@@ -81,3 +81,87 @@ func TestDecodeInteractionRejectsWhatIsNotOurs(t *testing.T) {
 		}
 	}
 }
+
+// A view submission is dispatched by the same table as a click, so it has to
+// arrive in the same vocabulary: the callback_id is the control, the
+// private_metadata is the item.
+func TestDecodeViewSubmission(t *testing.T) {
+	cb := slackgo.InteractionCallback{
+		Type: slackgo.InteractionTypeViewSubmission,
+		User: slackgo.User{ID: "U-admin"},
+	}
+	cb.View.CallbackID = "prompt_edit"
+	cb.View.PrivateMetadata = "ai_review"
+
+	in, ok := DecodeInteraction(cb)
+	if !ok {
+		t.Fatal("a view submission was dropped")
+	}
+	if in.ActionID != "prompt_edit" || in.Intent != ViewSubmitIntent {
+		t.Fatalf("route = %s/%s", in.ActionID, in.Intent)
+	}
+	if in.Item != "ai_review" {
+		t.Fatalf("Item = %q, want the private_metadata", in.Item)
+	}
+	if in.UserID != "U-admin" {
+		t.Fatalf("UserID = %q", in.UserID)
+	}
+	// No channel and no message: those stay empty rather than being invented.
+	// The failure reporter reads an empty channel as "DM this person", which
+	// for a modal is the only place left to reach them.
+	if in.Channel != "" || in.MessageTS != "" {
+		t.Fatalf("a modal was given a conversation: %+v", in)
+	}
+}
+
+// A submission with no callback_id names no control, so there is nothing to
+// route it to.
+func TestAViewSubmissionWithoutACallbackIDIsDropped(t *testing.T) {
+	cb := slackgo.InteractionCallback{Type: slackgo.InteractionTypeViewSubmission}
+	if _, ok := DecodeInteraction(cb); ok {
+		t.Fatal("a submission with no callback_id was routed")
+	}
+}
+
+// A trigger id lives about three seconds, and a handler that means to open a
+// modal needs it.
+func TestABlockActionCarriesItsTriggerID(t *testing.T) {
+	cb := slackgo.InteractionCallback{
+		Type:      slackgo.InteractionTypeBlockActions,
+		TriggerID: "trigger-123",
+		ActionCallback: slackgo.ActionCallbacks{
+			BlockActions: []*slackgo.BlockAction{{ActionID: "app_prompt", BlockID: "prompt:ai_review"}},
+		},
+	}
+	cb.ActionCallback.BlockActions[0].SelectedOption.Value = "edit"
+
+	in, ok := DecodeInteraction(cb)
+	if !ok {
+		t.Fatal("the click was dropped")
+	}
+	if in.TriggerID != "trigger-123" {
+		t.Fatalf("TriggerID = %q", in.TriggerID)
+	}
+	if in.Intent != "edit" || in.Item != "prompt:ai_review" {
+		t.Fatalf("route = %s on %s", in.Intent, in.Item)
+	}
+}
+
+// Slack reports a submission's state under (block_id, action_id), which is why
+// the modal names both.
+func TestViewInputReadsTheSubmittedText(t *testing.T) {
+	cb := slackgo.InteractionCallback{}
+	cb.View.State = &slackgo.ViewState{
+		Values: map[string]map[string]slackgo.BlockAction{
+			"prompt": {"text": {Value: "the new wording"}},
+		},
+	}
+	if got := ViewInput(cb, "prompt", "text"); got != "the new wording" {
+		t.Fatalf("ViewInput = %q", got)
+	}
+	// A block Slack did not send back is a modal this build no longer renders.
+	// The handler's own "that is empty" beats a decoding error.
+	if got := ViewInput(cb, "gone", "text"); got != "" {
+		t.Fatalf("ViewInput = %q, want empty", got)
+	}
+}

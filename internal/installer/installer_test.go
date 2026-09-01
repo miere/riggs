@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -138,7 +139,7 @@ func (p prLister) ReviewRequested(context.Context, string, int) ([]github.PullRe
 // makes a test assert against the wrong question.
 const (
 	answerConfigPath   = 0
-	answerMurtaughPath = 9
+	answerMurtaughPath = 13
 )
 
 func happyScript(extra ...string) *script {
@@ -149,10 +150,14 @@ func happyScript(extra ...string) *script {
 			"U0B20G0ET9T",                          // slack user id
 			"miere@nurturecloud.com",               // jira email
 			"https://example.atlassian.net",        // jira tenant
+			"@murtaugh",                            // who assists with pull requests
 			"C0B24F579T4",                          // review-request channel
-			"@murtaugh",                            // review-request reviewer
-			"C0B29C20Z9S",                          // ai-assistance channel
-			"@murtaugh",                            // ai-assistance person
+			"@murtaugh",                            // who assists with tickets
+			"C0B29C20Z9S",                          // sme-assistance channel
+			"claude",                               // the AI command
+			"/home/m/Development",                  // where it runs
+			"",                                     // pull-request prompt: keep the default
+			"",                                     // ticket prompt: keep the default
 			"/home/m/.config/murtaugh/config.yaml", // murtaugh config
 		}, extra...),
 		// bot, app, user, jira — in prompt order.
@@ -412,4 +417,113 @@ func TestWritesTheJiraTenant(t *testing.T) {
 	if got := loadWritten(t, happyScript()).JiraBaseURL(); got != "https://example.atlassian.net" {
 		t.Fatalf("JiraBaseURL = %q", got)
 	}
+}
+
+// --- the split ---------------------------------------------------------------
+
+// The three questions this phase adds, and what each of them writes.
+func TestInstallWritesTheSplitSections(t *testing.T) {
+	s := happyScript("C0B29C20Z9S")
+	r := newRig(t, s, map[string]bool{"git.pr.fetch-reviews": true})
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	got := r.written["/tmp/riggs/config.yaml"]
+
+	for _, want := range []string{
+		// The reviewer's handle is resolved at install time, so a click does
+		// not pay for a lookup and a wrong handle is found now rather than by
+		// somebody pressing a button and seeing nothing arrive.
+		"review-request:\n",
+		`user-id: "U0B6HK02YBB"`,
+		// The human ask under its own name. Renaming it is the point of the
+		// phase: it never involved an LLM.
+		"sme-assistance:\n",
+		// And the harness that does.
+		"ai:\n",
+		`command: "claude"`,
+		`workdir: "/home/m/Development"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("config missing %q:\n%s", want, got)
+		}
+	}
+	// The retired spelling is not written, even though it still loads.
+	if strings.Contains(got, "ai-assistance:") {
+		t.Errorf("the retired section name was written:\n%s", got)
+	}
+	// A prompt left at its default is not written at all, so a later change to
+	// the default reaches this machine.
+	if strings.Contains(got, "pull-request-prompt") || strings.Contains(got, "ticket-prompt") {
+		t.Errorf("an unchanged default prompt was written out:\n%s", got)
+	}
+}
+
+// An unanswered question turns the option off. It does not fall back to the
+// admin, and it does not write an empty key for somebody to fill in and wonder
+// why nothing changed.
+func TestUnansweredQuestionsDisableTheOptions(t *testing.T) {
+	// Written out rather than patched into happyScript: an unanswered question
+	// means the follow-ups it guards are never asked, so the positions of
+	// everything after it move.
+	s := &script{
+		answers: []string{
+			"/tmp/riggs/config.yaml",               // config location
+			"miere",                                // github login
+			"U0B20G0ET9T",                          // slack user id
+			"miere@nurturecloud.com",               // jira email
+			"https://example.atlassian.net",        // jira tenant
+			"<empty>",                              // nobody assists with pull requests
+			"<empty>",                              // nobody assists with tickets
+			"<empty>",                              // no AI command
+			"/home/m/.config/murtaugh/config.yaml", // murtaugh config
+			"C0B29C20Z9S",                          // the digest job's channel
+		},
+		secrets:  []string{"xoxb-real-bot-token", "xapp-real-app-token", "", "jira-api-token"},
+		confirms: []bool{true},
+	}
+
+	r := newRig(t, s, map[string]bool{"git.pr.fetch-reviews": true})
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	got := r.written["/tmp/riggs/config.yaml"]
+
+	for _, absent := range []string{"review-request:", "sme-assistance:", "ai:"} {
+		if strings.Contains(got, absent) {
+			t.Errorf("%q was written for an unanswered question:\n%s", absent, got)
+		}
+	}
+	// And it must still load: an empty answer is an ordinary install, not a
+	// broken one.
+	cfg, err := parseWritten(t, got)
+	if err != nil {
+		t.Fatalf("the written config does not load: %v\n%s", err, got)
+	}
+	if cfg.ReviewEnabled() || cfg.SMEEnabled() || cfg.AIEnabled() {
+		t.Fatalf("an option is enabled with nothing configured: %+v", cfg)
+	}
+}
+
+// A known harness gets its own prompt flag, and the console says which
+// invocation was chosen — the difference is invisible in the answer just typed.
+func TestTheInstallerShowsHowTheHarnessWillBeRun(t *testing.T) {
+	s := happyScript("C0B29C20Z9S")
+	r := newRig(t, s, map[string]bool{"git.pr.fetch-reviews": true})
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.Contains(s.transcript(), "claude -p <prompt>") {
+		t.Fatalf("the transcript does not say how the harness runs:\n%s", s.transcript())
+	}
+}
+
+// parseWritten loads a rendered config the way the binary that wrote it would.
+func parseWritten(t *testing.T, body string) (*config.Config, error) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("writing %s: %v", path, err)
+	}
+	return config.Load(path)
 }

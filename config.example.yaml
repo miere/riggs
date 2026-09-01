@@ -37,26 +37,40 @@ admin:
 # as itself when run by launchd — and the daemon would never hear the clicks.
 # env-file: ~/.config/murtaugh/.env
 
-# "Ask for Code Review" on a bulk digest row. It drops one message and stops —
+# Each digest row offers up to four verbs, and every one of them is optional.
+# Two ASK a person and stop; two RUN a local harness that does the work. They
+# were one option for a long time — labelled "Ask for AI Assistance", tagging a
+# colleague, starting nothing — which is the confusion these sections end.
+#
+# An option whose setting is absent is not rendered at all. A control that
+# cannot act is worse than one that was never there.
+
+# "Ask for Code Review" on a pull-request row. It drops one message and stops —
 # nothing is delegated and no review is triggered; a human reads it and decides.
+#
+# There is no fallback to the admin. It had one while this was the only verb on
+# the row; beside "Run Code Review" a menu entry that quietly means "send myself
+# a card" reads as a bug next to one that does the work.
 # review-request:
 #   # Where the ask is posted. Omitted, it is DMed to the tagged user.
 #   channel: C0B24F579T4
-#   # Who is tagged. Omitted, the admin is — asking yourself is a defensible
-#   # default, and it never silently tags a stranger.
+#   # Who is tagged. Omitted, the option is not offered.
 #   user-id: U0B20G0ET9T
 #   prompt: Could you take a look at this pull request when you get a chance?
 
-# "Ask for AI Assistance" on a Jira digest row. Same shape, same guarantee, and
+# "Ask for SME Assistance" on a Jira digest row. Same shape, same guarantee, and
 # deliberately SEPARATE settings: one asks a human to review code that exists,
-# the other asks somebody to look at work that does not. They end up pointed at
-# different channels and different people, and sharing a setting would mean
-# changing one silently moved the other. Neither is ever defaulted from the
-# other — an unset value here falls back to the admin, not to review-request.
-# ai-assistance:
+# the other asks a subject-matter expert whether work that does not exist yet is
+# worth picking up. They end up pointed at different channels and different
+# people, and sharing a setting would mean changing one silently moved the
+# other. Neither is ever defaulted from the other, or from the admin.
+#
+# It was spelled `ai-assistance` until the split. That key still loads and still
+# means this; `riggs capabilities` says so, and renaming it is one edit.
+# sme-assistance:
 #   # Where the ask is posted. Omitted, it is DMed to the tagged user.
 #   channel: C0B29C20Z9S
-#   # Who is tagged. Omitted, the admin is.
+#   # Who is tagged. Omitted, the option is not offered.
 #   user-id: U0B20G0ET9T
 #   # {user} and {requester} are replaced with the corresponding mentions. A
 #   # prompt that mentions neither still gets both: the recipient is prefixed
@@ -64,6 +78,40 @@ admin:
 #   # feature and a wording change must not silently drop them. The default
 #   # below places both itself, so it gets neither addition.
 #   prompt: "{user}, {requester} needs your help check if this ticket is actionable as it is"
+
+# "Run Code Review" and "Run AI Assistance": the local harness that actually
+# does the work, on this machine, reporting back in the digest's thread.
+#
+# It holds no credential — the harness carries its own auth, exactly as `gh`
+# does for GitHub. Omit `command` and neither option is offered.
+# ai:
+#   # The harness, with any fixed arguments. Split on whitespace, with no quote
+#   # handling: an invocation needing more than that wants a wrapper script,
+#   # which is one line and legible from the outside.
+#   #
+#   # A known harness (claude) gets its own prompt flag — `claude -p '<prompt>'`.
+#   # Anything else is handed the prompt as its first argument.
+#   command: claude
+#
+#   # Where it runs. This is the setting that decides whether the feature works
+#   # at all: Claude Code reads the project it is standing in, and a launch
+#   # agent inherits a working directory of `/`.
+#   workdir: ${HOME}/Development
+#
+#   # What each run is asked to do. Both are editable from the App Home tab, and
+#   # an absent one uses the built-in default — which is the point of leaving it
+#   # absent, since a later change to the default then reaches this machine.
+#   #
+#   # {ref}/{key} and {url} become the item. A prompt naming neither still gets
+#   # both appended: the wording is configuration, the subject is not, and a
+#   # prompt edited to drop it would send the harness off to review whatever it
+#   # found in the working directory and report success.
+#   pull-request-prompt: Review the pull request {ref} ({url}). Leave your review as a comment.
+#   ticket-prompt: Assess whether {key} ({url}) is actionable as written.
+#
+#   # How long one run may take. Bounded because this runs under a daemon nobody
+#   # is watching, and a hung harness is indistinguishable from a thinking one.
+#   timeout: 15m
 
 # The Slack accounts Riggs may deliver through. A tool picks one with
 # --slack-profile; with none given, the profile named "default" is used, and a
