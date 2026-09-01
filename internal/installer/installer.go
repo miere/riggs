@@ -25,6 +25,7 @@ import (
 	"github.com/miere/riggs-mcp/internal/blockkit"
 	"github.com/miere/riggs-mcp/internal/config"
 	"github.com/miere/riggs-mcp/internal/github"
+	"github.com/miere/riggs-mcp/internal/notify"
 	"github.com/miere/riggs-mcp/internal/slack"
 )
 
@@ -33,18 +34,14 @@ type PRLister interface {
 	ReviewRequested(ctx context.Context, login string, limit int) ([]github.PullRequest, error)
 }
 
-// CommandRunner executes an external command, returning its combined output.
-type CommandRunner func(ctx context.Context, name string, args ...string) ([]byte, error)
-
 // Options carries what only the composition root knows.
 type Options struct {
-	// RiggsPath is the absolute path to this binary, used as the job command.
+	// RiggsPath is the absolute path to this binary.
+	//
+	// It used to be the command a Murtaugh job invoked. Jobs now run inside the
+	// daemon, which resolves its own executable at run time, so this is left
+	// only for the messages that tell the operator where Riggs is.
 	RiggsPath string
-	// ToolsFor reports which tools this binary exposes under the config at the
-	// given path. It is a callback rather than a set because the answer
-	// depends on the config the installer has just written — and a job whose
-	// tool does not exist would otherwise be registered to fail every minute.
-	ToolsFor func(configPath string) (map[string]bool, error)
 }
 
 // Installer runs the interactive flow.
@@ -65,11 +62,13 @@ type Installer struct {
 	ghAuth   func(ctx context.Context) (github.Auth, error)
 	newPRs   func(token string) PRLister
 	poster   slack.Poster
-	runCmd   CommandRunner
 	getenv   func(string) string
 	writeCfg func(path string, data []byte) error
 	lookPath func(string) (string, error)
 	stat     func(string) (os.FileInfo, error)
+	// saveJobs persists the seeded schedule. A seam, so the installer's tests
+	// never create a database.
+	saveJobs func(dbPath string, jobs []notify.Job) error
 }
 
 // New builds an Installer with live dependencies.
@@ -81,11 +80,7 @@ func New(p Prompter, opts Options) *Installer {
 		newPRs:     func(token string) PRLister { return github.New(token) },
 		poster:     slack.NewAPI(),
 		lookupUser: slack.NewAPI().LookupUserID,
-		runCmd: func(ctx context.Context, name string, args ...string) ([]byte, error) {
-			out, errOut, err := github.ExecRunner(ctx, name, args...)
-			return append(out, errOut...), err
-		},
-		getenv: os.Getenv,
+		getenv:     os.Getenv,
 		writeCfg: func(path string, data []byte) error {
 			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 				return err
@@ -95,6 +90,7 @@ func New(p Prompter, opts Options) *Installer {
 		},
 		lookPath: exec.LookPath,
 		stat:     os.Stat,
+		saveJobs: storeJobs,
 	}
 }
 
@@ -120,7 +116,7 @@ func (i *Installer) Run(ctx context.Context) error {
 	if err := i.smokeTest(ctx, cfg); err != nil {
 		return err
 	}
-	if err := i.wireMurtaugh(ctx, cfg, path); err != nil {
+	if err := i.gatherJobs(ctx, path); err != nil {
 		return err
 	}
 

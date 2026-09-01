@@ -109,9 +109,23 @@ type cardBlock struct {
 }
 
 type menuOptionObj struct {
-	Text  textObj `json:"text"`
-	Value string  `json:"value"`
-	URL   string  `json:"url,omitempty"`
+	Text    textObj     `json:"text"`
+	Value   string      `json:"value"`
+	URL     string      `json:"url,omitempty"`
+	Confirm *confirmObj `json:"confirm,omitempty"`
+}
+
+// confirmObj is Slack's confirmation dialog, attached to an option that cannot
+// be undone.
+//
+// A pointer with omitempty, so an option without one encodes exactly the bytes
+// it always did — every existing menu's fingerprint (§7c) depends on that.
+type confirmObj struct {
+	Title   textObj `json:"title"`
+	Text    textObj `json:"text"`
+	Confirm textObj `json:"confirm"`
+	Deny    textObj `json:"deny"`
+	Style   string  `json:"style,omitempty"`
 }
 
 type menuElem struct {

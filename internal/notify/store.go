@@ -129,6 +129,28 @@ CREATE TABLE IF NOT EXISTS items (
 
 CREATE INDEX IF NOT EXISTS items_post   ON items(post_key);
 CREATE INDEX IF NOT EXISTS items_stream ON items(stream);
+
+-- jobs are Riggs' own schedule, which Murtaugh used to own.
+--
+-- They live in the ledger rather than in config.yaml because they are not a
+-- setting: half of every row is what HAPPENED — when it last ran, for how long,
+-- whether it worked — and that has no business in a hand-edited file that a
+-- human is expected to read. The definition and its outcome are one record
+-- because the Home tab shows them as one line.
+CREATE TABLE IF NOT EXISTS jobs (
+	name        TEXT PRIMARY KEY,
+	args        TEXT NOT NULL,
+	spec        TEXT NOT NULL,
+	timeout_ms  INTEGER NOT NULL,
+	enabled     INTEGER NOT NULL DEFAULT 1,
+	created_at  TEXT NOT NULL,
+	updated_at  TEXT NOT NULL,
+	last_run_at TEXT NOT NULL DEFAULT '',
+	last_ok     INTEGER NOT NULL DEFAULT 0,
+	last_ms     INTEGER NOT NULL DEFAULT 0,
+	last_error  TEXT NOT NULL DEFAULT '',
+	last_output TEXT NOT NULL DEFAULT ''
+);
 `
 
 func (s *Store) migrate(ctx context.Context) error {

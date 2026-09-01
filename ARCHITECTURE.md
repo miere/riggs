@@ -760,6 +760,52 @@ own controls, as opposed to the Update button, which belongs to a release. New
 operations go in here as options; a bare token value each, so the routing table
 keeps matching them exactly.
 
+### The jobs
+
+The Jobs section is what replaces going and reading another tool's database to
+find out what Riggs is running. A schedule you cannot see is one you assume is
+working, and the two jobs Riggs took over were invisible unless you went and
+looked somewhere else entirely.
+
+It sits **above** the prompts, because it answers the question somebody opens
+this tab to ask. A prompt is read when you are about to change it; a schedule is
+read when you are wondering whether anything is running at all.
+
+Structurally it is the prompt rows again: one section per job, the job's name in
+the `block_id`, one overflow per row whose option values are bare tokens. That
+is not duplication to be factored out — it is the pattern this surface has, and
+a shared renderer would need a flag for every place the two diverge, starting
+with the confirmation on Delete.
+
+- **Each row carries what it is, what it runs, and how it went**: the name and
+  cadence, the command line, and a status line — `✓ ran 2m ago in 1.4s · next in
+  58s`, or the failure with its reason. The status is rendered by
+  `internal/apphome`, not by `blockkit`: it is arithmetic on a clock, and a
+  package that lays out JSON has no business holding one.
+- **A running job says so, before anything else on the line.** A job that takes
+  minutes is otherwise indistinguishable from one that is not firing — including
+  when it has been disabled mid-run, which is why "running" is checked first.
+- **A disabled job shows no next-run time**, because there is not one. "Disabled
+  · next in 40s" is the kind of detail that makes a reader doubt the whole panel.
+- **Delete carries Slack's own confirmation**, on the option itself. It is the
+  one control on this surface that destroys something and cannot be undone, an
+  overflow gives no second chance of its own, and "I meant to press Disable" is
+  one row's distance away. Nothing else is confirmed: a control that asks twice
+  is one people learn to click through.
+- **Disable keeps the definition and the history.** "Off for now" and "deleted"
+  are different intentions, and only one of them is recoverable.
+- **Run now takes the same code path a tick does.** A "Run now" that ran things
+  differently would be a way to prove the wrong thing works. It redraws the tab
+  before running as well as after, because a control that shows nothing for two
+  minutes reads as one that did nothing.
+- **New job… sits on the controls menu, directly under Restart.** It has nowhere
+  else to live: there is no row to hang it off when there are no jobs yet, which
+  is exactly when somebody goes looking for it.
+- **An empty schedule renders an empty STATE, not an empty section.** "Nothing is
+  scheduled" is a fact worth saying, and it points at the control that fixes it;
+  a bare header reads as a section that failed to load. A build with no ledger at
+  all draws no section, which is a different fact again.
+
 ### The prompts
 
 Riggs sends four pieces of prose on the admin's behalf: the wording of each ask
@@ -1147,6 +1193,124 @@ Rules:
 Tables: `cards` (key → profile, channel, ts, fingerprint), `latches`
 (key, name → fired_at) and `http_cache` (url → etag, body) for §8.
 
+## 9c. The schedule
+
+`internal/schedule` is Riggs' own cron. It replaces Murtaugh's, which is the
+last half of the "always the callee" invariant §1 opened with: Phase 6 took the
+inbound half when Riggs got its own Slack app, and this takes the rest.
+
+The schedule lives **inside the daemon**. That is the decision everything else
+follows from, and it was chosen against the obvious alternative — one launchd
+agent or systemd timer per job — for reasons that are all about the seam
+between Riggs and an init system:
+
+- **The calendar dialects do not map.** launchd offers `StartInterval` (an
+  integer of seconds) or `StartCalendarInterval` (a dict with no ranges and no
+  steps: you cannot write `*/5`, you enumerate all twelve values). systemd
+  offers `OnCalendar`/`OnUnitActiveSec`, a third syntax again. A cron expression
+  translates cleanly into neither, so per-job units would mean owning a
+  translation layer with real semantic holes.
+- **systemd user units stop at logout** unless lingering is enabled, and
+  enabling it needs root. The failure is the worst kind: works all afternoon,
+  gone by morning, nothing in the log.
+- **Not every Linux has systemd.** Alpine, WSL1, plenty of containers. "Out of
+  the box on Linux" cannot rest on it.
+- **The daemon has to be up anyway.** If it is down, every button in every digest
+  is dead and the jobs not firing is the least of the problem. So the one real
+  cost of an in-process scheduler — jobs pause when the daemon does — is a cost
+  that was already paid.
+
+What is left is one supervised process on each platform (§12b), and above it a
+single code path that is identical on both.
+
+### What a job is
+
+A name, an argument list, a schedule, a timeout and an enabled flag — stored in
+the **ledger**, not in `config.yaml`. Half of every record is what *happened*
+(when it last ran, for how long, whether it worked, what it said when it did
+not), and that has no place in a hand-edited file whose comments are the reason
+it can be fixed. The definition and its outcome are one row because the Home tab
+draws them as one line.
+
+- **A job runs THIS binary again, as a child process.** Not an in-process call
+  through the tool registry, which would be cheaper. The argv is byte-identical
+  to what Murtaugh ran, so the migration changes when a job fires and nothing
+  about what it does; a job that hangs or crashes cannot take the daemon with
+  it; and a timeout is a signal to a process rather than a goroutine politely
+  noticing a cancelled context, which a blocked syscall never does. The tools
+  also assume they own the process — they open the ledger, do one thing and
+  exit — and running twenty of them inside a long-lived daemon is a different
+  set of assumptions from the ones they were written under.
+- **The child inherits the daemon's environment verbatim**, which is
+  load-bearing: that environment is the one the supervisor gave it, captured
+  PATH and resolved `env-file` included (§12b). A job started with less would
+  fail on `gh` not being found, having worked perfectly when run by hand.
+- **`--config-file` is passed only when the config is not where Riggs would look
+  anyway**, the same rule the installer followed.
+
+### One field, two dialects
+
+`3m` is an interval; `0 9 * * 1-5` is a calendar expression. They are told apart
+by shape rather than by a second setting, because a job has one schedule and a
+form with "kind" and "value" invites the pair where kind says interval and value
+holds a cron expression. Murtaugh spelled these as two flags and its jobs only
+ever used the first.
+
+The cron parser is hand-written. The supported grammar — `*`, `n`, `a-b`, `*/s`,
+`a-b/s` and comma-separated lists — is the whole of what anybody writes, and
+small enough to be read and tested in one sitting. Names (`MON`, `JAN`) are
+deliberately absent: they are the half of cron syntax that varies between
+implementations, and a job that runs on the wrong day because two parsers
+disagreed about `SUN` is precisely the bug this must not have. The
+day-of-month/day-of-week **union** IS reproduced, wart and all, because somebody
+pasting an expression out of a crontab has to get what the crontab did.
+
+Calendar expressions are evaluated in **local time**: "09:00 on weekdays" means
+the operator's morning, and a job that drifts an hour twice a year because it
+was pinned to UTC is one nobody trusts.
+
+### The loop
+
+A fifteen-second tick, against a minimum interval and a calendar resolution of a
+minute. It bounds how late a job can be, and costs one read of a table with a
+handful of rows.
+
+- **Missed runs are SKIPPED, not caught up.** Due times are held in memory, not
+  stored, which is what makes that true by construction: a daemon that was down
+  over nine o'clock comes back and waits for tomorrow rather than firing a
+  morning report in the afternoon. The digest jobs lose nothing by it — they are
+  governed by a three-hour cooldown (§9b), not by their tick.
+- **An interval job is due immediately on first sight; a calendar job waits.**
+  `every 3m` after a restart means the digest should be current now. `0 9 * * *`
+  said when it wants to run, and a restart at 14:00 is not it.
+- **A job that overruns its own cadence is skipped, not doubled up.** Two passes
+  of the same digest race each other to write the same ledger rows. The claim
+  lives in the scheduler, which is why it is the one long-lived thing here: a
+  runner rebuilt per click could not tell that a job is already running.
+- **There is no global concurrency cap.** Different jobs run at once, which is
+  what a busy morning looks like.
+- **A panicking job does not take the daemon down.** It is the first thing in
+  this process that runs unattended, and there is nobody to notice.
+- **Only the last run is kept.** A full history belongs in a log; the question
+  this table answers is "is this working?", and that is answered by the most
+  recent answer to it.
+- **An unreadable stored schedule is reported and skipped**, not fatal — the
+  alternative is a job that silently never runs.
+
+### Migration
+
+`riggs jobs import` materialises the adopted jobs from `schedule.Adopted`, this
+repository's own declaration of what they are, rather than reading Murtaugh's
+database. Riggs cannot see that schema and has no business learning it; the two
+definitions are the ones `riggs install` has been registering all along, so
+copying them reproduces exactly what was running from a source this repo can be
+held to. The names are kept, so a moved job is not mistaken for a new one.
+
+Nothing on this side can remove Murtaugh's copies — that is its config — so the
+import and the installer both **print the commands and say why**: two schedulers
+driving one digest is noise rather than redundancy, announcing every pull request
+twice from two processes racing to write the same rows.
+
 ## 9b. The item ledger (bulk digests)
 
 §9's unit is a **card**: one message about one entity, keyed by that entity
@@ -1354,21 +1518,20 @@ Rules:
   later, unattended.
 - Zero PRs awaiting review is not a failure: a confirmation card is sent
   instead, and the console says which happened.
-- Murtaugh is configured **only** through its CLI — `murtaugh jobs define`,
-  never a write to its database: the command re-validates the whole assembled
-  config and rolls back a change that would leave it invalid, which a
-  hand-written row would bypass. Note `cfg job set` is documented as
-  equivalent but rejects `--args`, which would leave the job invoking Riggs
-  with no verb at all.
-- Ticket job cadences are carried over unchanged (3m and the weekday cron). A
-  migration that also changes the schedule makes it impossible to attribute a
-  behaviour difference. The review job is the one exception, and it is not a
-  migration any more — see §12c.
-- A job whose tool this build does not expose is **skipped and reported**, not
-  installed. Registering `jira.tickets` before phase 4 would mean a scheduled
-  failure every three minutes.
-- The job passes `--config-file` only when the config is not where Riggs would
-  look anyway, so the common case stays readable.
+- The installer **seeds Riggs' own schedule** (§9c) into the ledger it is about
+  to hand the daemon. It used to register the jobs with Murtaugh through its
+  CLI; there is no longer a second tool in the chain, and therefore no longer a
+  second place for the two of them to disagree about what is running.
+- Cadences are carried over unchanged. A migration that also changes the
+  schedule makes it impossible to attribute a behaviour difference.
+- An **existing job is left alone**. Re-running the installer must not undo a
+  schedule somebody has since edited from the Home tab.
+- It **says how to retire Murtaugh's copies** and why. Nothing here can remove
+  them — that is Murtaugh's config, not ours — and two schedulers driving one
+  digest is noise rather than redundancy.
+- Each job is asked for a channel and a Slack profile. The profile is not
+  cosmetic: a click is delivered to the app that POSTED the message, so a digest
+  sent through the wrong one renders a menu the daemon never hears about.
 - **The digest job names its GitHub user on the command**, and `admin.github-login`
   no longer exists. The job says who it is for: a config edit cannot repoint the
   queue at a different person, and reading the job answers the question without a
@@ -1435,12 +1598,60 @@ moment checks go green *is* the notification.
 
 ### 12b. Supervising the daemon
 
-`riggs launchd <install|uninstall|status>` (in `internal/launchd`) runs
-`riggs daemon` as a macOS launch agent, labelled `io.riggs.daemon`.
+`riggs service <install|uninstall|status|restart>` (in `internal/service`) runs
+`riggs daemon` under whichever init this machine has: a **launch agent** on
+macOS, labelled `io.riggs.daemon`, or a **systemd user unit** on Linux, called
+`riggs-daemon.service`. `riggs launchd` is the former name and still works; it
+prints one line on stderr and forwards.
 
-Everything else Riggs does is a one-shot Murtaugh starts and waits for. The
-daemon is the first part that has to *keep running* — across a crash, a logout
-and a reboot — and nothing in the design had an opinion about that.
+Everything else Riggs does is a one-shot. The daemon is the part that has to
+*keep running* — across a crash, a logout and a reboot — and since §9c it also
+carries the schedule, so keeping it up stopped being a macOS convenience and
+became the one piece of setup the whole design rests on.
+
+`internal/launchd` is unchanged and is wrapped rather than rewritten: the plist
+it writes, the bootout-first install, the captured PATH and the XML escaping are
+all still exactly right, and reimplementing a working supervisor to fit a new
+interface is how a working supervisor stops working.
+
+#### The Linux half
+
+A **user** unit, not a system one. Everything Riggs touches belongs to one
+person — their Slack tokens, their `gh` login, their AI harness, their home
+directory — and a system unit would run as root and then have to be told how to
+become them, which is a lot of ceremony and one more way to end up with a daemon
+that cannot read its own config.
+
+The cost of that choice is the one thing about systemd that surprises people:
+
+- **A user unit stops when the user logs out**, unless lingering is enabled.
+  `riggs service install` checks `loginctl show-user --property=Linger` and
+  prints the exact `sudo loginctl enable-linger` command when it is off. It
+  checks rather than fixes: enabling it needs polkit or root, and a tool that
+  silently escalated to change a login-manager setting would be doing something
+  nobody asked for.
+- **A machine with no systemd is refused, not half-installed.** Both
+  `/run/systemd/system` and the `systemctl` binary are required — the first
+  because systemd may be installed without being PID 1, which is the state
+  inside many containers and under WSL1, where every systemctl call fails with a
+  message about D-Bus that explains nothing. The refusal says what to do instead.
+- **`Restart=always`, not `on-failure`** — the daemon exits *cleanly* when its
+  socket closes, exactly the reasoning behind launchd's unconditional
+  `KeepAlive`. `RestartSec` is launchd's `ThrottleInterval`.
+- **`Environment=PATH`**, for the same reason the plist carries one.
+- **Every ExecStart argument is quoted**, unconditionally: systemd splits on
+  whitespace, and a home directory with a space in it is unusual and entirely
+  legal.
+- **`XDG_CONFIG_HOME` is honoured**, because systemd honours it — installing to
+  `~/.config` on a machine that has moved it writes a file systemd never reads,
+  and the only symptom is a unit that does not exist.
+- **`disable --now` before the file is removed.** Disabling a unit systemd can no
+  longer read leaves the symlink in `.wants` behind, and every later
+  daemon-reload complains about it.
+
+The Home tab's **Restart** control goes through this too, so it works on Linux.
+It was launchd-only, which was defensible while the daemon was a macOS
+convenience and is not now that it carries the schedule.
 
 Rules:
 
@@ -1543,6 +1754,7 @@ one *would* live at still decides, which is the state a fresh machine and
 | 26 | The Home tab's controls menu: Restart (§7e) | done |
 | 27 | The ticket digest: rotation extracted to `internal/bulk`, `jira.tickets.bulk`, Ask for AI Assistance (§8d) | done |
 | 28 | Asking split from running: `internal/ai` revived, `sme-assistance`, editable prompts on the Home tab (§7bb, §7e) | done |
+| 29 | Riggs owns the schedule: `internal/schedule` in the daemon, jobs on the Home tab, `riggs service` for launchd and systemd (§9c, §12b) | done |
 
 ## 13b. Cutover
 
@@ -1568,6 +1780,41 @@ Rollback: the previous job and rule definitions are captured under
 `/tmp/riggs-cutover-backup/` and can be restored with the same commands.
 
 ## 14. Change log
+
+- **unreleased** — Phase 29. Riggs owns its own schedule (§9c). Murtaugh held
+  the cron and invoked `riggs git pr --bulk` every three minutes; now a ticker
+  inside the daemon does, and Murtaugh stops being a dependency at all — the
+  other half of the "always the callee" invariant §1 opened with, the first half
+  of which Phase 6 already reversed.
+
+  The schedule lives IN the daemon rather than in one launchd agent or systemd
+  timer per job, and that is the whole architectural claim: launchd's
+  `StartCalendarInterval` has no ranges and no steps, systemd's `OnCalendar` is a
+  third syntax again, a cron expression maps onto neither, systemd user units
+  stop at logout without lingering, and some Linuxes have no systemd at all. A
+  ticker in a Go process has none of those problems and is the same code on both
+  platforms. The one cost — jobs pause when the daemon does — was already paid:
+  a daemon that is down has no working buttons either.
+
+  A job runs THIS binary again as a child process, with byte-identical argv to
+  what Murtaugh ran, so the migration changes when a job fires and nothing about
+  what it does. Missed runs are skipped rather than caught up; a job that
+  overruns its cadence is skipped rather than doubled; a panicking one does not
+  take the daemon with it. Schedules are one field in two dialects (`3m`, or
+  `0 9 * * 1-5`) with a hand-written cron parser that reproduces the
+  day-of-month/day-of-week union wart on purpose.
+
+  The Home tab grows a **Jobs** section above the prompts — one row per job with
+  its command, its cadence and how the last run went, an overflow carrying Edit,
+  Run now, Disable and a confirmed Delete — and **New job…** under Restart on the
+  controls menu, opening Riggs' second modal. `riggs jobs` is the terminal half:
+  list, add, rm, enable, disable, run and import.
+
+  `riggs launchd` becomes `riggs service` (§12b) and gains a systemd user unit,
+  so Linux is supported out of the box: it checks for lingering and prints the
+  fix, refuses a machine where systemd is not PID 1 rather than half-installing,
+  and quotes every ExecStart argument. The Home tab's Restart goes through it
+  too, and so works on Linux for the first time. `riggs launchd` still forwards.
 
 - **unreleased** — Phase 28. Asking somebody and doing the work stop being the
   same option (§7bb). "Ask for AI Assistance" tagged a colleague and started

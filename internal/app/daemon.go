@@ -11,9 +11,12 @@ import (
 	"github.com/miere/riggs-mcp/internal/ai"
 	"github.com/miere/riggs-mcp/internal/apphome"
 	"github.com/miere/riggs-mcp/internal/blockkit"
+	"github.com/miere/riggs-mcp/internal/config"
 	"github.com/miere/riggs-mcp/internal/daemon"
-	"github.com/miere/riggs-mcp/internal/launchd"
+	"github.com/miere/riggs-mcp/internal/notify"
 	"github.com/miere/riggs-mcp/internal/pullrequest"
+	"github.com/miere/riggs-mcp/internal/schedule"
+	"github.com/miere/riggs-mcp/internal/service"
 	"github.com/miere/riggs-mcp/internal/slack"
 	"github.com/miere/riggs-mcp/internal/ticket"
 	"github.com/miere/riggs-mcp/internal/updates"
@@ -41,18 +44,83 @@ func (a *Application) runDaemon(ctx context.Context) error {
 	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel()}))
+
+	// The scheduler and the Home tab share ONE ledger handle, held for the life
+	// of the daemon. Everywhere else in this codebase a handler opens the
+	// ledger per click and closes it again, because a handle held across the
+	// reconcile pass in another process goes stale — and that reasoning ends
+	// here, because the reconcile pass now runs in THIS process. What is left
+	// is a scheduler that reads a small table every fifteen seconds, which is
+	// not something to open a database for each time.
+	store, scheduler, err := a.scheduler(logger)
+	if err != nil {
+		// Not fatal, on the rule the whole binary follows: a missing capability
+		// disables a feature and never stops the boot. Every button still
+		// works; nothing fires on its own until this is fixed.
+		logger.Error("the schedule is unavailable; no jobs will run", "error", err)
+	}
+	if store != nil {
+		defer store.Close()
+	}
+
 	router := daemon.NewRouter()
 	a.registerInteractions(router, creds)
 	a.registerRunInteractions(router, creds, logger)
 
-	home := a.appHome(creds, logger)
+	home := a.appHome(creds, logger, store, scheduler)
 	a.registerHomeInteractions(router, home)
+	a.registerJobInteractions(router, home)
+
+	// Cancelled when the listener returns, so the scheduler stops with the
+	// process rather than outliving the thing it reports to.
+	ctx, stop := context.WithCancel(ctx)
+	defer stop()
+	if scheduler != nil {
+		go func() {
+			if err := scheduler.Run(ctx); err != nil {
+				logger.Error("the scheduler stopped", "error", err)
+			}
+		}()
+	}
 
 	listener := daemon.NewSocketListener(creds, logger)
 	return daemon.New(listener, router, creds.Profile, logger).
 		WithAppHome(home).
 		WithReporter(&clickReporter{api: slack.NewAPI(), creds: creds}).
 		Run(ctx)
+}
+
+// scheduler opens the ledger and assembles the job loop.
+//
+// A nil scheduler with a nil error is impossible: either both come back, or an
+// error explains why neither did. The store is returned separately because the
+// Home tab reads and writes jobs through it directly — the scheduler runs them,
+// it does not own them.
+func (a *Application) scheduler(logger *slog.Logger) (*notify.Store, *schedule.Scheduler, error) {
+	store, err := ledger(a.cfg)
+	if err != nil {
+		return nil, nil, fmt.Errorf("opening the ledger: %w", err)
+	}
+	exec, err := schedule.SelfExec(a.jobConfigFlag())
+	if err != nil {
+		store.Close()
+		return nil, nil, err
+	}
+	return store, schedule.New(store, exec, logger), nil
+}
+
+// jobConfigFlag is the config path a job is told to use, and empty when it is
+// where Riggs would look anyway.
+//
+// The same rule the Murtaugh installer followed (§12): passing it always would
+// put an absolute path in every log line for no benefit, and passing it never
+// would send a daemon started with --config-file to the wrong config in its own
+// children.
+func (a *Application) jobConfigFlag() string {
+	if a.cfg == nil || a.cfg.Path == config.NoFilePath || a.cfg.Path == config.DefaultPath() {
+		return ""
+	}
+	return a.cfg.Path
 }
 
 // clickReporter tells whoever clicked that their click failed.
@@ -99,7 +167,8 @@ func (r *clickReporter) ReportFailure(ctx context.Context, in slack.Interaction,
 // dependencies per interaction — but the reason for those is a ledger and a
 // GitHub token that go stale between the handful of clicks a week anyone makes,
 // and neither applies here.
-func (a *Application) appHome(creds slack.Credentials, logger *slog.Logger) *apphome.Publisher {
+func (a *Application) appHome(creds slack.Credentials, logger *slog.Logger,
+	store *notify.Store, scheduler *schedule.Scheduler) *apphome.Publisher {
 	checker := updates.New(updates.Deps{
 		Current: version.String(),
 		HTTPGet: updates.HTTPGetter(),
@@ -115,10 +184,15 @@ func (a *Application) appHome(creds slack.Credentials, logger *slog.Logger) *app
 		// and in the struct this process is already reading from, which is what
 		// makes a reworded prompt take effect on the next click rather than the
 		// next restart.
-		Prompts:   a.cfg,
+		Prompts: a.cfg,
+		// Typed nils would satisfy the interfaces and then panic on first use,
+		// so an unavailable ledger leaves the fields genuinely empty and the
+		// Jobs section is not drawn at all.
+		Jobs:      jobStoreOrNil(store),
+		Runner:    jobRunnerOrNil(scheduler),
 		Checker:   checker,
 		Installer: updates.NewInstaller(checker),
-		Restart:   restartViaLaunchd,
+		Restart:   restartViaSupervisor,
 		Logger:    logger,
 	})
 }
@@ -222,15 +296,96 @@ func (a *Application) registerRunInteractions(router *daemon.Router, creds slack
 		}))
 }
 
-// restartViaLaunchd asks launchd to restart this daemon, so it comes back
-// running the binary that was just installed.
+// jobStoreOrNil keeps a nil *notify.Store out of a non-nil interface.
 //
-// Options carries only what the restart needs. The plist is not rewritten here
-// — that is `riggs launchd install`'s job — so the binary path, config path and
+// The classic Go trap: a nil pointer in an interface is not a nil interface, so
+// `Jobs != nil` would be true and the first read would panic. Both of these
+// exist so the "not wired up" path is genuinely not wired up.
+func jobStoreOrNil(store *notify.Store) apphome.JobStore {
+	if store == nil {
+		return nil
+	}
+	return store
+}
+
+// jobRunnerOrNil does the same for the scheduler.
+func jobRunnerOrNil(s *schedule.Scheduler) apphome.JobRunner {
+	if s == nil {
+		return nil
+	}
+	return s
+}
+
+// registerJobInteractions installs the Jobs section's controls.
+//
+// Which job a click is about rides in the row's block_id, exactly as a prompt
+// and a pull request do. Delete carries Slack's own confirmation on the option
+// itself (§7e), so there is no second one here.
+func (a *Application) registerJobInteractions(router *daemon.Router, home *apphome.Publisher) {
+	router.Handle(blockkit.HomeMenuActionID, blockkit.HomeNewJobIntent,
+		daemon.HandlerFunc(func(ctx context.Context, in slack.Interaction) error {
+			return home.NewJob(ctx, in.UserID, in.TriggerID)
+		}))
+
+	for intent, handle := range map[string]func(context.Context, *apphome.Publisher, slack.Interaction) error{
+		blockkit.HomeJobEditIntent: func(ctx context.Context, h *apphome.Publisher, in slack.Interaction) error {
+			return h.EditJob(ctx, in.UserID, jobName(in.Item), in.TriggerID)
+		},
+		blockkit.HomeJobRunIntent: func(ctx context.Context, h *apphome.Publisher, in slack.Interaction) error {
+			return h.RunJob(ctx, in.UserID, jobName(in.Item))
+		},
+		blockkit.HomeJobToggleIntent: func(ctx context.Context, h *apphome.Publisher, in slack.Interaction) error {
+			return h.ToggleJob(ctx, in.UserID, jobName(in.Item))
+		},
+		blockkit.HomeJobDeleteIntent: func(ctx context.Context, h *apphome.Publisher, in slack.Interaction) error {
+			return h.DeleteJob(ctx, in.UserID, jobName(in.Item))
+		},
+	} {
+		handle := handle
+		router.Handle(blockkit.HomeJobActionID, intent,
+			daemon.HandlerFunc(func(ctx context.Context, in slack.Interaction) error {
+				return handle(ctx, home, in)
+			}))
+	}
+
+	// The job editor coming back. Every field is read by (block_id, action_id),
+	// which is how Slack reports a submission's state.
+	router.Handle(blockkit.JobModalCallbackID, slack.ViewSubmitIntent,
+		daemon.HandlerFunc(func(ctx context.Context, in slack.Interaction) error {
+			field := func(blockID string) string {
+				return slack.ViewInput(in.Raw, blockID, blockkit.JobModalActionID)
+			}
+			return home.SaveJob(ctx, in.UserID, in.Item,
+				field(blockkit.JobModalNameBlockID),
+				field(blockkit.JobModalCommandBlockID),
+				field(blockkit.JobModalScheduleBlockID),
+				field(blockkit.JobModalTimeoutBlockID))
+		}))
+}
+
+// jobName strips the namespace a job row's block_id carries.
+func jobName(blockID string) string {
+	return strings.TrimPrefix(blockID, blockkit.HomeJobBlockPrefix)
+}
+
+// restartViaSupervisor asks this machine's init to restart the daemon, so it
+// comes back running the binary that was just installed.
+//
+// It was launchd-only, which was defensible while the daemon was a macOS
+// convenience and is not now that it carries the schedule: a Linux admin
+// pressing Restart on the Home tab would have got an error naming a supervisor
+// their machine does not have.
+//
+// Options carries only what the restart needs. The unit is not rewritten here —
+// that is `riggs service install`'s job — so the binary path, config path and
 // profile baked into it are left exactly as they were, which is the point: the
-// agent restarts onto the same path, and the file at that path is new.
-func restartViaLaunchd(ctx context.Context) error {
-	return launchd.New(nil, launchd.Options{}).Restart(ctx)
+// supervisor restarts onto the same path, and the file at that path is new.
+func restartViaSupervisor(ctx context.Context) error {
+	manager, err := service.New(nil, service.Options{})
+	if err != nil {
+		return err
+	}
+	return manager.Restart(ctx)
 }
 
 // registerInteractions installs the handlers for the controls Riggs renders.
