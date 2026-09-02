@@ -173,9 +173,6 @@ func (e *Engine) summaryFor(_ context.Context, _ string, issue jira.Issue, _ boo
 	return Body(issue), nil
 }
 
-// BodyParagraphs is how much of a description a ticket card shows.
-const BodyParagraphs = 2
-
 // ActionResult reports a button click's outcome.
 type ActionResult struct {
 	Key      string `json:"key"`

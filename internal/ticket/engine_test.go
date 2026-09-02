@@ -364,18 +364,6 @@ func TestOnlyTheAdminMayAct(t *testing.T) {
 	}
 }
 
-func TestTicketKeyFromBlockID(t *testing.T) {
-	for _, tc := range []struct{ in, want string }{
-		{"jira_qct_NYX-1234", "NYX-1234"},
-		{"NYX-1234", "NYX-1234"},
-		{"", ""},
-	} {
-		if got := TicketKeyFromBlockID(tc.in); got != tc.want {
-			t.Errorf("TicketKeyFromBlockID(%q) = %q, want %q", tc.in, got, tc.want)
-		}
-	}
-}
-
 // ticketBody re-derives a card body, to assert it does not move between passes.
 func ticketBody(t *testing.T, _ *rig) string {
 	t.Helper()

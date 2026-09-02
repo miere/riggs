@@ -714,3 +714,17 @@ func TestLiveCardStillOffersApprove(t *testing.T) {
 		t.Fatal("the live ask card no longer offers Approve")
 	}
 }
+
+// SplitRef is used by the digest, the approver, the asker and the completer, so
+// it outlives the card loop its test was originally written beside.
+func TestSplitRef(t *testing.T) {
+	repo, n, err := SplitRef("acme/monolith#20069")
+	if err != nil || repo != "acme/monolith" || n != 20069 {
+		t.Errorf("SplitRef = (%q, %d, %v)", repo, n, err)
+	}
+	for _, bad := range []string{"no-hash", "o/r#abc", ""} {
+		if _, _, err := SplitRef(bad); err == nil {
+			t.Errorf("SplitRef(%q) = nil error", bad)
+		}
+	}
+}

@@ -72,22 +72,6 @@ func New(mode Mode, args []string, configPath string) (*Application, error) {
 	return &Application{mode: mode, args: args, registry: reg, cfg: cfg}, nil
 }
 
-// ToolNames reports which tools this binary exposes under the config at path.
-// The installer uses it to avoid registering a job whose tool does not exist:
-// the answer depends on the config, because Slack-backed tools are gated on a
-// configured profile (§6).
-func ToolNames(configPath string) (map[string]bool, error) {
-	a, err := New(ModeCLI, nil, configPath)
-	if err != nil {
-		return nil, err
-	}
-	names := make(map[string]bool, len(a.registry.All()))
-	for _, t := range a.registry.All() {
-		names[t.Name()] = true
-	}
-	return names, nil
-}
-
 // Run starts the selected frontend and blocks until it returns.
 func (a *Application) Run(ctx context.Context) error {
 	switch a.mode {
