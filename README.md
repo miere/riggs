@@ -72,11 +72,10 @@ riggs install
 
 It asks where the config should live, collects the credentials without echoing
 them, asks who assists with pull requests, who assists with tickets and which
-command runs an AI review, sends a **real** test card for a **real** pull request
-to your Slack DM — failing the install if that does not work — and then, if
-Murtaugh is installed, registers the scheduled jobs through `murtaugh cfg job
-set`. Jobs whose tool this build does not yet expose are skipped and reported
-rather than installed to fail on a schedule.
+command runs an AI review, and sends a **real** test card for a **real** pull
+request to your Slack DM — failing the install if that does not work.
+
+It creates no jobs. The schedule is yours to fill in (see **Jobs** below).
 
 Every one of those three answers may be left empty, which turns the corresponding
 option off rather than falling back to something.

@@ -54,6 +54,14 @@ type Resolver interface {
 	LookupUserID(ctx context.Context, target slack.Target, handle string) (string, error)
 }
 
+// BodyParagraphs is how much of a ticket's description a card shows.
+//
+// Two: enough for the reporter's own account of what they want, and short
+// enough that the card stays a card. Anything past it is on the ticket, one
+// click away — the same reasoning, and the same number, as the pull-request
+// card's.
+const BodyParagraphs = 2
+
 // Asker posts an assistance request.
 type Asker struct {
 	jira     Source

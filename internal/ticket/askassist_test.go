@@ -207,3 +207,17 @@ func TestAskCardCarriesOnlyTheLink(t *testing.T) {
 		t.Fatalf("link.URL = %q, want %q", link.URL, url)
 	}
 }
+
+// The daemon and the asker both recover a ticket key from a block_id, so this
+// outlives the card loop its test was originally written beside.
+func TestTicketKeyFromBlockID(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"jira_qct_NYX-1234", "NYX-1234"},
+		{"NYX-1234", "NYX-1234"},
+		{"", ""},
+	} {
+		if got := TicketKeyFromBlockID(tc.in); got != tc.want {
+			t.Errorf("TicketKeyFromBlockID(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

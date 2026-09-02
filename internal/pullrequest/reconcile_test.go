@@ -410,18 +410,6 @@ func TestDiscoveryFailureIsFatal(t *testing.T) {
 	}
 }
 
-func TestSplitRef(t *testing.T) {
-	repo, n, err := SplitRef("acme/monolith#20069")
-	if err != nil || repo != "acme/monolith" || n != 20069 {
-		t.Errorf("SplitRef = (%q, %d, %v)", repo, n, err)
-	}
-	for _, bad := range []string{"no-hash", "o/r#abc", ""} {
-		if _, _, err := SplitRef(bad); err == nil {
-			t.Errorf("SplitRef(%q) = nil error", bad)
-		}
-	}
-}
-
 // Archiving a repository makes it read-only. A card already on the board then
 // has to collapse, because the queue's discovery query no longer returns it
 // and it can never merge. Left alone such a card sits there reading
