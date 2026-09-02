@@ -1,4 +1,4 @@
-# riggs-mcp
+# riggs
 
 A single Go binary that carries Murtaugh's automations: mirroring GitHub review
 requests into Slack, approving and merging PRs from a button, running a local AI
@@ -13,8 +13,7 @@ absent is not rendered at all.
 
 Riggs runs its own schedule and its own Slack app. `riggs daemon` holds a Socket
 Mode connection open, answers the clicks on the messages it posted, and ticks the
-jobs it owns — so Murtaugh is no longer in the chain. It is still perfectly
-invokable as a CLI or over MCP.
+jobs it owns — so Murtaugh is no longer in the chain.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the structural decisions.
 
@@ -116,33 +115,40 @@ rather than the next restart.
 
 ## Use
 
-```sh
-riggs ping                                          # pong
-riggs capabilities                                  # what's enabled, what's missing
-riggs capabilities --json-output                    # the same, machine-readable
-riggs --config-file /path/to/other.yaml ping        # anywhere on the line
-riggs mcp                                           # MCP stdio server
-```
-
-Commands come in three spellings, depending on the tool:
+Riggs schedules two things, so it has two commands:
 
 ```sh
-riggs ping                                          # flat
-riggs jira tickets --query "project = NYX ..."      # namespaced
-riggs git pr --approve acme/monolith#20069    # namespaced + verb flag
+riggs git pr --bulk <github-login>                  # the pull-request digest
+riggs jira tickets --bulk "project = NYX AND ..."   # the ticket digest
 ```
 
-A verb flag names the operation and carries its primary argument as the flag's
-own value. The argument is optional where the tool has a sensible default —
-`riggs git pr --fetch-reviews` falls back to `admin.github-login`.
-
-Every tool that posts to Slack accepts two more flags:
+Both take the same optional flags:
 
 - `--slack-profile <name>` — which Slack account. Defaults to the profile named
   `default`; if that is not configured, the call fails rather than silently not
   notifying.
 - `--slack-channel <id>` — where. Absent, the notification is a DM to
   `admin.slack-user-id`.
+- `--dry-run` — report what would change without sending anything.
+- `--max-items <n>`, `--cooldown <duration>` — the digest's size and rolling
+  window.
+- `--json-output` — machine-readable output, anywhere on the line.
+
+**These spellings are a contract.** Stored jobs invoke them as literal argv and
+nothing validates that before the process starts, so renaming one would fail in
+a job rather than at build time.
+
+Everything else operates this machine rather than doing work on a schedule:
+
+```sh
+riggs capabilities                                  # what's enabled, what's missing
+riggs jobs list                                     # the schedule
+riggs service status                                # the supervisor
+riggs daemon                                        # the Slack connection + scheduler
+riggs install                                       # provision
+riggs version
+riggs --config-file /path/to/other.yaml capabilities   # anywhere on the line
+```
 
 ## Develop
 

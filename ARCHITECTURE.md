@@ -1,18 +1,22 @@
-# riggs-mcp — Architecture
+# riggs — Architecture
 
-This document is the canonical reference for the structural decisions in
-riggs-mcp. Drift between code and this document is treated as a bug. Any change
-that adds or modifies an architectural element MUST update this file in the
-same PR.
+This document is the canonical reference for Riggs' structural decisions. Drift
+between code and this document is treated as a bug. Any change that adds or
+modifies an architectural element MUST update this file in the same PR.
+
+> The Go module is still `github.com/miere/riggs-mcp`, which stopped being
+> accurate when the MCP frontend was deleted (§3). The rename touches every
+> import in the tree and `release.yml`'s version ldflags, so it is deferred to
+> its own change rather than buried in a deletion.
 
 Riggs takes its structure from `mcp-techops`. Where it departs from that
 blueprint, the departure is called out and justified.
 
 ## 1. What Riggs is for
 
-Riggs replaces the Python layer under Murtaugh's automations with a single Go
-binary. Murtaugh keeps owning the **schedule**: it invokes Riggs as a CLI (from
-a job) or over MCP to run a reconcile pass.
+Riggs replaced the Python layer under Murtaugh's automations with a single Go
+binary. Murtaugh owned the **schedule** and invoked Riggs to run a reconcile
+pass; Riggs owns its own schedule now (§9c), and Murtaugh is not in the chain.
 
 Riggs owns its own **Slack app**, and therefore its own inbound half. It posts
 as itself and answers the clicks on its own messages directly, over a Socket
@@ -52,149 +56,135 @@ The automations being replaced:
                        ┌──────────▼───────────┐
                        │ internal/app         │  ← composition root
                        └──────────┬───────────┘
-                                  │ builds Registry, picks Mode
-        ┌──────────────┼───────────────┬───────────────┐
-┌───────▼──────────┐   │   ┌───────────▼──────┐  ┌─────▼──────────┐
-│ frontends/cli    │   │   │ frontends/mcp    │  │ daemon         │
-│ (human stdin/out)│   │   │ (MCP stdio JSON) │  │ (Socket Mode)  │
-└───────┬──────────┘   │   └───────────┬──────┘  └─────┬──────────┘
-        └──────────────┴────► Tool ◄───┘               │
-                            (internal/tools)     Router → Handler
-                                      │
-              ┌───────────────────────┼───────────────────────┐
-       internal/slack          internal/notify           internal/config
-       (where it goes)         (what was already said)    (who we are)
-                                      │
-                      ┌───────────────┼───────────────┐
-                internal/github        internal/jira    internal/slackmd
-                (REST + ETags)         (REST v3)        (GH md -> mrkdwn)
+                                  │ builds the two digests, picks Mode
+              ┌───────────────────┴───────────────────┐
+      ┌───────▼──────────┐                    ┌───────▼────────┐
+      │ frontends/cli    │                    │ daemon         │
+      │ (human stdin/out)│                    │ (Socket Mode)  │
+      └───────┬──────────┘                    └───────┬────────┘
+              │                            Router → Handler, Scheduler
+     git.pr.bulk, jira.tickets.bulk                   │
+              └───────────────────┬───────────────────┘
+                                  │
+              ┌───────────────────┼───────────────────┐
+       internal/slack       internal/notify      internal/config
+       (where it goes)    (what was already said)   (who we are)
+                                  │
+              ┌───────────────────┼───────────────────┐
+       internal/github       internal/jira      internal/slackmd
+       (REST + ETags)         (REST v3)        (GH md -> mrkdwn)
 ```
 
-- `internal/app` is the only place tools are wired into the registry.
-- Frontends know nothing about each other and reach tools only through
-  `tools.Tool`.
-- Tool packages depend on the domain packages, never the reverse.
+- There were three frontends over a shared **tool registry**: the CLI, an MCP
+  stdio server, and the daemon. The registry existed so the first two could
+  serve one set of commands without either knowing what the other exposed.
+- Both halves of that are gone (§3). Nothing registered Riggs as an MCP server,
+  and the command set is down to the two digests — which is the entire
+  scheduled surface, and everything else is an operational command in
+  `cmd/riggs`.
+- The daemon never used the registry and does not now: it builds its domain
+  objects directly, which is why it was the one frontend untouched by the
+  removal.
+- Domain packages never depend on the frontends.
 
-## 3. The `Tool` contract
+## 3. Commands
 
-```go
-type Tool interface {
-    Name() string
-    Description() string
-    InputSchema() *jsonschema.Schema
-    Invoke(ctx context.Context, args map[string]any) (any, error)
-}
-```
+There are two, and they are the two things Riggs schedules:
 
-Identical to the blueprint. Semantics:
+| Command | Does |
+| --- | --- |
+| `riggs git pr --bulk <github-login>` | the pull-request digest (§7c, §9b) |
+| `riggs jira tickets --bulk <jql>` | the ticket digest (§8d) |
 
-- **`Name`** is the registry key. A `.`-separated name declares a namespace.
-  Riggs uses up to three segments (`git.pr.approve`); see §4.
-- **`InputSchema`** MUST have `Type: "object"`. `nil` means the tool takes no
-  parameters.
-- **`Invoke`** receives args keyed by the schema's property names. The CLI maps
-  `--kebab-case` to `snake_case` before invocation, so tools never see flag
-  spellings.
+Both take the same optional flags: `--slack-channel`, `--slack-profile`,
+`--dry-run`, `--max-items`, `--cooldown`, and the frontend-level
+`--json-output`.
 
-One optional extension exists:
+**The spellings are a contract, not a convenience.** Jobs stored in the ledger
+invoke this argv literally (§9c), and `schedule.NewJob` validates nothing
+against a command list — deliberately, since a job may run anything. So renaming
+a command does not fail to build. It fails at 3am, inside a job, with "unknown
+command".
 
-```go
-type VerbTool interface {
-    Tool
-    PrimaryArg() string
-}
-```
+Everything else `cmd/riggs` answers to — `daemon`, `service`, `jobs`,
+`install`, `capabilities`, `version` — operates this machine rather than doing
+work on a schedule, and is dispatched before the CLI frontend is reached.
 
-`PrimaryArg` names the schema property that a verb flag's value binds to (§4).
-It is consumed **only** by the CLI frontend; over MCP the property is passed
-like any other argument, so both frontends stay on exactly the same schema.
+### What was here before
+
+A `Tool` interface (`Name`, `Description`, `InputSchema`, `Invoke`), a
+`Registry`, and a CLI that parsed flags by looking each one up in the tool's
+own jsonschema. It served a real purpose: one registration wired a command into
+both the CLI and an MCP stdio server, and neither had to know what the other
+exposed.
+
+It was deleted in Phase 31 when both halves stopped being true. `Description`
+had exactly one call site, in the MCP frontend. `InputSchema` was doing real
+work for the CLI — but as a symbol table for two commands with identical shape,
+which is a lot of machinery to avoid writing a flag loop. Deleting the interface
+also dropped `jsonschema-go`, and deleting the MCP frontend dropped five more
+modules; `go.mod` went from twelve direct requires to six.
+
+The `--json-output` shape is unchanged. It was described as "the same JSON the
+MCP frontend emits", which was true and is now just "the JSON the result types'
+tags define" — the tags did the work either way.
 
 ## 4. Frontend conventions
 
 ### CLI (`internal/frontends/cli`)
 
-Command lines resolve against the registry in three forms, most literal first:
-
-| Form | Example | Resolves to |
-| --- | --- | --- |
-| flat | `riggs ping` | `ping` |
-| dotted | `riggs jira tickets --query …` | `jira.tickets` |
-| verb flag | `riggs git pr --approve <ref>` | `git.pr.approve` |
-
-The verb-flag form is a **deliberate divergence from the blueprint**, which has
-two-segment names only. It exists because the operation reads better as a flag
-than as a third positional token, and because it lets the operation carry its
-primary argument as the flag's own value — which *preserves* the blueprint's
-"every flag has a value, no positional arguments" parser rule rather than
-breaking it.
-
-Rules:
-
-- A verb is matched against the **registry**, not a list of spellings:
-  `<prefix>.<verb>` must be a registered tool. An ordinary parameter flag can
-  therefore never be mistaken for a verb.
-- The longest namespace prefix is tried first, so `git pr` wins over `git`.
-- A verb flag's value is optional. `--fetch-reviews` with no value (or followed
-  by another flag) binds nothing, letting the tool apply its own default — that
-  is how the reviewer falls back to `admin.github-login`.
-- **stdout** is reserved for tool output; **stderr** is for diagnostics
-  (`riggs: <error>`). Exit code is `1` on any tool or usage error.
-- **Result rendering** dispatches by type via `cli.Render`: `string` and
-  `[]string` are written as-is, `fmt.Stringer` uses `String()`, everything else
-  falls back to `%v`. `--json-output` switches to the same JSON shape the MCP
-  frontend emits, so Murtaugh's workflow rules can parse either frontend.
-
-### MCP (`internal/frontends/mcp`)
-
-- **stdout** is reserved for MCP protocol traffic. No logs, no raw text.
-- Tool names are **normalised at this boundary**: every `.` and `-` in the
-  registry name becomes `_`, so `slack.send-msg` is published as
-  `slack_send_msg` and `git.pr.fetch-reviews` as `git_pr_fetch_reviews`. The
-  convention matches Murtaugh's, and exists because some providers reject a
-  `.` in a function name. It is a translation, not a rename: the registry key
-  keeps its dots and the CLI keeps its spaces and hyphens, so this can never
-  move a command.
-- Normalisation collapses two characters into one, so distinct registry names
-  could in principle collide (`a.b-c` and `a-b.c` both become `a_b_c`). That is
-  refused at server construction rather than allowed to shadow a tool silently
-  — the same treatment `Registry` gives a duplicate registration.
-- Every registered tool is exposed; its `InputSchema()` is published verbatim
-  (an empty `{"type":"object"}` schema is substituted when it returns `nil`).
-- Tool results are JSON-marshalled into a single `TextContent` block. A plain
-  string result is passed through as-is so trivial tools stay uncluttered.
-- Tool errors return `CallToolResult{IsError: true, …}`, never a transport
-  error.
+- **stdout is output; stderr is diagnostics.** Anything parsing this binary
+  reads stdout, so nothing else may be written there.
+- **`--json-output`** switches rendering from `Render` (a `fmt.Stringer`, a
+  string, or `%v`) to `RenderJSON`. It may appear anywhere on the command line
+  and never reaches a command as a parameter.
+- **Flags are kebab-case on the command line, snake_case in the call**
+  (`--slack-channel` → `slack_channel`), which is what the schema-driven parser
+  did and what stored jobs already spell.
+- **`--dry-run` is valueless.** It is the only boolean, and `--dry-run true`
+  was never a spelling.
+- **An unconfigured command explains itself.** Both digests need a Slack
+  account to post through; without one the command is absent rather than
+  broken, and the error names `riggs capabilities` (§6).
 
 ## 5. Package layout
 
 ```
-cmd/riggs/                       # main; --config-file extraction, mode parsing
+cmd/riggs/                       # main; --config-file extraction, command dispatch
 internal/
-  app/                           # composition root + Registry wiring
-  frontends/{cli,mcp}/
+  app/                           # composition root: builds the two digests
+  frontends/cli/                 # the CLI (§4)
   tools/
-    tool.go                      # Tool + VerbTool + Registry
-    <tool>/                      # flat tool (ping, capabilities)
-    <ns>/<cmd>/                  # namespaced tool
+    bulkreviews/                 # git.pr.bulk
+    bulktickets/                 # jira.tickets.bulk
+  capabilities/                  # `riggs capabilities` (§6)
+  schedule/                      # Riggs' own cron (§9c)
+  service/                       # launchd / systemd supervision (§12b)
   config/                        # config file, admin identity, Slack profiles
   slack/                         # profile → Target resolution; inbound decode (§7b)
   daemon/                        # Socket Mode listener + interaction router (§7b)
-  notify/                        # the card ledger (§9) + the item ledger (§9b)
+  notify/                        # the card ledger (§9), items (§9b), jobs (§9c)
   bulk/                          # the digest rotation engine (§9b)
   ask/                           # the "hand this to somebody" tag (§7bb)
+  ai/                            # the local harness behind "Run …" (§7bb)
   github/                        # REST client, ETag cache (§8)
   jira/                          # external seam
   slackmd/                       # GitHub Markdown -> Slack mrkdwn (§7d)
-  apphome/                       # the App Home tab and its Update button (§7e)
+  blockkit/                      # Slack block rendering
+  apphome/                       # the App Home tab (§7e)
   updates/                       # release lookup + binary self-update (§7e)
+  installer/                     # `riggs install` (§12)
+  launchd/                       # the macOS half of internal/service
   version/                       # the build version, stamped by the release workflow
 ```
 
 Rules:
 
-- Each tool lives in its own package under `internal/tools/`.
+- `internal/tools/` holds the two digest commands and nothing else. It was
+  named for a registry that no longer exists; the two survivors kept their
+  home rather than being moved for tidiness in a deletion change.
 - External-SDK wrappers and cross-cutting helpers live under
-  `internal/<domain>/`, never inside a tool package.
+  `internal/<domain>/`, never inside a command package.
 - **A domain package owns what its items ARE and how they DRAW; nothing else.**
   `pullrequest` and `ticket` each supply a `bulk.Domain` and stop there. The
   rotation between messages is not theirs to reimplement, and neither is the
@@ -233,7 +223,7 @@ than one that offers no Run option at all.
 Rules:
 
 - **A missing credential disables a feature; it never fails the boot.** `riggs
-  ping` and `riggs mcp` work on a machine with nothing configured.
+  capabilities` and `riggs version` work on a machine with nothing configured.
 - A **broken** config file, by contrast, IS fatal: an unknown key or malformed
   YAML means the operator wrote something they believe is in effect.
 - Because a disabled tool is simply absent, "why is my tool missing?" is not
@@ -273,8 +263,7 @@ Rules:
   to `admin.slack-user-id`. That in turn requires the admin to be configured.
 - Both are declared as ordinary schema properties by every notifying tool,
   rather than as global frontend flags. On the CLI this is indistinguishable
-  from a global flag; over MCP it is the only way a caller can express them at
-  all.
+  from a global flag, and it is what stored jobs already spell.
 - `admin` exists because that identity was previously spread across five
   settings in three files (`REVIEWER_HANDLE`, `REVIEWER_SLACK_ID`,
   `nudge_user_id`, `allowed_users`, `slack_to_jira_email`) and could drift.
@@ -1251,7 +1240,7 @@ it can be fixed. The definition and its outcome are one row because the Home tab
 draws them as one line.
 
 - **A job runs THIS binary again, as a child process.** Not an in-process call
-  through the tool registry, which would be cheaper. The argv is byte-identical
+  through the command directly, which would be cheaper. The argv is byte-identical
   to what Murtaugh ran, so the migration changes when a job fires and nothing
   about what it does; a job that hangs or crashes cannot take the daemon with
   it; and a timeout is a signal to a process rather than a goroutine politely
@@ -1515,18 +1504,20 @@ Rules:
 - Probes for the ambient machine (`exec.LookPath`, `os.Getenv`) are injected,
   so a test never depends on what happens to be installed on the box running
   it.
-- Each tool ships its own `_test.go` covering happy-path invocation, its input
-  schema, and both output shapes.
-- **The parity gate for phase 2**: a dry run against the *real* 231 KB review
-  queue state file must produce zero Slack calls. If the port derives one state
-  differently from the Python, that test fails loudly instead of spamming the
-  channel.
+- Each command ships its own `_test.go` covering happy-path invocation and both
+  output shapes. It used to cover the input schema too; there are no schemas
+  now, and the CLI's own tests assert the flag spellings instead — which is
+  where the contract with stored jobs actually lives (§3).
+- **Shared fixtures live in `fixtures_test.go`.** They arrived there when the
+  card loops were deleted: a fake GitHub, a fake Jira and a delivery target
+  were declared inside the loop's own test file, and four other packages needed
+  them to outlive it.
 
 ## 12. Installation
 
 `riggs install` (in `internal/installer`) provisions a working setup. It is
-interactive, so it lives outside the tool registry and is never exposed over
-MCP — the same treatment the blueprint gives its `auth` command.
+interactive, so it is dispatched in `cmd/riggs` before the CLI frontend is
+reached — the same treatment the blueprint gives its `auth` command.
 
 The flow: config location, admin identity, credentials, a live smoke test, then
 Murtaugh's jobs.
@@ -1776,6 +1767,7 @@ one *would* live at still decides, which is the state a fresh machine and
 | 28 | Asking split from running: `internal/ai` revived, `sme-assistance`, editable prompts on the Home tab (§7bb, §7e) | done |
 | 29 | Riggs owns the schedule: `internal/schedule` in the daemon, jobs on the Home tab, `riggs service` for launchd and systemd (§9c, §12b) | done |
 | 30 | Sweep the ask-review cards, so one settled outside Riggs collapses too (§7bb) | done |
+| 31 | Two commands and nothing else: nine tools, the card loops, the MCP frontend and the tool registry deleted (§2, §3) | done |
 
 ## 13b. Cutover
 
@@ -1801,6 +1793,43 @@ Rollback: the previous job and rule definitions are captured under
 `/tmp/riggs-cutover-backup/` and can be restored with the same commands.
 
 ## 14. Change log
+
+- **unreleased** — Phase 31. Riggs schedules exactly two things, so it now has
+  exactly two commands: `git pr --bulk` and `jira tickets --bulk`. Nine other
+  tools are deleted.
+
+  Five were dead. The two per-item card loops (`git.pr.fetch-reviews`,
+  `jira.tickets.poll`) were unscheduled in Phases 11 and 27 and kept only
+  because their renderer was "about to be reused" — it was, by the ask cards, so
+  the renderer stays and the loops go. Three were one-off Python-cutover aids
+  (`check-parity`, both `import-state`s).
+
+  Four were CLI wrappers over verbs the Slack buttons reach by another path
+  entirely: the digest calls `pullrequest.Approver` directly, and "Assign to Me"
+  was never rendered. `ping` and `slack.send-msg` served Murtaugh.
+
+  Deleting them collapsed a great deal behind them. `ticket.Engine` went whole —
+  `BulkEngine` takes a raw `Source` and never embedded it — taking `ticket.Card`,
+  the State enum and three Jira write methods with it. `pullrequest` kept its
+  Engine, which the digest reads GitHub through, and lost the loop around it.
+  `notify` lost the latch and summary accessors; their tables stay, annotated,
+  because dropping one needs a migration on every existing ledger.
+
+  One behaviour change, in its own commit: `Resolved.Label` was write-only once
+  the card renderer went, which made `ClosedBy` a GitHub request the digest paid
+  for on every pass and nobody rendered.
+
+  **The MCP frontend and the tool registry are gone** (§2, §3). The registry
+  existed so two frontends could serve one command set; nothing registers Riggs
+  as an MCP server, and the set is down to two. That drops six Go modules —
+  the MCP SDK and four of its dependencies, plus `jsonschema-go`, which the CLI
+  had been using as a symbol table to parse flags out of. `go.mod` is at six
+  direct requires. The CLI is hand-rolled and the command spellings are
+  unchanged, which is load-bearing: stored jobs invoke them as literal argv and
+  the scheduler validates nothing.
+
+  `capabilities` moves to `internal/capabilities` and becomes a plain command.
+  It was a Tool by convention only — `Invoke` ignored its arguments.
 
 - **unreleased** — Phase 29. Riggs owns its own schedule (§9c). Murtaugh held
   the cron and invoked `riggs git pr --bulk` every three minutes; now a ticker
