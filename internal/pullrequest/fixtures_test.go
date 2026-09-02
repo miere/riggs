@@ -11,9 +11,13 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"testing"
 
 	"github.com/miere/riggs-mcp/internal/github"
+	"github.com/miere/riggs-mcp/internal/notify"
 	"github.com/miere/riggs-mcp/internal/slack"
+	"github.com/miere/riggs-mcp/internal/slack/slacktest"
+	"path/filepath"
 )
 
 // fakeGH is a scripted GitHub, recording which endpoints were reached so the
@@ -83,6 +87,32 @@ func (f *fakeGH) called(what string) bool {
 }
 
 var target = slack.Target{Profile: "default", BotToken: "xoxb", Channel: "C1"}
+
+// rig assembles an engine over a temp ledger and a fake Slack.
+//
+// It was deleted with the card loop it was written for, and came back for the
+// ask sweep: SettleAsks needs the same three things Run did — a ledger, a
+// notifier and a fake GitHub — which is what this is.
+type rig struct {
+	engine *Engine
+	gh     *fakeGH
+	slack  *slacktest.Fake
+	store  *notify.Store
+}
+
+func newRig(t *testing.T, gh *fakeGH) *rig {
+	t.Helper()
+	store, err := notify.Open(filepath.Join(t.TempDir(), "config.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	fake := slacktest.New()
+	return &rig{
+		engine: NewEngine(gh, store, notify.New(store, fake), "miere", "U1"),
+		gh:     gh, slack: fake, store: store,
+	}
+}
 
 func openPR(ref string) github.Detail {
 	repo, n, _ := SplitRef(ref)
