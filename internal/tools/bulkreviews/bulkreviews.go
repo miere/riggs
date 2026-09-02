@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/miere/riggs-mcp/internal/pullrequest"
 	"github.com/miere/riggs-mcp/internal/slack"
 )
@@ -38,50 +37,6 @@ type Tool struct {
 // New builds the tool.
 func New(resolver *slack.Resolver, newer Factory) *Tool {
 	return &Tool{resolver: resolver, newer: newer}
-}
-
-// Name is the registry key. On the CLI this is spelled `riggs git pr --bulk`.
-func (t *Tool) Name() string { return "git.pr.bulk" }
-
-// Description is the one-line hint shown to MCP clients.
-func (t *Tool) Description() string {
-	return "Deliver pull requests awaiting a user's review as a single bulk digest message."
-}
-
-// PrimaryArg binds the verb flag's value: `--bulk <user>`.
-func (t *Tool) PrimaryArg() string { return "user" }
-
-// InputSchema declares the parameters.
-func (t *Tool) InputSchema() *jsonschema.Schema {
-	return &jsonschema.Schema{
-		Type: "object",
-		Properties: map[string]*jsonschema.Schema{
-			"user": {
-				Type:        "string",
-				Description: "GitHub login whose review requests are delivered. Required.",
-			},
-			"dry_run": {
-				Type:        "boolean",
-				Description: "Report what would change without sending anything or writing state.",
-			},
-			"max_items": {
-				Type:        "integer",
-				Description: "Cap on one digest. Defaults to $RIGGS_BULK_MAX_ITEMS, then 10.",
-			},
-			"cooldown": {
-				Type:        "string",
-				Description: "How long an item waits before it may move into a new digest, e.g. \"3h\". Defaults to 3h.",
-			},
-			"slack_profile": {
-				Type:        "string",
-				Description: "Which configured Slack account to post through. Should be the profile the daemon listens as, so clicks come back to Riggs.",
-			},
-			"slack_channel": {
-				Type:        "string",
-				Description: "Target channel id. Omitted, the digest is DMed to the configured admin.",
-			},
-		},
-	}
 }
 
 // Invoke runs one digest pass.

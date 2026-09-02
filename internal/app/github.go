@@ -10,7 +10,6 @@ import (
 	"github.com/miere/riggs-mcp/internal/notify"
 	"github.com/miere/riggs-mcp/internal/pullrequest"
 	"github.com/miere/riggs-mcp/internal/slack"
-	"github.com/miere/riggs-mcp/internal/tools"
 	"github.com/miere/riggs-mcp/internal/tools/bulkreviews"
 )
 
@@ -117,14 +116,13 @@ func reviewRowActions(cfg *config.Config) pullrequest.RowActions {
 	}
 }
 
-// registerGitHubTools wires the pull-request tools, when the prerequisites
-// exist. Slack is required because every one of them delivers or is about to;
-// `riggs capabilities` explains an absence.
-func registerGitHubTools(reg *tools.Registry, cfg *config.Config, resolver *slack.Resolver) {
-	// No default login. Whose reviews a pass fetches is named on the command
-	// that runs it, never resolved from the config at run time.
-	reg.Register(bulkreviews.New(resolver,
+// reviewDigest builds the pull-request digest command.
+//
+// No default login. Whose reviews a pass fetches is named on the command that
+// runs it, never resolved from the config at run time.
+func reviewDigest(cfg *config.Config) *bulkreviews.Tool {
+	return bulkreviews.New(slack.NewResolver(cfg),
 		func(_ context.Context, login string, opts pullrequest.BulkOptions) (bulkreviews.Engine, io.Closer, error) {
 			return bulkEngineFor(cfg, login, opts)
-		}))
+		})
 }

@@ -1,14 +1,18 @@
-// Command riggs is the single entry point for the Riggs tool. It runs as a CLI
-// (`riggs ping`), as an MCP stdio server (`riggs mcp`), or as a Socket Mode
-// daemon (`riggs daemon`).
+// Command riggs is the single entry point. It runs as a CLI — the two digests
+// plus the operational commands — or as a Socket Mode daemon (`riggs daemon`).
 //
-// The first two are one-shots backed by the same tool registry, so Murtaugh can
-// invoke either. The third is long-lived and backed by a routing table instead:
-// it is how Riggs answers clicks on the messages it posted itself.
+// There was a third: an MCP stdio server, sharing the CLI's tool registry so
+// either could invoke the same commands. Nothing registered Riggs as an MCP
+// server, so it went, and the registry went with it.
+//
+// The daemon is the long-lived one, backed by a routing table rather than a
+// command list: it is how Riggs answers clicks on the messages it posted, and
+// it now carries the schedule too.
 package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -18,6 +22,8 @@ import (
 	"syscall"
 
 	"github.com/miere/riggs-mcp/internal/app"
+	"github.com/miere/riggs-mcp/internal/capabilities"
+	"github.com/miere/riggs-mcp/internal/config"
 	"github.com/miere/riggs-mcp/internal/installer"
 	"github.com/miere/riggs-mcp/internal/version"
 )
@@ -50,10 +56,18 @@ func run(args []string) error {
 		return nil
 	}
 
-	// `riggs install` is interactive, so it lives outside the tool registry
-	// and is never exposed over MCP.
+	// `riggs install` is interactive, which is why it is a command rather than
+	// one of the two digests.
 	if len(args) > 0 && args[0] == "install" {
 		return runInstall(context.Background())
+	}
+
+	// `riggs capabilities` reports what is enabled and names the setting
+	// behind anything that is not. It was a registry tool until the registry
+	// went; it is a command now, like `version`, because that is what it
+	// always was.
+	if len(args) > 0 && args[0] == "capabilities" {
+		return runCapabilities(context.Background(), configPath, slices.Contains(os.Args, "--json-output"))
 	}
 
 	// `riggs service` mutates this machine's init. Like install, it is
@@ -75,13 +89,8 @@ func run(args []string) error {
 
 	mode := app.ModeCLI
 	rest := args
-	if len(args) > 0 {
-		switch args[0] {
-		case "mcp":
-			mode, rest = app.ModeMCP, args[1:]
-		case "daemon":
-			mode, rest = app.ModeDaemon, args[1:]
-		}
+	if len(args) > 0 && args[0] == "daemon" {
+		mode, rest = app.ModeDaemon, args[1:]
 	}
 
 	a, err := app.New(mode, rest, configPath)
@@ -102,6 +111,28 @@ func run(args []string) error {
 		defer stop()
 	}
 	return a.Run(ctx)
+}
+
+// runCapabilities prints the diagnostic.
+func runCapabilities(ctx context.Context, configPath string, asJSON bool) error {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return err
+	}
+	report, err := capabilities.New(cfg).Report(ctx)
+	if err != nil {
+		return err
+	}
+	if asJSON {
+		encoded, err := json.Marshal(report)
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(encoded))
+		return nil
+	}
+	fmt.Println(report)
+	return nil
 }
 
 // runInstall drives the interactive installer.

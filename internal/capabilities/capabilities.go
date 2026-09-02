@@ -16,7 +16,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/miere/riggs-mcp/internal/ai"
 	"github.com/miere/riggs-mcp/internal/config"
 	"github.com/miere/riggs-mcp/internal/notify"
@@ -74,19 +73,8 @@ func (t *Tool) WithProbes(lookPath func(string) (string, error), getenv func(str
 	return t
 }
 
-// Name is the registry key.
-func (t *Tool) Name() string { return "capabilities" }
-
-// Description is the one-line hint shown to MCP clients.
-func (t *Tool) Description() string {
-	return "Report which Riggs features are enabled, and what is missing for the rest."
-}
-
-// InputSchema is nil: capabilities takes no parameters.
-func (t *Tool) InputSchema() *jsonschema.Schema { return nil }
-
-// Report is the result shape. The CLI renders it via String(); the MCP
-// frontend marshals it as JSON.
+// Report is the result shape. `riggs capabilities` renders it via String();
+// `--json-output` marshals it.
 type Report struct {
 	ConfigPath string    `json:"config_path"`
 	EnvFile    EnvFile   `json:"env_file"`
@@ -163,8 +151,8 @@ type Backend struct {
 	Detail    string `json:"detail"`
 }
 
-// Invoke builds the report.
-func (t *Tool) Invoke(context.Context, map[string]any) (any, error) {
+// Report builds the report.
+func (t *Tool) Report(context.Context) (Report, error) {
 	r := Report{
 		ConfigPath: t.cfg.Path,
 		EnvFile:    EnvFile{Path: t.cfg.EnvPath(), Loaded: t.cfg.EnvLoaded()},

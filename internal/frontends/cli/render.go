@@ -1,7 +1,7 @@
-// CLI rendering for tool results. A tool may return a fmt.Stringer to drive
-// human-readable output independently from the structured JSON shape the MCP
-// frontend emits. Strings and []string are handled directly so simple tools
-// don't need to allocate a Stringer.
+// CLI rendering for command results. A result may be a fmt.Stringer, which
+// drives human-readable output independently of the structured JSON shape.
+// Strings and []string are handled directly so a simple result need not
+// allocate a Stringer.
 package cli
 
 import (
@@ -10,9 +10,7 @@ import (
 	"strings"
 )
 
-// Render converts a tool result into the text the CLI writes to stdout. The
-// contract per tool is documented at the tool package; this is the dispatch
-// site that picks the appropriate representation.
+// Render converts a result into the text the CLI writes to stdout.
 func Render(v any) string {
 	switch x := v.(type) {
 	case nil:
@@ -28,16 +26,30 @@ func Render(v any) string {
 	}
 }
 
-// RenderJSON encodes a tool result as JSON for machine consumption — the
+// RenderJSON encodes a result as JSON for machine consumption — the
 // --json-output flag. Unlike Render, the output is always valid JSON: even a
-// bare string result comes back quoted, so a downstream parser (Murtaugh's
-// workflow rules shelling this binary) can rely on the shape. This is the same
-// structured representation the MCP frontend emits; the tool result types
-// carry the json tags that define it.
+// bare string comes back quoted, so anything parsing this binary's output can
+// rely on the shape. The result types carry the json tags that define it.
 func RenderJSON(v any) (string, error) {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return "", err
 	}
 	return string(b), nil
+}
+
+// render writes one result to stdout, in whichever representation was asked for.
+func (f *Frontend) render(result any, asJSON bool) error {
+	if !asJSON {
+		if text := Render(result); text != "" {
+			fmt.Fprintln(f.stdout, text)
+		}
+		return nil
+	}
+	encoded, err := RenderJSON(result)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(f.stdout, encoded)
+	return nil
 }

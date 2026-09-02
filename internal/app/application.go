@@ -1,48 +1,48 @@
-// Package app is the composition root. It owns the tool registry, picks the
-// frontend based on the parsed mode, and starts it. Frontends know nothing
-// about each other; the application knows about both but delegates execution
-// entirely.
+// Package app is the composition root. It assembles the two digest commands
+// and either the CLI or the daemon, and delegates execution entirely.
+//
+// It owned a tool registry for a long time, because two frontends — the CLI and
+// an MCP stdio server — served the same set of commands and neither should have
+// had to know what the other exposed. Both halves of that are gone: nothing
+// registers Riggs as an MCP server, and the set is down to two.
 package app
 
 import (
 	"context"
-	"fmt"
-	"sort"
-	"strings"
 
 	"github.com/miere/riggs-mcp/internal/config"
 	"github.com/miere/riggs-mcp/internal/frontends/cli"
-	"github.com/miere/riggs-mcp/internal/frontends/mcp"
-	"github.com/miere/riggs-mcp/internal/slack"
-	"github.com/miere/riggs-mcp/internal/tools"
+	"github.com/miere/riggs-mcp/internal/tools/bulkreviews"
+	"github.com/miere/riggs-mcp/internal/tools/bulktickets"
 )
 
-// Mode selects which frontend Run starts.
+// Mode selects what Run starts.
 type Mode int
 
 const (
 	// ModeCLI runs the human-facing CLI frontend.
 	ModeCLI Mode = iota
-	// ModeMCP runs the MCP stdio server frontend.
-	ModeMCP
-	// ModeDaemon holds a Socket Mode connection open and reacts to clicks on
-	// Riggs' own messages. Unlike the other two it is long-lived.
+	// ModeDaemon holds a Socket Mode connection open, reacts to clicks on
+	// Riggs' own messages, and ticks the schedule. Unlike the CLI it is
+	// long-lived.
 	ModeDaemon
 )
 
 // Application is the composition root for a single riggs invocation.
 type Application struct {
-	mode     Mode
-	args     []string
-	registry *tools.Registry
-	// cfg is retained for the modes that need more than the registry. The
-	// daemon resolves its own credentials from it.
+	mode Mode
+	args []string
+	// reviews and tickets are the two digests, nil when there is no Slack
+	// account to post through.
+	reviews *bulkreviews.Tool
+	tickets *bulktickets.Tool
+	// cfg is what the daemon resolves its own credentials and ledger from.
 	cfg *config.Config
 }
 
-// New constructs an Application configured for the given mode. args is the list
-// of positional arguments passed to the selected frontend (the top-level mode
-// token is stripped by the caller before this point).
+// New constructs an Application configured for the given mode. args is the
+// argument list passed to the selected frontend, with the mode token already
+// stripped by the caller.
 //
 // configPath is the --config-file value; empty means the usual precedence
 // chain, ending at ~/.config/riggs/config.yaml.
@@ -51,72 +51,47 @@ func New(mode Mode, args []string, configPath string) (*Application, error) {
 	if err != nil {
 		return nil, err
 	}
+	a := &Application{mode: mode, args: args, cfg: cfg}
 
-	reg := tools.NewRegistry()
-
-	// The two digests are the only tools there are, and they are registered
-	// only when there is a Slack account to post through: a tool that cannot
-	// possibly work is worse than an absent one, and `riggs capabilities`
-	// explains the absence (§6).
+	// Both digests need a Slack account to post through. Without one they are
+	// absent rather than broken, and `riggs capabilities` names the setting
+	// that would bring them back (§6).
 	if len(cfg.Slack.Profiles) > 0 {
-		resolver := slack.NewResolver(cfg)
-		registerGitHubTools(reg, cfg, resolver)
-		registerJiraTools(reg, cfg, resolver)
+		a.reviews = reviewDigest(cfg)
+		a.tickets = ticketDigest(cfg)
 	}
-
-	return &Application{mode: mode, args: args, registry: reg, cfg: cfg}, nil
+	return a, nil
 }
 
 // Run starts the selected frontend and blocks until it returns.
 func (a *Application) Run(ctx context.Context) error {
-	switch a.mode {
-	case ModeMCP:
-		return mcp.New(a.registry).Serve(ctx)
-	case ModeDaemon:
+	if a.mode == ModeDaemon {
 		return a.runDaemon(ctx)
-	default:
-		return cli.New(a.registry).Run(ctx, a.args)
 	}
+	return cli.New(invokerOrNil(a.reviews), invokerOrNil(a.tickets)).Run(ctx, a.args)
 }
 
-// UsageLine renders a human-readable usage string built from the registered
-// tools. Flat tool names (e.g. `ping`) are listed first; namespaced tools are
-// grouped by their namespace. A three-part name (`git.pr.approve`) groups under
-// its first two segments and renders as a verb flag, which is how it is spelled
-// on the command line: `riggs git pr --approve <ref>`.
+// UsageLine renders the command list.
+//
+// It was built from the registry, reconstructing each command's spelling by
+// splitting its dotted name. With two commands that machinery was reassembling
+// a constant, so this is the constant.
 func (a *Application) UsageLine() string {
-	var flat []string
-	groups := map[string][]string{}
-	var groupOrder []string
+	return "usage: riggs <command>; commands: " +
+		"git pr --bulk <github-login>, jira tickets --bulk <jql>, " +
+		"capabilities, daemon, service, jobs, install, version"
+}
 
-	add := func(ns, sub string) {
-		if _, seen := groups[ns]; !seen {
-			groupOrder = append(groupOrder, ns)
-		}
-		groups[ns] = append(groups[ns], sub)
+// invokerOrNil keeps a nil *Tool out of a non-nil interface.
+//
+// The classic Go trap: a nil pointer in an interface is not a nil interface, so
+// the frontend's "is this command configured?" check would pass and the call
+// would panic. Both digests are legitimately absent on an unconfigured machine,
+// so this is the ordinary path, not an edge case.
+func invokerOrNil[T comparable](tool T) cli.Invoker {
+	var zero T
+	if tool == zero {
+		return nil
 	}
-
-	for _, t := range a.registry.All() {
-		parts := strings.Split(t.Name(), ".")
-		switch len(parts) {
-		case 1:
-			flat = append(flat, parts[0])
-		case 2:
-			add(parts[0], parts[1])
-		default:
-			add(strings.Join(parts[:len(parts)-1], " "), "--"+parts[len(parts)-1])
-		}
-	}
-
-	parts := append([]string{}, flat...)
-	for _, ns := range groupOrder {
-		subs := groups[ns]
-		sort.Strings(subs)
-		parts = append(parts, fmt.Sprintf("%s <%s>", ns, strings.Join(subs, "|")))
-	}
-	// The modes handled in main.go, outside the registry. `launchd` is absent
-	// on purpose: it still works, but it is the old name for `service` and a
-	// usage line should name one way to do a thing.
-	parts = append(parts, "mcp", "daemon", "service", "jobs", "install")
-	return "usage: riggs <command>; commands: " + strings.Join(parts, ", ")
+	return any(tool).(cli.Invoker)
 }
