@@ -335,6 +335,14 @@ func AskCard(d github.Detail, summary string) blockkit.Card {
 // for a pull request that is already settled is worse than no card: it invites
 // a click that can only fail. The link stays, because "where was that again"
 // outlives the review.
+//
+// label goes in the SUBTITLE, beside the reference, and not in the card's
+// context line where every other settled shape puts it. Two reasons, and they
+// point the same way: a container renders its actions or its context, never
+// both (see blockkit.Card.Blocks), and this is the one settled shape that keeps
+// a button — so a context line here renders nowhere at all. And a collapsed
+// container shows only its title and subtitle, which makes the subtitle the
+// only part of a collapsed card that can carry what happened.
 func AskSettledCard(d github.Detail, summary, label string) blockkit.Card {
 	card := AskCard(d, summary)
 	card.Collapsed = true
@@ -342,7 +350,7 @@ func AskSettledCard(d github.Detail, summary, label string) blockkit.Card {
 		blockkit.LinkButton{ActionID: AskOpenActionID, Text: "Open in Browser", URL: d.URL},
 	}
 	if label != "" {
-		card.Context = label
+		card.Subtitle = d.Ref() + " · " + label
 	}
 	return card
 }
