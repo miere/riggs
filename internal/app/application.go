@@ -15,9 +15,6 @@ import (
 	"github.com/miere/riggs-mcp/internal/frontends/mcp"
 	"github.com/miere/riggs-mcp/internal/slack"
 	"github.com/miere/riggs-mcp/internal/tools"
-	"github.com/miere/riggs-mcp/internal/tools/capabilities"
-	"github.com/miere/riggs-mcp/internal/tools/ping"
-	"github.com/miere/riggs-mcp/internal/tools/sendmsg"
 )
 
 // Mode selects which frontend Run starts.
@@ -56,15 +53,13 @@ func New(mode Mode, args []string, configPath string) (*Application, error) {
 	}
 
 	reg := tools.NewRegistry()
-	reg.Register(ping.New())
-	reg.Register(capabilities.New(cfg))
 
-	// Slack-backed tools are registered only when there is an account to post
-	// through. A tool that cannot possibly work is worse than an absent one,
-	// and `riggs capabilities` explains the absence (§6).
+	// The two digests are the only tools there are, and they are registered
+	// only when there is a Slack account to post through: a tool that cannot
+	// possibly work is worse than an absent one, and `riggs capabilities`
+	// explains the absence (§6).
 	if len(cfg.Slack.Profiles) > 0 {
 		resolver := slack.NewResolver(cfg)
-		reg.Register(sendmsg.New(resolver, slack.NewAPI()))
 		registerGitHubTools(reg, cfg, resolver)
 		registerJiraTools(reg, cfg, resolver)
 	}

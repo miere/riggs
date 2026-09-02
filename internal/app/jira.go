@@ -11,28 +11,12 @@ import (
 	"github.com/miere/riggs-mcp/internal/ticket"
 	"github.com/miere/riggs-mcp/internal/tools"
 	"github.com/miere/riggs-mcp/internal/tools/bulktickets"
-	"github.com/miere/riggs-mcp/internal/tools/tickets"
 )
 
 // jiraClient builds the Jira REST client from the effective credentials.
 func jiraClient(cfg *config.Config) *jira.Client {
 	email, token := cfg.JiraCredentials()
 	return jira.New(cfg.JiraBaseURL(), email, token)
-}
-
-// engineForTickets assembles the ticket reconciler for one invocation.
-func engineForTickets(cfg *config.Config) (*ticket.Engine, io.Closer, error) {
-	store, err := ledger(cfg)
-	if err != nil {
-		return nil, nil, err
-	}
-	client := jiraClient(cfg)
-	notifier := notify.New(store, slack.NewAPI())
-	engine := ticket.NewEngine(client, store, notifier, ticket.Admin{
-		SlackUserID: cfg.Admin.SlackUserID,
-		JiraEmail:   cfg.Admin.JiraEmail,
-	})
-	return engine, store, nil
 }
 
 // bulkEngineForTickets assembles the ticket digest reconciler for one
@@ -92,21 +76,8 @@ func registerJiraTools(reg *tools.Registry, cfg *config.Config, resolver *slack.
 	if email == "" || token == "" || cfg.JiraBaseURL() == "" {
 		return
 	}
-	factory := func(context.Context) (tickets.Engine, io.Closer, error) {
-		return engineForTickets(cfg)
-	}
-	reg.Register(tickets.NewPoll(resolver, factory))
 	reg.Register(bulktickets.New(resolver,
 		func(_ context.Context, jql string, opts ticket.BulkOptions) (bulktickets.Engine, io.Closer, error) {
 			return bulkEngineForTickets(cfg, jql, opts)
 		}))
-	reg.Register(tickets.NewAssign(resolver, factory))
-	reg.Register(tickets.NewDismiss(resolver, factory))
-	reg.Register(tickets.NewImport(func(context.Context) (tickets.Store, func() error, error) {
-		store, err := ledger(cfg)
-		if err != nil {
-			return nil, nil, err
-		}
-		return store, store.Close, nil
-	}))
 }

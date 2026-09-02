@@ -21,18 +21,15 @@ func TestNewWithNoConfig(t *testing.T) {
 	// happens to have rather than an unprovisioned machine.
 	t.Setenv("HOME", dir)
 
-	a, err := New(ModeCLI, []string{"ping"}, "")
+	a, err := New(ModeCLI, nil, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if _, ok := a.registry.Get("ping"); !ok {
-		t.Error("ping is not registered on an unprovisioned machine")
-	}
-	if _, ok := a.registry.Get("capabilities"); !ok {
-		t.Error("capabilities is not registered on an unprovisioned machine")
-	}
-	if err := a.Run(context.Background()); err != nil {
-		t.Errorf("Run: %v", err)
+	// Nothing is registered: both digests need a Slack account to post
+	// through, and an unprovisioned machine has none. That is a capability
+	// gap, not a boot failure.
+	if names := a.registry.All(); len(names) != 0 {
+		t.Errorf("registered %d tools on an unprovisioned machine", len(names))
 	}
 }
 
@@ -92,18 +89,15 @@ func TestSlackToolsGatedOnProfiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if _, ok := a.registry.Get("slack.send-msg"); !ok {
-		t.Error("slack.send-msg absent despite a configured profile")
+	if _, ok := a.registry.Get("git.pr.bulk"); !ok {
+		t.Error("the pull-request digest is absent despite a configured profile")
 	}
 
 	b, err := New(ModeCLI, nil, bare)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if _, ok := b.registry.Get("slack.send-msg"); ok {
-		t.Error("slack.send-msg registered with no Slack profile configured")
-	}
-	if _, ok := b.registry.Get("capabilities"); !ok {
-		t.Error("capabilities must remain available to explain the absence")
+	if _, ok := b.registry.Get("git.pr.bulk"); ok {
+		t.Error("the digest registered with no Slack profile configured")
 	}
 }

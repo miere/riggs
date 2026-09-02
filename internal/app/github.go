@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"time"
 
@@ -12,11 +11,7 @@ import (
 	"github.com/miere/riggs-mcp/internal/pullrequest"
 	"github.com/miere/riggs-mcp/internal/slack"
 	"github.com/miere/riggs-mcp/internal/tools"
-	"github.com/miere/riggs-mcp/internal/tools/approve"
 	"github.com/miere/riggs-mcp/internal/tools/bulkreviews"
-	"github.com/miere/riggs-mcp/internal/tools/fetchreviews"
-	"github.com/miere/riggs-mcp/internal/tools/importstate"
-	"github.com/miere/riggs-mcp/internal/tools/parity"
 )
 
 // ledger opens the notification store. It is opened per invocation rather than
@@ -35,23 +30,6 @@ func githubClient(ctx context.Context, store *notify.Store) (*github.Client, err
 		return nil, err
 	}
 	return github.New(auth.Token).WithCache(store, time.Now), nil
-}
-
-// engineFor assembles the reconciler for one invocation, returning the closer
-// for the ledger it opened.
-func engineFor(cfg *config.Config, login string) (*pullrequest.Engine, io.Closer, error) {
-	store, err := ledger(cfg)
-	if err != nil {
-		return nil, nil, err
-	}
-	gh, err := githubClient(context.Background(), store)
-	if err != nil {
-		store.Close()
-		return nil, nil, err
-	}
-	notifier := notify.New(store, slack.NewAPI())
-	engine := pullrequest.NewEngine(gh, store, notifier, login, cfg.Admin.SlackUserID)
-	return engine, store, nil
 }
 
 // bulkEngineFor assembles the digest reconciler for one invocation. It reuses
@@ -144,33 +122,9 @@ func reviewRowActions(cfg *config.Config) pullrequest.RowActions {
 // `riggs capabilities` explains an absence.
 func registerGitHubTools(reg *tools.Registry, cfg *config.Config, resolver *slack.Resolver) {
 	// No default login. Whose reviews a pass fetches is named on the command
-	// that runs it, never resolved from this file at run time.
-	reg.Register(fetchreviews.New(resolver,
-		func(_ context.Context, login string) (fetchreviews.Engine, io.Closer, error) {
-			return engineFor(cfg, login)
-		}))
-
+	// that runs it, never resolved from the config at run time.
 	reg.Register(bulkreviews.New(resolver,
 		func(_ context.Context, login string, opts pullrequest.BulkOptions) (bulkreviews.Engine, io.Closer, error) {
 			return bulkEngineFor(cfg, login, opts)
 		}))
-
-	reg.Register(parity.New(
-		func(_ context.Context, login string) (parity.Resolver, io.Closer, error) {
-			return engineFor(cfg, login)
-		}))
-
-	approveFactory := func(context.Context) (approve.Approver, io.Closer, error) {
-		return approverFor(cfg)
-	}
-	reg.Register(approve.New(resolver, approveFactory))
-	reg.Register(approve.NewMerge(resolver, approveFactory))
-
-	reg.Register(importstate.New(func(context.Context) (importstate.Store, func() error, error) {
-		store, err := ledger(cfg)
-		if err != nil {
-			return nil, nil, fmt.Errorf("opening the ledger: %w", err)
-		}
-		return store, store.Close, nil
-	}))
 }

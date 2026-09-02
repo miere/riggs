@@ -45,10 +45,8 @@ func TestJiraToolsNeedATenant(t *testing.T) {
 
 func TestJiraToolsRegisterWithATenant(t *testing.T) {
 	names := registeredNames(jiraCfg(t, "https://example.atlassian.net"))
-	for _, want := range []string{"jira.tickets.poll", "jira.tickets.assign"} {
-		if !names[want] {
-			t.Errorf("%s was not registered: got %v", want, names)
-		}
+	if !names["jira.tickets.bulk"] {
+		t.Errorf("the ticket digest was not registered: got %v", names)
 	}
 }
 
@@ -58,7 +56,7 @@ func TestJiraTenantMayComeFromTheEnvironment(t *testing.T) {
 	cfg := jiraCfg(t, "")
 	t.Setenv(config.JiraBaseURLEnv, "https://from-env.atlassian.net")
 
-	if !registeredNames(cfg)["jira.tickets.poll"] {
-		t.Fatal("tools were not registered from an environment-supplied tenant")
+	if !registeredNames(cfg)["jira.tickets.bulk"] {
+		t.Fatal("the digest was not registered from an environment-supplied tenant")
 	}
 }
