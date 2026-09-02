@@ -1,15 +1,15 @@
-// Package installer provisions a working Riggs: it writes the config, proves
-// the Slack path end to end against real data, and seeds the schedule the
-// daemon will run.
+// Package installer provisions a working Riggs: it writes the config and proves
+// the Slack path end to end against real data.
 //
 // It is interactive, so it lives outside the tool registry and is never
 // exposed over MCP. `riggs install` is handled in cmd/riggs before mode
 // parsing, the same treatment the blueprint gives its `auth` command.
 //
-// It used to register those jobs with Murtaugh through its CLI, and never
-// touched anything but its own files even then. Riggs owns the schedule now
-// (§9c), so there is no second tool to configure and nothing here reaches
-// outside this machine's Riggs config and ledger.
+// It deliberately creates NO jobs. It used to register two with Murtaugh, and
+// briefly seeded the same pair into Riggs' own ledger; both baked a particular
+// job's shape into the installer, which is the wrong place for it to live. What
+// runs on a schedule is now entirely the operator's to say, through the App
+// Home tab or `riggs jobs add`.
 package installer
 
 import (
@@ -25,7 +25,6 @@ import (
 	"github.com/miere/riggs-mcp/internal/blockkit"
 	"github.com/miere/riggs-mcp/internal/config"
 	"github.com/miere/riggs-mcp/internal/github"
-	"github.com/miere/riggs-mcp/internal/notify"
 	"github.com/miere/riggs-mcp/internal/slack"
 )
 
@@ -66,9 +65,6 @@ type Installer struct {
 	writeCfg func(path string, data []byte) error
 	lookPath func(string) (string, error)
 	stat     func(string) (os.FileInfo, error)
-	// saveJobs persists the seeded schedule. A seam, so the installer's tests
-	// never create a database.
-	saveJobs func(dbPath string, jobs []notify.Job) error
 }
 
 // New builds an Installer with live dependencies.
@@ -90,7 +86,6 @@ func New(p Prompter, opts Options) *Installer {
 		},
 		lookPath: exec.LookPath,
 		stat:     os.Stat,
-		saveJobs: storeJobs,
 	}
 }
 
@@ -116,12 +111,13 @@ func (i *Installer) Run(ctx context.Context) error {
 	if err := i.smokeTest(ctx, cfg); err != nil {
 		return err
 	}
-	if err := i.gatherJobs(ctx, path); err != nil {
-		return err
-	}
-
 	i.p.Say("")
 	i.p.Say("Done. `riggs capabilities` will show what is live.")
+	// Said because the schedule is empty and nothing else is going to mention
+	// it: an install that ends silently leaves the impression that the digests
+	// are already running.
+	i.p.Say("Nothing is scheduled yet — add jobs from the App Home tab, or with")
+	i.p.Say("`riggs jobs add <name> <schedule> <command...>`.")
 	return nil
 }
 

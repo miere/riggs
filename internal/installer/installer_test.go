@@ -11,7 +11,6 @@ import (
 
 	"github.com/miere/riggs-mcp/internal/config"
 	"github.com/miere/riggs-mcp/internal/github"
-	"github.com/miere/riggs-mcp/internal/notify"
 	"github.com/miere/riggs-mcp/internal/slack"
 	"github.com/miere/riggs-mcp/internal/slack/slacktest"
 )
@@ -74,8 +73,6 @@ type rig struct {
 	prompt  *script
 	slack   *slacktest.Fake
 	written map[string]string
-	dbPath  string
-	jobs    []notify.Job
 	users   map[string]string
 	prs     []github.PullRequest
 	prErr   error
@@ -96,10 +93,6 @@ func newRig(t *testing.T, s *script) *rig {
 	}
 	inst.newPRs = func(string) PRLister { return prLister{r} }
 	inst.writeCfg = func(path string, data []byte) error { r.written[path] = string(data); return nil }
-	inst.saveJobs = func(dbPath string, jobs []notify.Job) error {
-		r.dbPath, r.jobs = dbPath, jobs
-		return nil
-	}
 	inst.lookPath = func(string) (string, error) { return "/usr/local/bin/murtaugh", nil }
 	inst.stat = func(path string) (os.FileInfo, error) {
 		if strings.Contains(path, "murtaugh") {
@@ -311,8 +304,8 @@ func TestSmokeTestFailureAbortsTheInstall(t *testing.T) {
 	if !strings.Contains(err.Error(), "test message failed") {
 		t.Errorf("err = %v, want it attributed to the test message", err)
 	}
-	if len(r.jobs) != 0 {
-		t.Error("jobs were scheduled after the smoke test failed")
+	if _, wrote := r.written["/tmp/riggs/config.yaml"]; !wrote {
+		t.Error("the config was not written before the smoke test ran")
 	}
 }
 

@@ -403,14 +403,6 @@ func deriveDBPath(configPath string) string {
 // DBPath is where the notification ledger lives.
 func (c *Config) DBPath() string { return c.dbPath }
 
-// DBPathFor is where the ledger would live for a config at path.
-//
-// Exported for the installer, which assembles a Config in memory rather than
-// parsing one and so has no derived path to read. Same rule, one implementation:
-// the ledger follows the config file, and a second copy of that rule is one
-// that would eventually disagree.
-func DBPathFor(configPath string) string { return deriveDBPath(configPath) }
-
 // expand resolves ${VAR} references in every token, so the config file holds
 // references and the environment holds secrets.
 func (c *Config) expand() {

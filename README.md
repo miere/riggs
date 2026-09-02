@@ -47,9 +47,9 @@ and **New job…** under Restart in the controls menu — and from the terminal:
 
 ```sh
 riggs jobs list
+riggs jobs add review-queue 3m git pr --bulk <github-login>
 riggs jobs add nightly "0 9 * * 1-5" jira tickets --bulk
 riggs jobs run nightly
-riggs jobs seed <github-login>     # create the two standard jobs
 ```
 
 A schedule is one field in either of two dialects: an interval (`3m`) or a
@@ -58,8 +58,9 @@ binary again as a child process, so what it does is exactly what typing the same
 command would do. Missed runs are skipped rather than caught up, and a job that
 overruns its own cadence is skipped rather than started twice.
 
-If the same jobs are also defined in another scheduler, remove them there — both
-would run, racing each other to write the same rows.
+Riggs ships with **nothing scheduled**: neither the installer nor any command
+creates a job for you. If the same job is also defined in another scheduler,
+remove it there — both would run, racing each other to write the same rows.
 
 ## Configure
 
