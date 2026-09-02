@@ -1297,31 +1297,28 @@ handful of rows.
 - **An unreadable stored schedule is reported and skipped**, not fatal — the
   alternative is a job that silently never runs.
 
-### The standard jobs
+### Riggs ships with no jobs
 
-`riggs jobs seed` creates the two jobs `riggs install` has always set up, from
-`schedule.Standard` — one declaration, so the installer and the command cannot
-drift apart. The names are kept, so a machine that had them under another
-scheduler recognises them rather than gaining two lookalikes. An existing job is
-left alone: running it twice must not undo an edit made in between.
+Nothing is scheduled until somebody says so — not by the installer, not by a
+command, not on first run. There is no built-in job set at all.
 
-**It is a seed, not an import, and it was briefly named as though it were one.**
-The argument gave that away — a genuine import would already know the GitHub
-login, because the login is *inside* the job being imported. Having to pass it
-is proof that nothing is being read.
+That is a deliberate reversal. The installer registered two jobs with Murtaugh
+for a long time, and this phase briefly kept the habit by seeding the same pair
+into Riggs' own ledger. Both baked one particular job's shape — its command, its
+arguments, its cadence — into a component that has no business holding an
+opinion about it, and a definition living in two places is one that eventually
+disagrees with itself.
 
-A real import was possible: Murtaugh exposes `cfg job list`, `cfg job show` and
-`cfg export`. It was rejected because it would couple Riggs to another tool's
-output format at the exact moment the dependency on that tool is being removed —
-and because `cfg job list` has no JSON output, so the coupling would be to
-human-readable text.
+So the schedule is entirely the operator's: the App Home tab's editor, or
+`riggs jobs add <name> <schedule> <command...>`. The install says so on its way
+out, because an install that ends silently leaves the impression that the
+digests are already running.
 
-**Neither the seed nor the installer asserts what another scheduler holds.**
-Riggs cannot see another tool's configuration, and a warning describing a state
-it has not checked is how a tool teaches people to ignore its output. If the
-same jobs are defined in two places they will both run, and both will race to
-write the same ledger rows; `riggs jobs list` says what Riggs runs, and the
-other scheduler says what it runs.
+**Nothing here asserts what another scheduler holds.** Riggs cannot see another
+tool's configuration, and a warning describing a state it has not checked is how
+a tool teaches people to ignore its output. If the same job is defined in two
+places both will run, racing to write the same ledger rows; `riggs jobs list`
+says what Riggs runs.
 
 ## 9b. The item ledger (bulk digests)
 
@@ -1530,20 +1527,13 @@ Rules:
   later, unattended.
 - Zero PRs awaiting review is not a failure: a confirmation card is sent
   instead, and the console says which happened.
-- The installer **seeds Riggs' own schedule** (§9c) into the ledger it is about
-  to hand the daemon. It used to register the jobs with Murtaugh through its
-  CLI; there is no longer a second tool in the chain, and therefore no longer a
-  second place for the two of them to disagree about what is running.
-- Cadences are carried over unchanged. A migration that also changes the
-  schedule makes it impossible to attribute a behaviour difference.
-- An **existing job is left alone**. Re-running the installer must not undo a
-  schedule somebody has since edited from the Home tab.
-- It **says how to retire Murtaugh's copies** and why. Nothing here can remove
-  them — that is Murtaugh's config, not ours — and two schedulers driving one
-  digest is noise rather than redundancy.
-- Each job is asked for a channel and a Slack profile. The profile is not
-  cosmetic: a click is delivered to the app that POSTED the message, so a digest
-  sent through the wrong one renders a menu the daemon never hears about.
+- The installer **creates no jobs** (§9c). It used to register two with
+  Murtaugh; it now touches nothing but this machine's Riggs config. What runs on
+  a schedule is the operator's to say, and an installer that pre-baked one job's
+  shape is the wrong place for that decision to live.
+- It **says the schedule is empty** on the way out, and how to add to it. An
+  install that ends silently leaves the impression that the digests are already
+  running.
 - **The digest job names its GitHub user on the command**, and `admin.github-login`
   no longer exists. The job says who it is for: a config edit cannot repoint the
   queue at a different person, and reading the job answers the question without a

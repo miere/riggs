@@ -20,8 +20,7 @@ const jobsUsage = `usage: riggs jobs <command>
   add <name> <schedule> <command...>    e.g. add nightly "0 9 * * 1-5" jira tickets --bulk
   rm <name>                             forget a job and its history
   enable|disable <name>                 pause or resume without forgetting it
-  run <name>                            run one now, whatever its schedule says
-  seed [github-login]                   create the two standard jobs`
+  run <name>                            run one now, whatever its schedule says`
 
 // runJobs is the command-line half of the schedule.
 //
@@ -70,8 +69,6 @@ func runJobs(ctx context.Context, args []string, configPath string) error {
 		return oneNamed(ctx, rest, "run", func(name string) error {
 			return runJobNow(ctx, cfg, store, name)
 		})
-	case "seed":
-		return seedJobs(ctx, store, rest)
 	default:
 		return fmt.Errorf("unknown jobs command %q\n%s", action, jobsUsage)
 	}
@@ -84,7 +81,7 @@ func listJobs(ctx context.Context, store *notify.Store) error {
 		return err
 	}
 	if len(jobs) == 0 {
-		fmt.Println("Nothing is scheduled. `riggs jobs seed` creates the two standard jobs.")
+		fmt.Println("Nothing is scheduled. Add one with `riggs jobs add`, or from the App Home tab.")
 		return nil
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
@@ -206,45 +203,6 @@ func jobConfigFlag(cfg *config.Config) string {
 		return ""
 	}
 	return cfg.Path
-}
-
-// seedJobs creates the two standard jobs.
-//
-// A SEED, not an import: nothing is read from anywhere. It materialises
-// schedule.Standard, which is this repository's own declaration of the two jobs
-// `riggs install` has always set up. The name was `import` for one commit, which
-// was wrong in a way the argument gave away — a genuine import would already
-// know the GitHub login, because the login is inside the job being imported.
-//
-// An existing job is left alone rather than overwritten. Running this twice must
-// not undo an edit made in between.
-func seedJobs(ctx context.Context, store *notify.Store, args []string) error {
-	login := ""
-	if len(args) > 0 {
-		login = args[0]
-	}
-	jobs, skipped, err := schedule.Standard(login, "")
-	if err != nil {
-		return err
-	}
-
-	for _, job := range jobs {
-		if _, exists, err := store.Job(ctx, job.Name); err != nil {
-			return err
-		} else if exists {
-			fmt.Printf("  kept    %s (already defined; not overwritten)\n", job.Name)
-			continue
-		}
-		job.UpdatedAt = time.Now()
-		if err := store.SaveJob(ctx, job); err != nil {
-			return err
-		}
-		fmt.Printf("  created %s: %s, %s\n", job.Name, schedule.Command(job), job.Spec)
-	}
-	for _, note := range skipped {
-		fmt.Printf("  skipped %s\n", note)
-	}
-	return nil
 }
 
 // oneNamed runs fn against exactly one job name.
