@@ -41,10 +41,6 @@ func TestReviewablePullRequestCard(t *testing.T) {
 		Actions: []Element{
 			Button{ActionID: "approve_only", Text: "Approve", Value: "acme/monolith#20069", Primary: true},
 			LinkButton{Text: "Open in Browser", URL: "https://github.com/x/y/pull/1"},
-			Overflow{ActionID: "pr_overflow", Options: []Option{
-				{Text: "Approve & Merge", Value: "approve_merge"},
-				{Text: "Run Local Review", Value: "run_local_review"},
-			}},
 		},
 	}
 
@@ -61,11 +57,7 @@ func TestReviewablePullRequestCard(t *testing.T) {
           {"type":"button","action_id":"approve_only","style":"primary","value":"acme/monolith#20069",
            "text":{"type":"plain_text","text":"Approve","emoji":true}},
           {"type":"button","url":"https://github.com/x/y/pull/1",
-           "text":{"type":"plain_text","text":"Open in Browser","emoji":true}},
-          {"type":"overflow","action_id":"pr_overflow","options":[
-            {"text":{"type":"plain_text","text":"Approve & Merge","emoji":true},"value":"approve_merge"},
-            {"text":{"type":"plain_text","text":"Run Local Review","emoji":true},"value":"run_local_review"}
-          ]}
+           "text":{"type":"plain_text","text":"Open in Browser","emoji":true}}
         ]}
       ]}]`)
 }
@@ -116,7 +108,7 @@ func TestFingerprintIsStable(t *testing.T) {
 		Title: "T", Subtitle: "S", Body: "B", ActionsBlockID: "id",
 		Actions: []Element{
 			Button{ActionID: "a", Text: "A", Value: "v", Primary: true},
-			Overflow{ActionID: "o", Options: []Option{{Text: "x", Value: "1"}, {Text: "y", Value: "2"}}},
+			LinkButton{ActionID: "o", Text: "Open", URL: "https://example.test"},
 		},
 	}
 	first := card.Fingerprint()

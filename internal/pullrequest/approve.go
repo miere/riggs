@@ -81,14 +81,10 @@ type ApproveResult struct {
 	// nothing was submitted.
 	AlreadyApproved bool `json:"already_approved"`
 	Merged          bool `json:"merged"`
-	DryRun          bool `json:"dry_run,omitempty"`
 	// Message is the human sentence, and is what gets posted to the thread.
 	Message string `json:"message"`
 	Error   string `json:"error,omitempty"`
 }
-
-// String renders the result for the CLI.
-func (r ApproveResult) String() string { return r.Message }
 
 // Run approves ref, optionally rebase-merging, and reports the real outcome to
 // the card's thread.
@@ -96,23 +92,21 @@ func (r ApproveResult) String() string { return r.Message }
 // The Python this replaces posted "Approved" unconditionally. Every branch
 // here posts what actually happened instead, because a button that always
 // claims success is worse than no button.
+//
+// There was a DryRun beside this, on the grounds that the write half has no
+// undo. It went with the CLI tool that was the only way to reach it: a button
+// cannot be dry-run, and the preview is no use to the person who has already
+// pressed it.
 func (a *Approver) Run(ctx context.Context, ref string, merge bool, target slack.Target, threadTS string) (ApproveResult, error) {
-	return a.run(ctx, ref, merge, target, threadTS, false)
+	return a.run(ctx, ref, merge, target, threadTS)
 }
 
-// DryRun reports what Run would do, touching neither GitHub nor Slack. It
-// exists because the write half of this flow has no undo: approving the wrong
-// pull request cannot be taken back from a Slack thread.
-func (a *Approver) DryRun(ctx context.Context, ref string, merge bool, target slack.Target, threadTS string) (ApproveResult, error) {
-	return a.run(ctx, ref, merge, target, threadTS, true)
-}
-
-func (a *Approver) run(ctx context.Context, ref string, merge bool, target slack.Target, threadTS string, dry bool) (ApproveResult, error) {
+func (a *Approver) run(ctx context.Context, ref string, merge bool, target slack.Target, threadTS string) (ApproveResult, error) {
 	repo, number, err := SplitRef(ref)
 	if err != nil {
 		return ApproveResult{}, err
 	}
-	result := ApproveResult{Ref: ref, DryRun: dry}
+	result := ApproveResult{Ref: ref}
 
 	// Resolve where to reply. An explicit thread wins (the workflow rule knows
 	// which message was clicked); otherwise the ledger knows where the card
@@ -123,9 +117,7 @@ func (a *Approver) run(ctx context.Context, ref string, merge bool, target slack
 	if merge {
 		action = "Approving & rebase-merging"
 	}
-	if !dry {
-		a.say(ctx, target, channel, thread, fmt.Sprintf("%s %s — verifying with GitHub…", blockkit.MarkerRunning, action))
-	}
+	a.say(ctx, target, channel, thread, fmt.Sprintf("%s %s — verifying with GitHub…", blockkit.MarkerRunning, action))
 
 	login, err := a.gh.AuthenticatedLogin(ctx)
 	if err != nil {
@@ -138,24 +130,6 @@ func (a *Approver) run(ctx context.Context, ref string, merge bool, target slack
 	if err != nil {
 		return a.fail(ctx, result, target, channel, thread,
 			fmt.Sprintf("%s Could not read reviews for %s — %v", blockkit.MarkerFailed, ref, err))
-	}
-
-	if dry {
-		result.AlreadyApproved, result.Approved = standing, standing
-		switch {
-		case standing && merge:
-			result.Message = fmt.Sprintf("[dry run] %s is already approved; would rebase-merge it. "+
-				"Reply would go to %s/%s.", ref, channel, thread)
-		case standing:
-			result.Message = fmt.Sprintf("[dry run] %s is already approved — nothing would be done.", ref)
-		case merge:
-			result.Message = fmt.Sprintf("[dry run] would approve %s as %s, verify, then rebase-merge. "+
-				"Reply would go to %s/%s.", ref, loginOr(login), channel, thread)
-		default:
-			result.Message = fmt.Sprintf("[dry run] would approve %s as %s and verify. "+
-				"Reply would go to %s/%s.", ref, loginOr(login), channel, thread)
-		}
-		return result, nil
 	}
 
 	if standing {
@@ -266,14 +240,6 @@ func (a *Approver) say(ctx context.Context, target slack.Target, channel, thread
 		Blocks:   blockkit.ContextBlocks(text),
 		ThreadTS: thread,
 	})
-}
-
-// loginOr renders the acting login for a dry run.
-func loginOr(login string) string {
-	if login == "" {
-		return "an unknown user (gh is not authenticated)"
-	}
-	return "@" + login
 }
 
 // fail records and announces a failure. The error is returned as part of the

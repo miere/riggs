@@ -78,19 +78,11 @@ type LinkButton struct {
 	URL      string
 }
 
-// Overflow is the "…" menu. Each option's value is a bare intent token so a
-// workflow rule can match it exactly on selected_option.value.
-type Overflow struct {
-	ActionID string
-	Options  []Option
-}
-
-// Option is one entry in an Overflow.
-type Option struct {
-	Text  string
-	Value string
-}
-
+// A container card once had an Overflow — the "…" menu, with an Option per
+// entry. Nothing built one after the per-pull-request card loop was deleted:
+// the ask cards carry buttons, and the digests use MenuOption (bulk.go), which
+// is a separate type because a digest option can also carry a url.
+//
 // --- wire types -----------------------------------------------------------
 // Ordered structs, so the encoded bytes are stable.
 
@@ -176,14 +168,6 @@ func (b Button) marshal() any {
 
 func (b LinkButton) marshal() any {
 	return buttonElem{Type: "button", ActionID: b.ActionID, URL: b.URL, Text: plainEmoji(b.Text)}
-}
-
-func (o Overflow) marshal() any {
-	opts := make([]overflowOption, 0, len(o.Options))
-	for _, opt := range o.Options {
-		opts = append(opts, overflowOption{Text: plainEmoji(opt.Text), Value: opt.Value})
-	}
-	return overflowElem{Type: "overflow", ActionID: o.ActionID, Options: opts}
 }
 
 // bodyLimit caps the body section's text, in runes.

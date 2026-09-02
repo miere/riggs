@@ -31,21 +31,6 @@ const (
 	Gone Outcome = "gone"
 )
 
-// Latch names a threaded message that fires at most once until it is
-// explicitly cleared.
-//
-// It used to carry a policy, because the idle nudge wanted a rate-limited
-// variant with a minimum gap between firings. The nudge is gone and nothing
-// else ever wanted one, so the policy went with it rather than staying as a
-// one-valued enum explaining itself.
-type Latch struct {
-	Name string
-}
-
-// Once builds a fire-once-until-cleared latch. This is the reviewer tag: one
-// ping per episode of being asked to review, no matter how many ticks pass.
-func Once(name string) Latch { return Latch{Name: name} }
-
 // Notifier posts and maintains cards, keeping the ledger in step.
 type Notifier struct {
 	store  *Store
@@ -124,60 +109,6 @@ func (n *Notifier) save(ctx context.Context, key string, target slack.Target, re
 		State:       state,
 		UpdatedAt:   n.now(),
 	})
-}
-
-// Thread posts a reply on key's card, subject to latch.
-//
-// It reports whether the message was actually sent. false with a nil error is
-// the ordinary case, not a failure: either the latch is closed, or there is no
-// card to reply to. A reply about something that was never advertised has
-// nowhere to go, and inventing a top-level message would be worse than staying
-// quiet.
-func (n *Notifier) Thread(ctx context.Context, key string, target slack.Target, text string, latch Latch) (bool, error) {
-	entry, found, err := n.store.Card(ctx, key)
-	if err != nil {
-		return false, err
-	}
-	if !found || entry.TS == "" {
-		return false, nil
-	}
-
-	open, err := n.latchOpen(ctx, key, latch)
-	if err != nil || !open {
-		return false, err
-	}
-
-	// Reply into the tracked message's own channel, not the caller's default:
-	// the thread lives where the card is.
-	threadTarget := target
-	threadTarget.Channel = entry.Channel
-	msg := slack.Message{Text: text, Blocks: blockkit.TextBlocks(text), ThreadTS: entry.TS}
-	if _, err := n.poster.Post(ctx, threadTarget, msg); err != nil {
-		return false, fmt.Errorf("threading on card %s: %w", key, err)
-	}
-	if err := n.store.SetLatch(ctx, key, latch.Name, n.now()); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-// latchOpen reports whether latch permits a message right now.
-func (n *Notifier) latchOpen(ctx context.Context, key string, latch Latch) (bool, error) {
-	if latch.Name == "" {
-		return true, nil
-	}
-	_, fired, err := n.store.LatchFiredAt(ctx, key, latch.Name)
-	if err != nil {
-		return false, err
-	}
-	return !fired, nil
-}
-
-// ClearLatch reopens a latch, so a once-per-episode message fires again on the
-// next episode. The review queue calls this when a PR stops being reviewable,
-// which is what makes a re-review request ping again.
-func (n *Notifier) ClearLatch(ctx context.Context, key, name string) error {
-	return n.store.ClearLatch(ctx, key, name)
 }
 
 // Card exposes the tracked entry, for callers that need the ts (to link to a
