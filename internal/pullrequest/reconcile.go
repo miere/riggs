@@ -172,6 +172,8 @@ type Report struct {
 	Outcomes   []Outcome    `json:"outcomes"`
 	Stats      github.Stats `json:"github_requests"`
 	DryRun     bool         `json:"dry_run"`
+	// SettledAsks names the review-request cards this pass collapsed.
+	SettledAsks []AskOutcome `json:"settled_asks,omitempty"`
 }
 
 // String renders the report for a human.
@@ -191,6 +193,7 @@ func (r Report) String() string {
 		}
 		b.WriteString(line + "\n")
 	}
+	b.WriteString(AskLines(r.SettledAsks))
 	fmt.Fprintf(&b, "github: %d request(s), %d not-modified",
 		r.Stats.Requests, r.Stats.NotModified)
 	return b.String()
@@ -214,6 +217,16 @@ func (e *Engine) Run(ctx context.Context, target slack.Target, dryRun bool) (Rep
 			report.Outcomes = append(report.Outcomes, *outcome)
 		}
 	}
+	// After the cards, and never allowed to cost them their tick: the queue is
+	// what this pass is for. Here as well as on the digest because which of the
+	// two is scheduled is a config decision (§12), and a card left open by the
+	// other one is the bug this sweep exists to close.
+	settled, err := e.SettleAsks(ctx, target, dryRun)
+	if err != nil {
+		return report, err
+	}
+	report.SettledAsks = settled
+
 	if c, ok := e.gh.(interface{ Stats() github.Stats }); ok {
 		report.Stats = c.Stats()
 	}

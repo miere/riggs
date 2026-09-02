@@ -486,6 +486,24 @@ cannot fire.
   "where was that again" outlives the review. Settling is independent of the
   digest row: a pull request can be in a digest, have an ask card, both, or
   neither, and the same approval settles whichever exist.
+- **A pass settles it too**, because clicking Approve is not the only way a
+  review ends. That was the unwritten assumption in the sentence above: the
+  click handler was the only reader `git.pr.ask:` ever had, so a pull request
+  approved on github.com — or merged without an approval at all — left its card
+  open indefinitely, still offering the click that can only fail. `SettleAsks`
+  sweeps the stream on every reconcile and every digest pass: one
+  conditionally-cached read per open card, skipped entirely once the ledger
+  state says `done`, so a settled card is never looked at again.
+- **What settles**: the three terminal reasons, plus approved — matching the
+  button, which settles on an approval it has not merged. Deliberately not
+  `changes_requested` or either checks state: those are moments in a review, not
+  the end of one.
+- **The settled card's label lives in the SUBTITLE**, not the context line every
+  other settled shape uses. A container renders its actions or its context and
+  never both (`blockkit.Card.Blocks`), and this is the one settled shape that
+  keeps a button — so a context line here rendered nowhere at all. Collapsed,
+  the subtitle is the only part a reader sees without expanding it, which makes
+  it the right place regardless.
 - **The ask card has its own `action_id`** (`pr_ask_review`), not the legacy
   card's `approve_only`, so Riggs' dispatch table and Murtaugh's still-live
   rules never have to agree about a name.
@@ -1757,6 +1775,7 @@ one *would* live at still decides, which is the state a fresh machine and
 | 27 | The ticket digest: rotation extracted to `internal/bulk`, `jira.tickets.bulk`, Ask for AI Assistance (§8d) | done |
 | 28 | Asking split from running: `internal/ai` revived, `sme-assistance`, editable prompts on the Home tab (§7bb, §7e) | done |
 | 29 | Riggs owns the schedule: `internal/schedule` in the daemon, jobs on the Home tab, `riggs service` for launchd and systemd (§9c, §12b) | done |
+| 30 | Sweep the ask-review cards, so one settled outside Riggs collapses too (§7bb) | done |
 
 ## 13b. Cutover
 

@@ -10,6 +10,7 @@ import (
 	"github.com/miere/riggs-mcp/internal/blockkit"
 	"github.com/miere/riggs-mcp/internal/bulk"
 	"github.com/miere/riggs-mcp/internal/notify"
+	"github.com/miere/riggs-mcp/internal/slack"
 )
 
 // The bulk digest: one message carrying up to N pull requests, rather than one
@@ -110,22 +111,66 @@ func (o BulkOptions) resolved() BulkOptions {
 	return o
 }
 
-// BulkReport is the result of one digest pass.
-type BulkReport = bulk.Report
+// BulkReport is the result of one digest pass: the digest's own report, plus
+// what the pass did to the review-request cards hanging off the same queue.
+//
+// Its own type rather than an alias for bulk.Report, because settling an ask is
+// a pull-request concern and the ticket digest shares that struct — a card
+// there has one state and nothing to collapse (see internal/ticket, §7bb).
+type BulkReport struct {
+	bulk.Report
+	// SettledAsks names the review-request cards this pass collapsed.
+	SettledAsks []AskOutcome `json:"settled_asks,omitempty"`
+}
+
+// String renders the report for a human, the settled cards after the digest's
+// own lines. Defined here rather than promoted, so the sweep is not invisible
+// on the CLI.
+func (r BulkReport) String() string {
+	lines := AskLines(r.SettledAsks)
+	if lines == "" {
+		return r.Report.String()
+	}
+	return r.Report.String() + "\n" + strings.TrimRight(lines, "\n")
+}
 
 // BulkEngine reconciles the digest.
 type BulkEngine struct {
 	*bulk.Engine
+	// reviews is the card engine, kept for the ask sweep that follows the
+	// digest. It is the same one the digest's candidates are resolved through,
+	// so the sweep costs nothing the pass has not already paid for.
+	reviews *Engine
 }
 
 // NewBulkEngine builds the digest reconciler over the card engine's GitHub
 // reads and the shared ledger.
 func NewBulkEngine(e *Engine, store *notify.Store, n *notify.Notifier, opts BulkOptions) *BulkEngine {
 	opts = opts.resolved()
-	return &BulkEngine{Engine: bulk.New(
-		bulkDomain{engine: e, actions: opts.Actions}, store, n,
-		bulk.Options{MaxItems: opts.MaxItems, Cooldown: opts.Cooldown},
-	)}
+	return &BulkEngine{
+		Engine: bulk.New(
+			bulkDomain{engine: e, actions: opts.Actions}, store, n,
+			bulk.Options{MaxItems: opts.MaxItems, Cooldown: opts.Cooldown},
+		),
+		reviews: e,
+	}
+}
+
+// Run reconciles the digest, then collapses any review-request card whose pull
+// request has settled since it was asked about.
+//
+// The digest first, and a failed sweep does not undo it: the digest is what the
+// pass is for, and a card that stays open one more tick is a smaller problem
+// than a queue that missed one.
+func (b *BulkEngine) Run(ctx context.Context, target slack.Target, dryRun bool) (BulkReport, error) {
+	report, err := b.Engine.Run(ctx, target, dryRun)
+	out := BulkReport{Report: report}
+	if err != nil {
+		return out, err
+	}
+	settled, err := b.reviews.SettleAsks(ctx, target, dryRun)
+	out.SettledAsks = settled
+	return out, err
 }
 
 // WithClock overrides the clock; intended for tests.

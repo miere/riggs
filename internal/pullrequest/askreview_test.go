@@ -635,6 +635,39 @@ func TestAskingTwiceUpdatesTheSameCard(t *testing.T) {
 	}
 }
 
+// The label has to land somewhere a reader can actually see it. It used to be
+// set as the card's context line, which renders nowhere on this shape: a
+// container draws its actions or its context and never both, and the settled
+// ask card keeps its link button. Collapsed, the subtitle is all there is.
+func TestSettledCardShowsTheLabelInTheSubtitle(t *testing.T) {
+	card := AskSettledCard(askPR(), "body", "Merged at: May 14, 2026 at 3:42 PM")
+
+	if !strings.Contains(card.Subtitle, "o/r#7") {
+		t.Errorf("subtitle = %q, want the reference kept", card.Subtitle)
+	}
+	if !strings.Contains(card.Subtitle, "Merged at") {
+		t.Errorf("subtitle = %q, want the label", card.Subtitle)
+	}
+
+	raw, err := json.Marshal(card.Blocks())
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(raw), "Merged at") {
+		t.Errorf("blocks = %s, want the label rendered", raw)
+	}
+}
+
+// An unlabelled settle leaves the subtitle as the bare reference, rather than a
+// reference with a trailing separator and nothing after it.
+func TestSettledCardWithoutALabelKeepsTheBareReference(t *testing.T) {
+	card := AskSettledCard(askPR(), "body", "")
+
+	if card.Subtitle != "o/r#7" {
+		t.Errorf("subtitle = %q, want the bare reference", card.Subtitle)
+	}
+}
+
 // A card still offering Approve for a merged pull request invites a click that
 // can only fail.
 func TestSettledCardDropsApproveAndCollapses(t *testing.T) {
