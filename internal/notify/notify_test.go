@@ -110,17 +110,13 @@ func TestUpsertUpdatesInPlace(t *testing.T) {
 	}
 }
 
-// A deleted card must come back, not vanish — and the replacement carries none
-// of the old thread, so the latches have to reopen with it.
+// A deleted card must come back, not vanish.
 func TestUpsertRepostsWhenMessageIsGone(t *testing.T) {
 	n, fake, store := harness(t)
 	ctx := context.Background()
 
 	_, _ = n.Upsert(ctx, "k", target, card("v1"), "f", "")
 	old, _, _ := store.Card(ctx, "k")
-	if _, err := n.Thread(ctx, "k", target, "tagged once", Once("tagged")); err != nil {
-		t.Fatalf("Thread: %v", err)
-	}
 
 	fake.Reset()
 	fake.UpdateErr = slack.ErrMessageNotFound
@@ -138,107 +134,6 @@ func TestUpsertRepostsWhenMessageIsGone(t *testing.T) {
 	fresh, _, _ := store.Card(ctx, "k")
 	if fresh.TS == old.TS {
 		t.Errorf("ts = %q, want the replacement message's ts", fresh.TS)
-	}
-	// The latch must have reopened: the new message has no tag on its thread.
-	if _, fired, _ := store.LatchFiredAt(ctx, "k", "tagged"); fired {
-		t.Error("latch survived a re-post; the reviewer would never be re-tagged")
-	}
-}
-
-// A reply about something never advertised has nowhere to go. Inventing a
-// top-level message would be worse than staying quiet.
-func TestThreadWithoutCardIsQuiet(t *testing.T) {
-	n, fake, _ := harness(t)
-
-	sent, err := n.Thread(context.Background(), "never-posted", target, "hello", Once("tagged"))
-	if err != nil {
-		t.Fatalf("Thread: %v", err)
-	}
-	if sent {
-		t.Error("Thread reported a send with no card to reply to")
-	}
-	if len(fake.Calls) != 0 {
-		t.Errorf("calls = %v, want none", fake.Kinds())
-	}
-}
-
-func TestThreadRepliesOnTheCard(t *testing.T) {
-	n, fake, store := harness(t)
-	ctx := context.Background()
-
-	_, _ = n.Upsert(ctx, "k", target, card("v1"), "f", "")
-	entry, _, _ := store.Card(ctx, "k")
-	fake.Reset()
-
-	sent, err := n.Thread(ctx, "k", target, "<@U1> ready for review", Once("tagged"))
-	if err != nil || !sent {
-		t.Fatalf("Thread: sent=%v err=%v", sent, err)
-	}
-	if len(fake.Calls) != 1 {
-		t.Fatalf("calls = %v, want one", fake.Kinds())
-	}
-	if got := fake.Calls[0].Msg.ThreadTS; got != entry.TS {
-		t.Errorf("thread_ts = %q, want the card's ts %q", got, entry.TS)
-	}
-}
-
-// The reply goes where the card is, even if the caller's default channel has
-// since changed — otherwise a moved default would strand replies.
-func TestThreadUsesTheCardsChannel(t *testing.T) {
-	n, fake, _ := harness(t)
-	ctx := context.Background()
-
-	_, _ = n.Upsert(ctx, "k", target, card("v1"), "f", "")
-	fake.Reset()
-
-	moved := target
-	moved.Channel = "C-SOMEWHERE-ELSE"
-	if _, err := n.Thread(ctx, "k", moved, "reply", Once("x")); err != nil {
-		t.Fatalf("Thread: %v", err)
-	}
-	if got := fake.Calls[0].Target.Channel; got != "C123" {
-		t.Errorf("replied into %q, want the card's own channel C123", got)
-	}
-}
-
-// One ping per episode of being asked to review, no matter how many ticks run.
-func TestOnceLatchFiresOnce(t *testing.T) {
-	n, fake, _ := harness(t)
-	ctx := context.Background()
-	_, _ = n.Upsert(ctx, "k", target, card("v1"), "f", "")
-	fake.Reset()
-
-	sent, _ := n.Thread(ctx, "k", target, "tag", Once("tagged"))
-	if !sent {
-		t.Fatal("first tag did not fire")
-	}
-	for i := 0; i < 3; i++ {
-		if sent, _ := n.Thread(ctx, "k", target, "tag", Once("tagged")); sent {
-			t.Fatalf("tag fired again on repeat %d", i)
-		}
-	}
-	if len(fake.Calls) != 1 {
-		t.Errorf("calls = %d, want exactly one tag", len(fake.Calls))
-	}
-}
-
-// Leaving the reviewable state clears the latch, which is what re-tags the
-// reviewer when a PR is sent back to them.
-func TestClearLatchAllowsRefiring(t *testing.T) {
-	n, _, _ := harness(t)
-	ctx := context.Background()
-	_, _ = n.Upsert(ctx, "k", target, card("v1"), "f", "")
-
-	_, _ = n.Thread(ctx, "k", target, "tag", Once("tagged"))
-	if err := n.ClearLatch(ctx, "k", "tagged"); err != nil {
-		t.Fatalf("ClearLatch: %v", err)
-	}
-	sent, err := n.Thread(ctx, "k", target, "tag again", Once("tagged"))
-	if err != nil {
-		t.Fatalf("Thread: %v", err)
-	}
-	if !sent {
-		t.Error("tag did not re-fire after the latch was cleared")
 	}
 }
 
@@ -258,7 +153,6 @@ func TestStateSurvivesReopen(t *testing.T) {
 	if _, err := n1.Upsert(ctx, "k", target, card("v1"), "f", ""); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
-	_, _ = n1.Thread(ctx, "k", target, "tag", Once("tagged"))
 	store1.Close()
 
 	// A fresh process, as the next cron tick would be.
@@ -276,9 +170,6 @@ func TestStateSurvivesReopen(t *testing.T) {
 	}
 	if outcome != Unchanged {
 		t.Errorf("outcome = %s after reopen, want %s — the card would be re-posted", outcome, Unchanged)
-	}
-	if sent, _ := n2.Thread(ctx, "k", target, "tag", Once("tagged")); sent {
-		t.Error("the once-latch re-fired after reopen; the reviewer would be re-pinged every tick")
 	}
 	if len(fake2.Calls) != 0 {
 		t.Errorf("calls = %v, want none", fake2.Kinds())

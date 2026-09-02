@@ -9,7 +9,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 )
 
 type seen struct {
@@ -130,77 +129,14 @@ func TestADFToText(t *testing.T) {
 	}
 }
 
-func TestAssignAndTransition(t *testing.T) {
-	var log []seen
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		raw, _ := io.ReadAll(r.Body)
-		var body map[string]any
-		_ = json.Unmarshal(raw, &body)
-		log = append(log, seen{r.Method, r.URL.RequestURI(), "", body})
-		if strings.HasSuffix(r.URL.Path, "/transitions") && r.Method == http.MethodGet {
-			io.WriteString(w, `{"transitions":[{"id":"31","name":"In Progress"}]}`)
-			return
-		}
-		io.WriteString(w, `{}`)
-	}))
-	defer srv.Close()
-	c := New(srv.URL, "m@x", "tok").WithTransport(srv.Client(), srv.URL)
-	ctx := context.Background()
-
-	if err := c.Assign(ctx, "NYX-1", "acc-1"); err != nil {
-		t.Fatalf("Assign: %v", err)
-	}
-	if log[0].method != http.MethodPut || log[0].body["accountId"] != "acc-1" {
-		t.Errorf("assign request = %+v", log[0])
-	}
-
-	if err := c.Transition(ctx, "NYX-1", "in progress"); err != nil {
-		t.Fatalf("Transition: %v", err)
-	}
-	last := log[len(log)-1]
-	if last.method != http.MethodPost {
-		t.Fatalf("transition request = %+v", last)
-	}
-	trans, _ := last.body["transition"].(map[string]any)
-	if trans["id"] != "31" {
-		t.Errorf("transition id = %v, want the one matched case-insensitively", trans["id"])
-	}
-}
-
-// A missing transition is reported. The Python printed and carried on, which
-// left tickets assigned but still sitting in Ready.
-func TestMissingTransitionIsAnError(t *testing.T) {
-	var log []seen
-	c, stop := server(t, &log, 200, `{"transitions":[{"id":"11","name":"Done"}]}`)
-	defer stop()
-
-	err := c.Transition(context.Background(), "NYX-1", "In Progress")
-	if err == nil {
-		t.Fatal("Transition = nil error when the transition does not exist")
-	}
-	if !strings.Contains(err.Error(), "In Progress") {
-		t.Errorf("err = %q, want it to name the missing transition", err)
-	}
-}
-
 func TestErrorsCarryJirasMessage(t *testing.T) {
 	var log []seen
 	c, stop := server(t, &log, 400, `{"errorMessages":["Field 'assignee' cannot be set"]}`)
 	defer stop()
 
-	err := c.Assign(context.Background(), "NYX-1", "acc-1")
+	_, err := c.Get(context.Background(), "NYX-1")
 	if err == nil || !strings.Contains(err.Error(), "cannot be set") {
 		t.Fatalf("err = %v, want Jira's own explanation", err)
-	}
-}
-
-func TestFindUserRejectsAnEmptyResult(t *testing.T) {
-	var log []seen
-	c, stop := server(t, &log, 200, `[]`)
-	defer stop()
-
-	if _, err := c.FindUser(context.Background(), "nobody@x"); err == nil {
-		t.Fatal("FindUser = nil error for an unknown email")
 	}
 }
 
@@ -220,16 +156,6 @@ func TestClaimed(t *testing.T) {
 				t.Errorf("Claimed = %v, want %v", got, tc.want)
 			}
 		})
-	}
-}
-
-func TestFormatUpdated(t *testing.T) {
-	at := time.Date(2026, 5, 14, 15, 42, 0, 0, time.UTC)
-	if got := FormatUpdated(at); got != "May 14, 2026 at 3:42 PM" {
-		t.Errorf("FormatUpdated = %q", got)
-	}
-	if FormatUpdated(time.Time{}) != "" {
-		t.Error("a zero time should render as empty, not a fake date")
 	}
 }
 

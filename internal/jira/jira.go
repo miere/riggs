@@ -173,54 +173,6 @@ func (r rawIssue) issue() Issue {
 	return i
 }
 
-// User is a Jira account.
-type User struct {
-	AccountID   string `json:"accountId"`
-	DisplayName string `json:"displayName"`
-}
-
-// FindUser resolves an email to an account.
-func (c *Client) FindUser(ctx context.Context, email string) (User, error) {
-	var users []User
-	if err := c.call(ctx, http.MethodGet, "/rest/api/3/user/search?query="+email, nil, &users); err != nil {
-		return User{}, err
-	}
-	if len(users) == 0 {
-		return User{}, fmt.Errorf("jira: no account for %s", email)
-	}
-	return users[0], nil
-}
-
-// Assign sets the ticket's assignee.
-func (c *Client) Assign(ctx context.Context, key, accountID string) error {
-	return c.call(ctx, http.MethodPut, "/rest/api/3/issue/"+key+"/assignee",
-		map[string]any{"accountId": accountID}, nil)
-}
-
-// Transition moves a ticket to the named status, matched case-insensitively.
-//
-// A missing transition is reported rather than silently skipped: the Python
-// printed and carried on, which left tickets assigned but still sitting in
-// Ready with nobody the wiser.
-func (c *Client) Transition(ctx context.Context, key, name string) error {
-	var payload struct {
-		Transitions []struct {
-			ID   string `json:"id"`
-			Name string `json:"name"`
-		} `json:"transitions"`
-	}
-	if err := c.call(ctx, http.MethodGet, "/rest/api/3/issue/"+key+"/transitions", nil, &payload); err != nil {
-		return err
-	}
-	for _, t := range payload.Transitions {
-		if strings.EqualFold(t.Name, name) {
-			return c.call(ctx, http.MethodPost, "/rest/api/3/issue/"+key+"/transitions",
-				map[string]any{"transition": map[string]any{"id": t.ID}}, nil)
-		}
-	}
-	return fmt.Errorf("jira: %s has no %q transition available", key, name)
-}
-
 // call performs one authenticated request.
 func (c *Client) call(ctx context.Context, method, path string, body, out any) error {
 	if c.baseURL == "" {
@@ -333,20 +285,6 @@ func walkADF(node any) string {
 	default:
 		return ""
 	}
-}
-
-// FormatUpdated renders a timestamp as the cards have always shown it:
-// "May 14, 2026 at 3:42 PM".
-func FormatUpdated(t time.Time) string {
-	if t.IsZero() {
-		return ""
-	}
-	hour := t.Hour() % 12
-	if hour == 0 {
-		hour = 12
-	}
-	return fmt.Sprintf("%s %d, %d at %d:%02d %s",
-		t.Format("Jan"), t.Day(), t.Year(), hour, t.Minute(), t.Format("PM"))
 }
 
 // parseStamp reads Jira's timestamp format. An unparseable or absent value

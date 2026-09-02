@@ -92,6 +92,13 @@ CREATE TABLE IF NOT EXISTS cards (
 	updated_at  TEXT NOT NULL
 );
 
+-- latches and summaries are vestigial. The reviewer tag that wrote a latch and
+-- the LLM summary that wrote a summary both belonged to the per-item card loop,
+-- which is gone (§9c); ClearLatches still deletes from latches on a repost, and
+-- nothing writes either table any more.
+--
+-- The CREATE statements stay. Dropping a table needs a migration on every
+-- existing ledger, and buys nothing: an empty table costs a page.
 CREATE TABLE IF NOT EXISTS latches (
 	key        TEXT NOT NULL,
 	name       TEXT NOT NULL,
@@ -209,49 +216,6 @@ func (s *Store) SaveCard(ctx context.Context, key string, e Entry) error {
 	return nil
 }
 
-// LatchFiredAt reports when the named latch last fired for key.
-func (s *Store) LatchFiredAt(ctx context.Context, key, name string) (time.Time, bool, error) {
-	var fired string
-	err := s.db.QueryRowContext(ctx,
-		`SELECT fired_at FROM latches WHERE key = ? AND name = ?`, key, name).Scan(&fired)
-	if err == sql.ErrNoRows {
-		return time.Time{}, false, nil
-	}
-	if err != nil {
-		return time.Time{}, false, fmt.Errorf("notify: reading latch %s/%s: %w", key, name, err)
-	}
-	t, err := time.Parse(time.RFC3339, fired)
-	if err != nil {
-		// An unparseable timestamp means "it fired, at an unknown time" —
-		// which is the safe reading: a once-latch stays closed, and a min-gap
-		// latch is allowed to fire again.
-		return time.Time{}, true, nil
-	}
-	return t, true, nil
-}
-
-// SetLatch records the named latch as having fired at t.
-func (s *Store) SetLatch(ctx context.Context, key, name string, t time.Time) error {
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO latches (key, name, fired_at) VALUES (?, ?, ?)
-		 ON CONFLICT(key, name) DO UPDATE SET fired_at = excluded.fired_at`,
-		key, name, t.UTC().Format(time.RFC3339))
-	if err != nil {
-		return fmt.Errorf("notify: setting latch %s/%s: %w", key, name, err)
-	}
-	return nil
-}
-
-// ClearLatch forgets the named latch, so a once-per-episode message can fire
-// again on the next episode.
-func (s *Store) ClearLatch(ctx context.Context, key, name string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM latches WHERE key = ? AND name = ?`, key, name)
-	if err != nil {
-		return fmt.Errorf("notify: clearing latch %s/%s: %w", key, name, err)
-	}
-	return nil
-}
-
 // ClearLatches forgets every latch for key. Used when a card is re-posted: the
 // new message has none of the old one's threaded replies, so anything
 // "already said" must be said again.
@@ -302,35 +266,6 @@ func (s *Store) CountCards(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("notify: counting cards: %w", err)
 	}
 	return n, nil
-}
-
-// Summary returns the cached AI summary for key.
-//
-// Summaries were cached because each cost an LLM call and the
-// text does not change while the pull request description does not — paying
-// for one every minute would be absurd.
-func (s *Store) Summary(ctx context.Context, key string) (string, bool, error) {
-	var text string
-	err := s.db.QueryRowContext(ctx, `SELECT text FROM summaries WHERE key = ?`, key).Scan(&text)
-	if err == sql.ErrNoRows {
-		return "", false, nil
-	}
-	if err != nil {
-		return "", false, fmt.Errorf("notify: reading summary %s: %w", key, err)
-	}
-	return text, true, nil
-}
-
-// SaveSummary caches an AI summary for key.
-func (s *Store) SaveSummary(ctx context.Context, key, text string, at time.Time) error {
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO summaries (key, text, updated_at) VALUES (?, ?, ?)
-		 ON CONFLICT(key) DO UPDATE SET text = excluded.text, updated_at = excluded.updated_at`,
-		key, text, at.UTC().Format(time.RFC3339))
-	if err != nil {
-		return fmt.Errorf("notify: saving summary %s: %w", key, err)
-	}
-	return nil
 }
 
 // CardsWithPrefix returns every tracked card whose key starts with prefix, in
