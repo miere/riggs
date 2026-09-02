@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/miere/riggs-mcp/internal/slack"
 	"github.com/miere/riggs-mcp/internal/ticket"
 )
@@ -38,52 +37,6 @@ type Tool struct {
 // New builds the tool.
 func New(resolver *slack.Resolver, newer Factory) *Tool {
 	return &Tool{resolver: resolver, newer: newer}
-}
-
-// Name is the registry key. On the CLI this is spelled `riggs jira tickets
-// --bulk "<jql>"`.
-func (t *Tool) Name() string { return "jira.tickets.bulk" }
-
-// Description is the one-line hint shown to MCP clients.
-func (t *Tool) Description() string {
-	return "Deliver Jira tickets matching a JQL query as a single bulk digest message."
-}
-
-// PrimaryArg binds the verb flag's value: `--bulk "<jql>"`.
-func (t *Tool) PrimaryArg() string { return "query" }
-
-// InputSchema declares the parameters.
-func (t *Tool) InputSchema() *jsonschema.Schema {
-	return &jsonschema.Schema{
-		Type: "object",
-		Properties: map[string]*jsonschema.Schema{
-			"query": {
-				Type:        "string",
-				Description: "JQL selecting the tickets to advertise. Required.",
-			},
-			"dry_run": {
-				Type:        "boolean",
-				Description: "Report what would change without sending anything or writing state.",
-			},
-			"max_items": {
-				Type:        "integer",
-				Description: "Cap on one digest. Defaults to $RIGGS_JIRA_BULK_MAX_ITEMS, then 10.",
-			},
-			"cooldown": {
-				Type:        "string",
-				Description: "How long a ticket waits before it may move into a new digest, e.g. \"3h\". Defaults to 3h.",
-			},
-			"slack_profile": {
-				Type:        "string",
-				Description: "Which configured Slack account to post through. Should be the profile the daemon listens as, so clicks come back to Riggs.",
-			},
-			"slack_channel": {
-				Type:        "string",
-				Description: "Target channel id. Omitted, the digest is DMed to the configured admin.",
-			},
-		},
-		Required: []string{"query"},
-	}
 }
 
 // Invoke runs one digest pass.

@@ -9,7 +9,6 @@ import (
 	"github.com/miere/riggs-mcp/internal/notify"
 	"github.com/miere/riggs-mcp/internal/slack"
 	"github.com/miere/riggs-mcp/internal/ticket"
-	"github.com/miere/riggs-mcp/internal/tools"
 	"github.com/miere/riggs-mcp/internal/tools/bulktickets"
 )
 
@@ -62,22 +61,21 @@ func ticketRowActions(cfg *config.Config) ticket.RowActions {
 	}
 }
 
-// registerJiraTools wires the ticket verbs, when Jira is configured.
+// ticketDigest builds the ticket digest command, when Jira is configured.
 //
-// Unlike the GitHub tools, these are gated on what Riggs holds itself: with no
-// token — or no tenant to point it at — every call would fail identically, so
-// the tools are simply absent and `riggs capabilities` says why.
+// Gated on what Riggs holds itself: with no token — or no tenant to point it at
+// — every call would fail identically, so the command is simply absent and
+// `riggs capabilities` says why.
 //
-// The tenant counts as configuration, not as a default. Registering these
-// against a baked-in Atlassian instance would mean a misconfigured machine
-// quietly reading and assigning tickets on somebody else's Jira.
-func registerJiraTools(reg *tools.Registry, cfg *config.Config, resolver *slack.Resolver) {
+// The tenant counts as configuration, not as a default. Defaulting it would
+// mean a misconfigured machine quietly reading tickets on somebody else's Jira.
+func ticketDigest(cfg *config.Config) *bulktickets.Tool {
 	email, token := cfg.JiraCredentials()
 	if email == "" || token == "" || cfg.JiraBaseURL() == "" {
-		return
+		return nil
 	}
-	reg.Register(bulktickets.New(resolver,
+	return bulktickets.New(slack.NewResolver(cfg),
 		func(_ context.Context, jql string, opts ticket.BulkOptions) (bulktickets.Engine, io.Closer, error) {
 			return bulkEngineForTickets(cfg, jql, opts)
-		}))
+		})
 }

@@ -3,197 +3,145 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"strings"
 	"testing"
-
-	"github.com/google/jsonschema-go/jsonschema"
-	"github.com/miere/riggs-mcp/internal/tools"
 )
 
-// fakeTool records the args it was invoked with so the tests can assert on how
-// the command line was translated.
-type fakeTool struct {
-	name    string
-	schema  *jsonschema.Schema
-	primary string
-	got     map[string]any
+// fakeCommand records the arguments a command was invoked with.
+type fakeCommand struct {
+	got    map[string]any
+	result any
+	err    error
 }
 
-func (f *fakeTool) Name() string                    { return f.name }
-func (f *fakeTool) Description() string             { return "fake" }
-func (f *fakeTool) InputSchema() *jsonschema.Schema { return f.schema }
-func (f *fakeTool) PrimaryArg() string              { return f.primary }
-func (f *fakeTool) Invoke(_ context.Context, a map[string]any) (any, error) {
+func (f *fakeCommand) Invoke(_ context.Context, a map[string]any) (any, error) {
 	f.got = a
-	return "done", nil
-}
-
-// props builds an object schema over the named string properties.
-func props(names ...string) *jsonschema.Schema {
-	s := &jsonschema.Schema{Type: "object", Properties: map[string]*jsonschema.Schema{}}
-	for _, n := range names {
-		s.Properties[n] = &jsonschema.Schema{Type: "string"}
+	if f.result == nil {
+		f.result = "ok"
 	}
-	return s
+	return f.result, f.err
 }
 
-// registry wires the shapes the real tool surface will have: a flat tool, a
-// two-part namespaced tool, and verb-flag tools under a two-part prefix.
-func registry(t *testing.T) (*tools.Registry, map[string]*fakeTool) {
+// run drives the frontend and returns what it wrote to stdout.
+func run(t *testing.T, argv ...string) (string, *fakeCommand, *fakeCommand, error) {
 	t.Helper()
-	fakes := map[string]*fakeTool{
-		"ping":                 {name: "ping"},
-		"jira.tickets":         {name: "jira.tickets", schema: props("query", "slack_profile", "slack_channel")},
-		"git.pr.approve":       {name: "git.pr.approve", schema: props("pr", "slack_channel"), primary: "pr"},
-		"git.pr.approve-merge": {name: "git.pr.approve-merge", schema: props("pr"), primary: "pr"},
-		"git.pr.fetch-reviews": {name: "git.pr.fetch-reviews", schema: props("user", "slack_channel"), primary: "user"},
-	}
-	reg := tools.NewRegistry()
-	for _, name := range []string{"ping", "jira.tickets", "git.pr.approve", "git.pr.approve-merge", "git.pr.fetch-reviews"} {
-		reg.Register(fakes[name])
-	}
-	return reg, fakes
+	reviews, tickets := &fakeCommand{}, &fakeCommand{}
+	var out, errs bytes.Buffer
+	err := New(reviews, tickets).WithOutput(&out, &errs).Run(context.Background(), argv)
+	return out.String(), reviews, tickets, err
 }
 
-// run executes argv against a fresh frontend and returns stdout.
-func run(t *testing.T, argv ...string) (string, map[string]*fakeTool, error) {
-	t.Helper()
-	reg, fakes := registry(t)
-	var out, errOut bytes.Buffer
-	err := New(reg).WithOutput(&out, &errOut).Run(context.Background(), argv)
-	return strings.TrimSpace(out.String()), fakes, err
-}
-
-func TestFlatCommand(t *testing.T) {
-	out, _, err := run(t, "ping")
+// The spelling is a contract with the scheduler: stored jobs invoke exactly
+// this argv, and nothing validates it before the process starts.
+func TestTheReviewDigestKeepsItsSpelling(t *testing.T) {
+	out, reviews, _, err := run(t, "git", "pr", "--bulk", "miere")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if out != "done" {
-		t.Errorf("stdout = %q, want %q", out, "done")
+	if reviews.got["user"] != "miere" {
+		t.Fatalf("args = %v, want the login bound to user", reviews.got)
+	}
+	if strings.TrimSpace(out) != "ok" {
+		t.Fatalf("stdout = %q", out)
 	}
 }
 
-func TestDottedCommand(t *testing.T) {
-	_, fakes, err := run(t, "jira", "tickets", "--query", "project = NYX", "--slack-profile", "nc")
+func TestTheTicketDigestKeepsItsSpelling(t *testing.T) {
+	jql := `project = NYX AND labels = "ai-able"`
+	_, _, tickets, err := run(t, "jira", "tickets", "--bulk", jql)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	got := fakes["jira.tickets"].got
-	if got["query"] != "project = NYX" {
-		t.Errorf("query = %v, want the JQL", got["query"])
-	}
-	// --kebab-case maps to the snake_case property the schema declares.
-	if got["slack_profile"] != "nc" {
-		t.Errorf("slack_profile = %v, want nc", got["slack_profile"])
+	if tickets.got["query"] != jql {
+		t.Fatalf("args = %v, want the JQL bound to query", tickets.got)
 	}
 }
 
-// The headline form: a verb flag completes the tool name and carries the
-// operation's primary argument as its own value.
-func TestVerbFlagBindsPrimaryArgument(t *testing.T) {
-	_, fakes, err := run(t, "git", "pr", "--approve", "acme/monolith#20069")
+// Every flag a stored job may carry, in both spellings.
+func TestFlagsReachTheCommand(t *testing.T) {
+	_, reviews, _, err := run(t, "git", "pr", "--bulk", "miere",
+		"--slack-channel", "C123", "--slack-profile=riggs",
+		"--max-items", "5", "--cooldown", "3h", "--dry-run")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	got := fakes["git.pr.approve"].got
-	if got["pr"] != "acme/monolith#20069" {
-		t.Errorf("pr = %v, want the ref bound from the verb flag", got["pr"])
-	}
-	if fakes["git.pr.approve-merge"].got != nil {
-		t.Error("--approve also invoked approve-merge; the verbs must not overlap")
+	for key, want := range map[string]any{
+		"user": "miere", "slack_channel": "C123", "slack_profile": "riggs",
+		"max_items": int64(5), "cooldown": "3h", "dry_run": true,
+	} {
+		if reviews.got[key] != want {
+			t.Errorf("%s = %v (%T), want %v", key, reviews.got[key], reviews.got[key], want)
+		}
 	}
 }
 
-// A verb flag coexists with ordinary parameter flags, in any order.
-func TestVerbFlagWithOtherFlags(t *testing.T) {
-	_, fakes, err := run(t, "git", "pr", "--slack-channel", "C123", "--approve", "owner/repo#7")
+// --dry-run is valueless. Requiring `--dry-run true` would be a new spelling,
+// and the old frontend did not ask for one.
+func TestDryRunTakesNoValue(t *testing.T) {
+	_, reviews, _, err := run(t, "git", "pr", "--bulk", "miere", "--dry-run", "--max-items", "2")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	got := fakes["git.pr.approve"].got
-	if got["pr"] != "owner/repo#7" || got["slack_channel"] != "C123" {
-		t.Errorf("args = %v, want both the verb's value and the channel flag", got)
+	if reviews.got["dry_run"] != true || reviews.got["max_items"] != int64(2) {
+		t.Fatalf("args = %v", reviews.got)
 	}
 }
 
-// The primary argument is optional: `--fetch-reviews` with no value must still
-// resolve, so the tool can fall back to admin.github-login.
-func TestVerbFlagWithoutValue(t *testing.T) {
-	_, fakes, err := run(t, "git", "pr", "--fetch-reviews")
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	got := fakes["git.pr.fetch-reviews"].got
-	if _, present := got["user"]; present {
-		t.Errorf("user = %v, want it absent so the tool applies its own default", got["user"])
+func TestMissingFlagValueIsRejected(t *testing.T) {
+	if _, _, _, err := run(t, "git", "pr", "--bulk", "miere", "--slack-channel"); err == nil {
+		t.Fatal("a flag with no value was accepted")
 	}
 }
 
-// A following flag must not be mistaken for the verb's value.
-func TestVerbFlagValueIsNotTheNextFlag(t *testing.T) {
-	_, fakes, err := run(t, "git", "pr", "--fetch-reviews", "--slack-channel", "C9")
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	got := fakes["git.pr.fetch-reviews"].got
-	if _, present := got["user"]; present {
-		t.Errorf("user = %v, want it absent — --slack-channel is a flag, not a value", got["user"])
-	}
-	if got["slack_channel"] != "C9" {
-		t.Errorf("slack_channel = %v, want C9", got["slack_channel"])
+func TestNonNumericMaxItemsIsRejected(t *testing.T) {
+	_, _, _, err := run(t, "git", "pr", "--bulk", "miere", "--max-items", "lots")
+	if err == nil || !strings.Contains(err.Error(), "not a number") {
+		t.Fatalf("err = %v", err)
 	}
 }
 
-func TestVerbFlagEqualsForm(t *testing.T) {
-	_, fakes, err := run(t, "git", "pr", "--approve-merge=owner/repo#3")
-	if err != nil {
-		t.Fatalf("Run: %v", err)
+func TestUnknownCommandIsUsage(t *testing.T) {
+	_, _, _, err := run(t, "git", "pr", "--approve", "o/r#1")
+	if !errors.Is(err, ErrUsage) {
+		t.Fatalf("err = %v, want ErrUsage", err)
 	}
-	if got := fakes["git.pr.approve-merge"].got; got["pr"] != "owner/repo#3" {
-		t.Errorf("pr = %v, want the value after =", got["pr"])
+	if _, _, _, err := run(t); !errors.Is(err, ErrUsage) {
+		t.Fatalf("no args: err = %v, want ErrUsage", err)
+	}
+	// The retired MCP mode is now just an unknown command.
+	if _, _, _, err := run(t, "mcp"); !errors.Is(err, ErrUsage) {
+		t.Fatalf("mcp: err = %v, want ErrUsage", err)
 	}
 }
 
-// An ordinary parameter flag must never be mistaken for a verb: verbs are
-// matched against the registry, not against a list of known spellings.
-func TestParameterFlagIsNotAVerb(t *testing.T) {
-	_, _, err := run(t, "git", "pr", "--slack-channel", "C123")
+// An unconfigured machine has no digests. The error names the diagnostic
+// rather than reading as a missing feature.
+func TestAnUnconfiguredCommandExplainsItself(t *testing.T) {
+	var out, errs bytes.Buffer
+	err := New(nil, nil).WithOutput(&out, &errs).
+		Run(context.Background(), []string{"git", "pr", "--bulk", "miere"})
 	if err == nil {
-		t.Fatal("Run = nil error, want `git pr` with no verb to be unknown")
+		t.Fatal("an unconfigured digest ran")
 	}
-	if !strings.Contains(err.Error(), "unknown command") {
-		t.Errorf("error = %q, want an unknown-command failure", err)
-	}
-}
-
-func TestUnknownCommand(t *testing.T) {
-	if _, _, err := run(t, "nope"); err == nil {
-		t.Fatal("Run(nope) = nil error, want a failure")
+	if !strings.Contains(err.Error(), "capabilities") {
+		t.Fatalf("err = %v, want it to point at the diagnostic", err)
 	}
 }
 
-func TestNoArgsIsUsage(t *testing.T) {
-	if _, _, err := run(t); err != ErrUsage {
-		t.Fatalf("Run() = %v, want ErrUsage", err)
-	}
-}
-
-// --json-output is a frontend flag: stripped anywhere on the line, never
-// offered to the tool's schema.
+// --json-output may appear anywhere, and is never passed on as a parameter.
 func TestJSONOutput(t *testing.T) {
-	out, _, err := run(t, "git", "pr", "--json-output", "--approve", "owner/repo#1")
+	reviews, tickets := &fakeCommand{result: map[string]string{"ref": "o/r#1"}}, &fakeCommand{}
+	var out, errs bytes.Buffer
+	err := New(reviews, tickets).WithOutput(&out, &errs).
+		Run(context.Background(), []string{"git", "--json-output", "pr", "--bulk", "miere"})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if out != `"done"` {
-		t.Errorf("stdout = %q, want the JSON-quoted result", out)
+	if strings.TrimSpace(out.String()) != `{"ref":"o/r#1"}` {
+		t.Fatalf("stdout = %q", out.String())
 	}
-}
-
-func TestUnknownFlagIsRejected(t *testing.T) {
-	_, _, err := run(t, "jira", "tickets", "--nope", "x")
-	if err == nil || !strings.Contains(err.Error(), "unknown flag") {
-		t.Fatalf("err = %v, want an unknown-flag failure", err)
+	if _, passed := reviews.got["json_output"]; passed {
+		t.Error("--json-output reached the command as a parameter")
 	}
 }

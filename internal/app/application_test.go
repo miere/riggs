@@ -1,14 +1,10 @@
 package app
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/google/jsonschema-go/jsonschema"
-	"github.com/miere/riggs-mcp/internal/tools"
 )
 
 // A machine with nothing provisioned must still boot: the notifying tools
@@ -25,11 +21,11 @@ func TestNewWithNoConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	// Nothing is registered: both digests need a Slack account to post
-	// through, and an unprovisioned machine has none. That is a capability
-	// gap, not a boot failure.
-	if names := a.registry.All(); len(names) != 0 {
-		t.Errorf("registered %d tools on an unprovisioned machine", len(names))
+	// Neither digest is built: both need a Slack account to post through, and
+	// an unprovisioned machine has none. That is a capability gap, not a boot
+	// failure.
+	if a.reviews != nil || a.tickets != nil {
+		t.Error("a digest was built on an unprovisioned machine")
 	}
 }
 
@@ -45,34 +41,22 @@ func TestNewWithBrokenConfig(t *testing.T) {
 	}
 }
 
-type fakeTool struct{ name string }
-
-func (f *fakeTool) Name() string                    { return f.name }
-func (f *fakeTool) Description() string             { return "fake" }
-func (f *fakeTool) InputSchema() *jsonschema.Schema { return nil }
-func (f *fakeTool) Invoke(context.Context, map[string]any) (any, error) {
-	return nil, nil
-}
-
-// The usage line spells each tool the way it is typed: flat, dotted, or — for
-// three-part names — as a verb flag under its namespace.
-func TestUsageLineSpellsVerbFlags(t *testing.T) {
-	reg := tools.NewRegistry()
-	for _, n := range []string{"ping", "jira.tickets", "git.pr.approve", "git.pr.fetch-reviews"} {
-		reg.Register(&fakeTool{name: n})
-	}
-	a := &Application{registry: reg}
-
-	got := a.UsageLine()
-	for _, want := range []string{"ping", "jira <tickets>", "git pr <--approve|--fetch-reviews>", "mcp"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("usage line %q is missing %q", got, want)
+// The usage line names both digests in the spelling stored jobs actually use.
+// It used to be reconstructed from registry names by splitting on dots; the
+// spelling is a contract with the scheduler, so it is asserted rather than
+// derived.
+func TestUsageLineNamesTheTwoDigests(t *testing.T) {
+	usage := (&Application{}).UsageLine()
+	for _, want := range []string{"git pr --bulk", "jira tickets --bulk", "capabilities", "daemon"} {
+		if !strings.Contains(usage, want) {
+			t.Errorf("usage = %q, want it to mention %q", usage, want)
 		}
 	}
+	if strings.Contains(usage, "mcp") {
+		t.Errorf("usage still offers mcp: %q", usage)
+	}
 }
 
-// A Slack-backed tool is registered only when there is an account to post
-// through; `capabilities` explains the absence.
 func TestSlackToolsGatedOnProfiles(t *testing.T) {
 	dir := t.TempDir()
 	withProfile := filepath.Join(dir, "with.yaml")
@@ -89,7 +73,7 @@ func TestSlackToolsGatedOnProfiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if _, ok := a.registry.Get("git.pr.bulk"); !ok {
+	if a.reviews == nil {
 		t.Error("the pull-request digest is absent despite a configured profile")
 	}
 
@@ -97,7 +81,7 @@ func TestSlackToolsGatedOnProfiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if _, ok := b.registry.Get("git.pr.bulk"); ok {
-		t.Error("the digest registered with no Slack profile configured")
+	if b.reviews != nil {
+		t.Error("the digest was built with no Slack profile configured")
 	}
 }

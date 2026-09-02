@@ -28,13 +28,9 @@ func probes(cfg *config.Config, present map[string]string, env map[string]string
 
 func invoke(t *testing.T, tool *Tool) Report {
 	t.Helper()
-	got, err := tool.Invoke(context.Background(), nil)
+	r, err := tool.Report(context.Background())
 	if err != nil {
-		t.Fatalf("Invoke: %v", err)
-	}
-	r, ok := got.(Report)
-	if !ok {
-		t.Fatalf("Invoke returned %T, want Report", got)
+		t.Fatalf("Report: %v", err)
 	}
 	return r
 }
