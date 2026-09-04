@@ -181,6 +181,9 @@ func TestDaemonRegistersTheJobControls(t *testing.T) {
 		blockkit.HomeJobActionID + "/" + blockkit.HomeJobToggleIntent,
 		blockkit.HomeMenuActionID + "/" + blockkit.HomeNewJobIntent,
 		blockkit.JobModalCallbackID + "/" + slack.ViewSubmitIntent,
+		// Delete is two routes, not one: the click opens the confirmation and
+		// this submission is what actually forgets the job.
+		blockkit.JobDeleteModalCallbackID + "/" + slack.ViewSubmitIntent,
 	}
 	assertRoutes(t, router.Routes(), want)
 }

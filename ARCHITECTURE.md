@@ -802,10 +802,24 @@ with the confirmation on Delete.
   when it has been disabled mid-run, which is why "running" is checked first.
 - **A disabled job shows no next-run time**, because there is not one. "Disabled
   · next in 40s" is the kind of detail that makes a reader doubt the whole panel.
-- **Delete carries Slack's own confirmation**, on the option itself. It is the
-  one control on this surface that destroys something and cannot be undone, an
-  overflow gives no second chance of its own, and "I meant to press Disable" is
-  one row's distance away. Nothing else is confirmed: a control that asks twice
+- **Delete asks in a modal, and is the one control that does not act on the
+  click.** It destroys something that cannot be recovered, and "I meant to press
+  Disable" is one row's distance away.
+
+  It is a modal rather than Slack's confirmation dialog because **`confirm` is a
+  field of an interactive element, not of an option inside one**. An option
+  carrying a `confirm` is an invalid block; one invalid block fails the whole
+  view, so the Home tab stopped publishing entirely the first time a job
+  existed — the section was written and tested without ever reaching real
+  Slack. Moving the `confirm` up to the overflow does publish, and then asks
+  "delete this job?" when somebody picks Edit. Only a modal can ask about one
+  option of four. It also has room to say what "forgotten" means and to point at
+  Disable, where a confirm dialog has 300 characters.
+
+  The name travels in the modal's `private_metadata`, and the submission is
+  authorised again on arrival: a view submission is an inbound message like any
+  other, and "the modal opened, so it must be the admin" is exactly the
+  assumption not to make. Nothing else is confirmed — a control that asks twice
   is one people learn to click through.
 - **Disable keeps the definition and the history.** "Off for now" and "deleted"
   are different intentions, and only one of them is recoverable.
@@ -1806,6 +1820,25 @@ Rollback: the previous job and rule definitions are captured under
 `/tmp/riggs-cutover-backup/` and can be restored with the same commands.
 
 ## 14. Change log
+
+- **unreleased** — Delete confirms in a modal, and the Home tab publishes again
+  (§7e). The Jobs section hung a `confirm` off an overflow *option*; Slack only
+  accepts one on the element, so every job row was an invalid block and
+  `views.publish` refused the entire view. The tab had not published since the
+  first job was created — it served a cached render from two days earlier, which
+  is why the update banner never appeared and self-update looked broken. The
+  guard moves to `JobDeleteModal`: the click opens it, the submission deletes,
+  and the submission is authorised on its own.
+
+  `confirmObj` is deleted rather than left unused, and `menuOptionObj` loses the
+  field, so the invalid payload is no longer expressible. Both are encoding-
+  neutral: the field was a pointer with `omitempty` and nothing else ever set it,
+  so no existing menu's fingerprint (§7c) moves.
+
+  Same failure mode as the entry below — written, tested green, never put in
+  front of Slack. The rendered rows, the modal's block, and the whole Home view
+  with and without an update banner were each posted to a real workspace and
+  accepted before this was tagged.
 
 - **unreleased** — Slack read methods are form-encoded (§7). `HasForeignReplies`
   had never once succeeded: `conversations.replies` was being sent a JSON body it

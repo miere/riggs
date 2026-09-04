@@ -222,3 +222,66 @@ func jobInput(blockID, label, value, hint string, optional bool) inputBlock {
 	}
 	return block
 }
+
+// The delete confirmation: the third modal, and the only one that asks a
+// question rather than editing a value.
+//
+// It exists because Slack has no per-option confirmation on an overflow menu.
+// `confirm` is a field of the interactive ELEMENT, not of an option inside it;
+// an option carrying one makes the block invalid, which makes the whole Home
+// view invalid, which takes the tab down with it (§7e). Moving the confirm up
+// to the overflow would have published, and would then have asked "delete this
+// job?" when somebody picked Edit.
+//
+// So the question moves to where a question can be asked about exactly one
+// option. The guard is no weaker for it: Delete still cannot happen in one
+// click, and the modal can say more than a confirm dialog's 300 characters.
+
+const (
+	// JobDeleteModalCallbackID identifies a confirmed delete coming back.
+	//
+	// A separate callback_id from the editor's, not a mode flag on it: the
+	// router matches these exactly, and a submission that deletes something
+	// should not be one field's difference from a submission that saves it.
+	JobDeleteModalCallbackID = "job_delete"
+)
+
+// JobDeleteModal asks before a job and its history are forgotten.
+type JobDeleteModal struct {
+	// Name is the job about to go. It is both what the modal says and, through
+	// private_metadata, what the submission acts on — read back from the modal
+	// rather than the row, because the Home tab underneath may have been
+	// republished since it was drawn.
+	Name string
+}
+
+// View renders the payload `views.open` takes.
+//
+// No input block: there is nothing to type, and the submit button is the
+// answer. Slack still requires at least one block, so the question is a
+// section — which is also why this modal can spell out what "forgotten" means
+// and point at Disable, where the old confirm dialog had one line.
+func (m JobDeleteModal) View() any {
+	return modalView{
+		Type:            "modal",
+		CallbackID:      JobDeleteModalCallbackID,
+		PrivateMetadata: m.Name,
+		Title:           plain(Truncate("Delete job", modalTitleLimit, modalTitleLimit-1)),
+		Submit:          plain("Delete"),
+		Close:           plain("Keep it"),
+		Blocks: []any{sectionBlock{
+			Type: "section",
+			Text: mrkdwn("*" + escapeMrkdwn(m.name()) + "* will stop running, and its run history will be forgotten.\n\n_Disable keeps both._"),
+		}},
+	}
+}
+
+// name falls back so a modal opened for a job whose row was stale still
+// renders: an empty text object is rejected, and a rejected view is a click
+// that does nothing and says nothing.
+func (m JobDeleteModal) name() string {
+	if n := strings.TrimSpace(m.Name); n != "" {
+		return n
+	}
+	return "This job"
+}

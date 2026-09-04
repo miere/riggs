@@ -108,24 +108,18 @@ type cardBlock struct {
 	Subtitle mrkdwnObj `json:"subtitle"`
 }
 
-type menuOptionObj struct {
-	Text    textObj     `json:"text"`
-	Value   string      `json:"value"`
-	URL     string      `json:"url,omitempty"`
-	Confirm *confirmObj `json:"confirm,omitempty"`
-}
-
-// confirmObj is Slack's confirmation dialog, attached to an option that cannot
-// be undone.
+// menuOptionObj is one entry in an overflow menu.
 //
-// A pointer with omitempty, so an option without one encodes exactly the bytes
-// it always did — every existing menu's fingerprint (§7c) depends on that.
-type confirmObj struct {
-	Title   textObj `json:"title"`
-	Text    textObj `json:"text"`
-	Confirm textObj `json:"confirm"`
-	Deny    textObj `json:"deny"`
-	Style   string  `json:"style,omitempty"`
+// There is deliberately no `confirm` field. Slack's confirmation dialog belongs
+// to the interactive element, not to an option inside it: an option carrying one
+// is rejected as an invalid block, and one invalid block fails the entire view
+// it sits in. A control that needs confirming asks in a modal instead
+// (JobDeleteModal), which is also the only way to confirm one option of an
+// overflow rather than all of them.
+type menuOptionObj struct {
+	Text  textObj `json:"text"`
+	Value string  `json:"value"`
+	URL   string  `json:"url,omitempty"`
 }
 
 type menuElem struct {

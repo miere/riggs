@@ -319,8 +319,9 @@ func jobRunnerOrNil(s *schedule.Scheduler) apphome.JobRunner {
 // registerJobInteractions installs the Jobs section's controls.
 //
 // Which job a click is about rides in the row's block_id, exactly as a prompt
-// and a pull request do. Delete carries Slack's own confirmation on the option
-// itself (§7e), so there is no second one here.
+// and a pull request do. Delete is the exception to "a click acts": it opens a
+// confirmation modal (§7e), and the delete happens on that modal's submission,
+// where the job name arrives in private_metadata instead.
 func (a *Application) registerJobInteractions(router *daemon.Router, home *apphome.Publisher) {
 	router.Handle(blockkit.HomeMenuActionID, blockkit.HomeNewJobIntent,
 		daemon.HandlerFunc(func(ctx context.Context, in slack.Interaction) error {
@@ -338,7 +339,7 @@ func (a *Application) registerJobInteractions(router *daemon.Router, home *appho
 			return h.ToggleJob(ctx, in.UserID, jobName(in.Item))
 		},
 		blockkit.HomeJobDeleteIntent: func(ctx context.Context, h *apphome.Publisher, in slack.Interaction) error {
-			return h.DeleteJob(ctx, in.UserID, jobName(in.Item))
+			return h.ConfirmDeleteJob(ctx, in.UserID, jobName(in.Item), in.TriggerID)
 		},
 	} {
 		handle := handle
@@ -360,6 +361,14 @@ func (a *Application) registerJobInteractions(router *daemon.Router, home *appho
 				field(blockkit.JobModalCommandBlockID),
 				field(blockkit.JobModalScheduleBlockID),
 				field(blockkit.JobModalTimeoutBlockID))
+		}))
+
+	// The delete confirmation coming back. No fields to read: the job's name is
+	// the whole payload, and it arrives in private_metadata the same way the
+	// editor's does.
+	router.Handle(blockkit.JobDeleteModalCallbackID, slack.ViewSubmitIntent,
+		daemon.HandlerFunc(func(ctx context.Context, in slack.Interaction) error {
+			return home.DeleteJob(ctx, in.UserID, in.Item)
 		}))
 }
 

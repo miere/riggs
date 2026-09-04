@@ -98,20 +98,12 @@ func (j HomeJob) block() accessorySection {
 		{Text: plainVerbatim(MarkerAsk + "  Edit"), Value: HomeJobEditIntent},
 		{Text: plainVerbatim(MarkerRun + "  Run now"), Value: HomeJobRunIntent},
 		{Text: plainVerbatim(toggle), Value: HomeJobToggleIntent},
-		{
-			Text:  plainVerbatim(MarkerFailed + "  Delete"),
-			Value: HomeJobDeleteIntent,
-			// The one control on this surface that destroys something and
-			// cannot be undone. An overflow gives no second chance of its own,
-			// and "I meant to press Disable" is one row's distance away.
-			Confirm: &confirmObj{
-				Title:   plain("Delete this job?"),
-				Text:    mrkdwn("*" + escapeMrkdwn(j.ID) + "* will stop running and its history will be forgotten. Disable keeps both."),
-				Confirm: plain("Delete"),
-				Deny:    plain("Keep it"),
-				Style:   "danger",
-			},
-		},
+		// The one control on this surface that destroys something and cannot be
+		// undone, and the only one that does not act on the click. Slack has no
+		// per-option confirmation to hang here — `confirm` belongs to the
+		// overflow element, where it would guard Edit and Run as well — so the
+		// second chance is a modal (JobDeleteModal), opened by the handler.
+		{Text: plainVerbatim(MarkerFailed + "  Delete"), Value: HomeJobDeleteIntent},
 	}
 	return accessorySection{
 		Type:      "section",

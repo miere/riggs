@@ -1,6 +1,7 @@
 package blockkit
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -87,7 +88,13 @@ func TestTheMenuOffersEnableOrDisable(t *testing.T) {
 
 // The one control on this surface that destroys something. An overflow gives no
 // second chance of its own, and "I meant to press Disable" is one row away.
-func TestDeleteIsConfirmed(t *testing.T) {
+// No option carries a `confirm`, and that is the whole point.
+//
+// Slack's confirmation dialog belongs to the interactive element, not to an
+// option inside it. An option carrying one is an invalid block, and one invalid
+// block fails the entire view — which is how the Jobs section took the Home tab
+// down the first time a job existed. The second chance is JobDeleteModal now.
+func TestNoOptionCarriesAConfirm(t *testing.T) {
 	blocks := homeBlocks(t, Home{Version: "v1", Admin: true, ShowJobs: true, Jobs: jobRows()})
 	options := blocks[4]["accessory"].(map[string]any)["options"].([]any)
 
@@ -95,29 +102,77 @@ func TestDeleteIsConfirmed(t *testing.T) {
 	if del["value"] != HomeJobDeleteIntent {
 		t.Fatalf("the last option is %v", del["value"])
 	}
-	confirm, ok := del["confirm"].(map[string]any)
-	if !ok {
-		t.Fatal("Delete has no confirmation")
+	for i, opt := range options {
+		if _, found := opt.(map[string]any)["confirm"]; found {
+			t.Errorf("option %d carries a confirm; Slack rejects the whole view for it", i)
+		}
 	}
-	if confirm["style"] != "danger" {
-		t.Errorf("confirm style = %v", confirm["style"])
+}
+
+// The confirmation still names the job and still points at the gentler option —
+// it just does it in a modal, where it can be asked about one option instead of
+// all four.
+func TestTheDeleteModalAsksAboutOneJob(t *testing.T) {
+	view := encodeView(t, JobDeleteModal{Name: "github-review-queue"}.View())
+
+	if view["callback_id"] != JobDeleteModalCallbackID {
+		t.Errorf("callback_id = %v", view["callback_id"])
 	}
-	// It names the job, and says what the gentler option would do instead.
-	text := confirm["text"].(map[string]any)["text"].(string)
-	if !strings.Contains(text, "github-review-queue") || !strings.Contains(text, "Disable") {
-		t.Errorf("confirmation = %q", text)
+	// The name rides in private_metadata: the submission acts on this, not on
+	// whatever the Home tab happens to say by then.
+	if view["private_metadata"] != "github-review-queue" {
+		t.Errorf("private_metadata = %v", view["private_metadata"])
+	}
+	if submit := text(view["submit"]); submit != "Delete" {
+		t.Errorf("submit = %q, want the button to say what it does", submit)
+	}
+	if close := text(view["close"]); close != "Keep it" {
+		t.Errorf("close = %q", close)
 	}
 
-	// And nothing else carries one: a control that asks twice is one people
-	// learn to click through.
-	for i, opt := range options {
-		if i == 3 {
-			continue
-		}
-		if _, found := opt.(map[string]any)["confirm"]; found {
-			t.Errorf("option %d is confirmed and should not be", i)
-		}
+	blocks := view["blocks"].([]any)
+	if len(blocks) != 1 {
+		t.Fatalf("blocks = %d, want the one question", len(blocks))
 	}
+	body := text(blocks[0].(map[string]any)["text"])
+	if !strings.Contains(body, "github-review-queue") || !strings.Contains(body, "Disable") {
+		t.Errorf("question = %q, want the job named and Disable offered", body)
+	}
+}
+
+// An empty name still renders. A rejected view is a click that does nothing and
+// explains nothing, which is worse than a vague noun.
+func TestTheDeleteModalSurvivesAnEmptyName(t *testing.T) {
+	view := encodeView(t, JobDeleteModal{}.View())
+	body := text(view["blocks"].([]any)[0].(map[string]any)["text"])
+	if strings.TrimSpace(body) == "" || strings.HasPrefix(body, "**") {
+		t.Errorf("question = %q, want a readable fallback", body)
+	}
+}
+
+// text pulls the string out of a Slack text object.
+func text(obj any) string {
+	m, ok := obj.(map[string]any)
+	if !ok {
+		return ""
+	}
+	s, _ := m["text"].(string)
+	return s
+}
+
+// encodeView round-trips a view through JSON, so the assertions are on the
+// bytes Slack receives rather than on the Go structs.
+func encodeView(t *testing.T, view any) map[string]any {
+	t.Helper()
+	raw, err := json.Marshal(view)
+	if err != nil {
+		t.Fatalf("marshalling the view: %v", err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("decoding the view: %v", err)
+	}
+	return out
 }
 
 // jobOption is one menu entry, flattened.

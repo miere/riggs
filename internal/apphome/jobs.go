@@ -283,11 +283,31 @@ func (p *Publisher) ToggleJob(ctx context.Context, userID, name string) error {
 	return nil
 }
 
+// ConfirmDeleteJob opens the second chance, and deletes nothing.
+//
+// The Delete option is the only control on the Jobs section that does not act
+// on the click. Slack has no per-option confirmation on an overflow (§7e), so
+// the question is a modal; DeleteJob is what its submission reaches.
+//
+// The job is NOT read here. A trigger id lives about three seconds, and a
+// ledger read before views.open spends some of them to answer a question the
+// submission has to ask again anyway — a job can be deleted from another
+// window while the modal is open.
+func (p *Publisher) ConfirmDeleteJob(ctx context.Context, userID, name, triggerID string) error {
+	if err := p.mayOperateJobs(userID, "delete"); err != nil {
+		return err
+	}
+	return p.deps.Modals.OpenView(ctx, p.deps.BotToken, triggerID,
+		blockkit.JobDeleteModal{Name: name}.View())
+}
+
 // DeleteJob forgets a job and its history.
 //
-// The confirmation is Slack's, attached to the menu option itself (§7e). There
-// is deliberately no second one here: a control that asks twice is a control
-// people learn to click through.
+// Reached from the confirmation modal's submission, never from a click. The
+// authorisation is checked again rather than trusted from whoever opened the
+// modal: a view submission is an inbound message like any other, and "it must
+// have been the admin, the modal opened" is exactly the assumption worth not
+// making.
 func (p *Publisher) DeleteJob(ctx context.Context, userID, name string) error {
 	if err := p.mayOperateJobs(userID, "delete"); err != nil {
 		return err

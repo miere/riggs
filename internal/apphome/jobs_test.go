@@ -483,3 +483,55 @@ func TestAnUnreadableLedgerDoesNotBreakTheTab(t *testing.T) {
 		t.Fatal("a row was drawn from a failed read")
 	}
 }
+
+// Clicking Delete asks; it does not delete.
+//
+// The click and the deletion are two round trips now, and the job has to still
+// be there after the first one — a "confirmation" that has already acted is
+// just a receipt.
+func TestClickingDeleteOnlyAsks(t *testing.T) {
+	r := newJobRig(t, sampleJob())
+	ctx := context.Background()
+
+	if err := r.ConfirmDeleteJob(ctx, admin, "github-review-queue", "trigger-1"); err != nil {
+		t.Fatalf("ConfirmDeleteJob: %v", err)
+	}
+	if _, found, _ := r.jobs.Job(ctx, "github-review-queue"); !found {
+		t.Fatal("the click deleted the job instead of asking about it")
+	}
+
+	if r.modals.triggerID != "trigger-1" {
+		t.Errorf("trigger id = %q, want the one the click carried", r.modals.triggerID)
+	}
+	if got := r.modals.view["callback_id"]; got != blockkit.JobDeleteModalCallbackID {
+		t.Errorf("callback_id = %v, want the delete confirmation", got)
+	}
+	if got := r.modals.view["private_metadata"]; got != "github-review-queue" {
+		t.Errorf("private_metadata = %v, want the job the row was about", got)
+	}
+
+	// And the submission that follows is what actually forgets it.
+	if err := r.DeleteJob(ctx, admin, "github-review-queue"); err != nil {
+		t.Fatalf("DeleteJob: %v", err)
+	}
+	if _, found, _ := r.jobs.Job(ctx, "github-review-queue"); found {
+		t.Fatal("the confirmed delete did not take")
+	}
+}
+
+// The modal is not a permission slip. A submission arrives as its own inbound
+// message, so it is authorised on its own terms.
+func TestANonAdminCannotOpenOrSubmitTheDeleteModal(t *testing.T) {
+	r := newJobRig(t, sampleJob())
+	ctx, someone := context.Background(), "U-someone"
+
+	if err := r.ConfirmDeleteJob(ctx, someone, "github-review-queue", "t"); err == nil {
+		t.Error("a non-admin opened the delete confirmation")
+	}
+	if err := r.DeleteJob(ctx, someone, "github-review-queue"); err == nil {
+		t.Error("a non-admin submitted a delete")
+	}
+	if _, found, _ := r.jobs.Job(ctx, "github-review-queue"); !found {
+		t.Fatal("a non-admin deleted the job")
+	}
+}
