@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -14,22 +15,56 @@ import (
 
 // recorded is one request the fake Slack server saw.
 type recorded struct {
-	method string
-	auth   string
-	body   map[string]any
+	method      string
+	auth        string
+	contentType string
+	body        map[string]any
 }
 
 // server spins up a fake Slack Web API. handler returns the JSON body for each
 // method in turn; the recorded requests are appended to *log.
+//
+// The body is decoded according to the Content-Type the client declared, and a
+// request this fake cannot parse fails the test. Real Slack reads one encoding
+// per method and answers `invalid_arguments` for the other; a fake that
+// switches on the method name alone accepts both, which is how a malformed
+// call once shipped green.
 func server(t *testing.T, log *[]recorded, handler func(method string, n int) (int, http.Header, string)) (*API, func()) {
 	t.Helper()
 	counts := map[string]int{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		method := strings.TrimPrefix(r.URL.Path, "/")
 		raw, _ := io.ReadAll(r.Body)
-		var body map[string]any
-		_ = json.Unmarshal(raw, &body)
-		*log = append(*log, recorded{method: method, auth: r.Header.Get("Authorization"), body: body})
+		ctype := r.Header.Get("Content-Type")
+
+		body := map[string]any{}
+		switch {
+		case strings.HasPrefix(ctype, "application/json"):
+			if err := json.Unmarshal(raw, &body); err != nil {
+				t.Errorf("%s: declared JSON but sent %q: %v", method, raw, err)
+			}
+		case strings.HasPrefix(ctype, "application/x-www-form-urlencoded"):
+			form, err := url.ParseQuery(string(raw))
+			if err != nil {
+				t.Errorf("%s: declared a form but sent %q: %v", method, raw, err)
+			}
+			for k := range form {
+				body[k] = form.Get(k)
+			}
+		default:
+			t.Errorf("%s: unsupported Content-Type %q", method, ctype)
+		}
+		// A body with content in it that yields no parameters is the failure
+		// this fake exists to catch: Slack would see an argument-less call and
+		// answer `invalid_arguments`. A genuinely empty payload — auth.test
+		// takes none — is not that.
+		if trimmed := strings.TrimSpace(string(raw)); len(body) == 0 && trimmed != "" && trimmed != "{}" {
+			t.Errorf("%s: sent %q, which decoded to no parameters", method, raw)
+		}
+		*log = append(*log, recorded{
+			method: method, auth: r.Header.Get("Authorization"),
+			contentType: ctype, body: body,
+		})
 
 		status, hdr, payload := handler(method, counts[method])
 		counts[method]++
@@ -262,5 +297,98 @@ func TestOmitsBlocksWhenUnset(t *testing.T) {
 	}
 	if _, present := log[0].body["blocks"]; present {
 		t.Error("blocks key sent for a message with no blocks")
+	}
+}
+
+// TestReadMethodsAreFormEncoded pins the encoding split.
+//
+// `conversations.replies` and `users.list` do not read a JSON body: Slack
+// ignores it and answers `invalid_arguments`, naming parameters that were in
+// the payload. This asserts on the wire format rather than on the method name,
+// because the method name is what the old fake matched on while the real call
+// had been failing for days.
+func TestReadMethodsAreFormEncoded(t *testing.T) {
+	for _, method := range []string{"conversations.replies", "users.list"} {
+		if !formEncodedMethods[method] {
+			t.Errorf("%s must be form-encoded", method)
+		}
+	}
+
+	payload, ctype, err := encodeRequest("conversations.replies", map[string]any{
+		"channel": "C123", "ts": "1700.0001", "limit": 50,
+	})
+	if err != nil {
+		t.Fatalf("encodeRequest: %v", err)
+	}
+	if !strings.HasPrefix(ctype, "application/x-www-form-urlencoded") {
+		t.Errorf("Content-Type = %q, want form-urlencoded", ctype)
+	}
+	form, err := url.ParseQuery(string(payload))
+	if err != nil {
+		t.Fatalf("parsing %q: %v", payload, err)
+	}
+	for k, want := range map[string]string{"channel": "C123", "ts": "1700.0001", "limit": "50"} {
+		if got := form.Get(k); got != want {
+			t.Errorf("%s = %q, want %q", k, got, want)
+		}
+	}
+}
+
+// TestWriteMethodsStayJSON keeps the blocks payload on the encoding it needs.
+func TestWriteMethodsStayJSON(t *testing.T) {
+	payload, ctype, err := encodeRequest("chat.postMessage", map[string]any{
+		"channel": "C123", "blocks": []any{map[string]string{"type": "divider"}},
+	})
+	if err != nil {
+		t.Fatalf("encodeRequest: %v", err)
+	}
+	if !strings.HasPrefix(ctype, "application/json") {
+		t.Errorf("Content-Type = %q, want JSON", ctype)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(payload, &got); err != nil {
+		t.Fatalf("decoding %q: %v", payload, err)
+	}
+	if got["blocks"] == nil {
+		t.Error("blocks did not survive encoding")
+	}
+}
+
+// TestFormValueRejectsStructuredParameters keeps a map out of a form parameter.
+//
+// Stringifying one would produce a value Slack ignores, which is the silent
+// half of the failure this change fixes.
+func TestFormValueRejectsStructuredParameters(t *testing.T) {
+	if _, _, err := encodeRequest("users.list", map[string]any{
+		"blocks": []any{"nope"},
+	}); err == nil {
+		t.Error("want an error for a structured form parameter, got none")
+	}
+}
+
+// TestReplyThreadReadReachesSlack drives the real read path through the fake,
+// which now rejects a body it cannot decode.
+func TestReplyThreadReadReachesSlack(t *testing.T) {
+	var log []recorded
+	api, stop := server(t, &log, replies(`{"ts":"1700.0002","user":"UHUMAN"}`))
+	defer stop()
+
+	got, err := api.HasForeignReplies(context.Background(), threadTarget, parentRef)
+	if err != nil {
+		t.Fatalf("HasForeignReplies: %v", err)
+	}
+	if !got {
+		t.Error("got false for a thread holding a colleague's reply")
+	}
+	for _, r := range log {
+		if r.method != "conversations.replies" {
+			continue
+		}
+		if !strings.HasPrefix(r.contentType, "application/x-www-form-urlencoded") {
+			t.Errorf("Content-Type = %q, want form-urlencoded", r.contentType)
+		}
+		if r.body["channel"] != "C123" || r.body["ts"] != "1700.0001" {
+			t.Errorf("Slack saw %+v, want the channel and ts", r.body)
+		}
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 )
@@ -185,14 +186,70 @@ func (a *API) channelFor(ctx context.Context, target Target) (string, error) {
 	return out.Channel.ID, nil
 }
 
+// formEncodedMethods are the Web API methods that will not read a JSON body.
+//
+// Slack's cursor-paginated read methods accept
+// `application/x-www-form-urlencoded` only. Posting JSON to one is not rejected
+// as malformed — the parameters are simply never seen, so the call comes back
+// `invalid_arguments`, naming arguments that were sitting right there in the
+// body. That failure reads like a scope or permission problem and is not one.
+//
+// Every method Riggs writes with takes JSON, and the card payloads are
+// hand-built JSON blocks, so JSON stays the default and this is the exception
+// list. Add a method here the moment it turns out to be a read.
+var formEncodedMethods = map[string]bool{
+	"conversations.replies": true,
+	"users.list":            true,
+}
+
+// encodeRequest renders the body in whichever encoding the method accepts, and
+// returns the Content-Type to declare alongside it.
+func encodeRequest(method string, body map[string]any) ([]byte, string, error) {
+	if !formEncodedMethods[method] {
+		payload, err := json.Marshal(body)
+		if err != nil {
+			return nil, "", fmt.Errorf("slack: encoding %s request: %w", method, err)
+		}
+		return payload, "application/json; charset=utf-8", nil
+	}
+
+	form := url.Values{}
+	for k, v := range body {
+		s, err := formValue(v)
+		if err != nil {
+			return nil, "", fmt.Errorf("slack: encoding %s request: %s: %w", method, k, err)
+		}
+		form.Set(k, s)
+	}
+	return []byte(form.Encode()), "application/x-www-form-urlencoded; charset=utf-8", nil
+}
+
+// formValue renders one form parameter.
+//
+// The form-encoded methods take scalars. Anything structured arriving here is a
+// caller mistake, and saying so beats stringifying a map into a parameter Slack
+// will quietly ignore — which is the shape of the bug this whole split exists
+// to prevent.
+func formValue(v any) (string, error) {
+	switch t := v.(type) {
+	case string:
+		return t, nil
+	case int:
+		return strconv.Itoa(t), nil
+	case bool:
+		return strconv.FormatBool(t), nil
+	}
+	return "", fmt.Errorf("%T is not a form parameter", v)
+}
+
 // call performs one Web API method, retrying on 429 and 5xx.
 //
 // Slack signals application errors with HTTP 200 and `"ok": false`, so the
 // status code alone never tells you whether a post succeeded.
 func (a *API) call(ctx context.Context, token, method string, body map[string]any, out any) error {
-	payload, err := json.Marshal(body)
+	payload, contentType, err := encodeRequest(method, body)
 	if err != nil {
-		return fmt.Errorf("slack: encoding %s request: %w", method, err)
+		return err
 	}
 
 	var lastErr error
@@ -203,7 +260,7 @@ func (a *API) call(ctx context.Context, token, method string, body map[string]an
 			return fmt.Errorf("slack: building %s request: %w", method, err)
 		}
 		req.Header.Set("Authorization", "Bearer "+token)
-		req.Header.Set("Content-Type", "application/json; charset=utf-8")
+		req.Header.Set("Content-Type", contentType)
 
 		resp, err := a.http.Do(req)
 		if err != nil {

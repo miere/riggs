@@ -272,11 +272,19 @@ Rules:
   as, and ignored on every other: a profile Riggs only posts through needs a bot
   token and nothing more.
 - The client speaks **HTTP directly**, not through `slack-go` (which Murtaugh
-  uses). Riggs needs three endpoints — `chat.postMessage`, `chat.update`,
-  `conversations.open` — and the cards are `container` blocks, a type the
-  typed SDK does not model, so the payload would be hand-built JSON either
-  way. Owning the request also means owning 429 handling, which matters for a
-  per-minute job.
+  uses). The cards are `container` blocks, a type the typed SDK does not model,
+  so the payload would be hand-built JSON either way. Owning the request also
+  means owning 429 handling, which matters for a per-minute job.
+- **The encoding is per method, not per client.** Every method Riggs writes
+  with reads a JSON body, but Slack's cursor-paginated *read* methods —
+  `conversations.replies`, `users.list` — accept
+  `application/x-www-form-urlencoded` only. Sending one of those JSON is not
+  rejected as malformed: the parameters are never seen, and the call comes back
+  `invalid_arguments` naming arguments that were in the payload. That reads
+  exactly like a missing scope and is not one. JSON is the default;
+  `formEncodedMethods` in `internal/slack/client.go` is the exception list, and
+  a method belongs on it the moment it turns out to be a read. Owning the
+  request means owning this too — a typed SDK would have got it right for free.
 - Slack reports application errors with **HTTP 200 and `"ok": false`**, so the
   status code alone never tells you whether a post succeeded. Every response is
   checked on `ok`. `message_not_found` is translated into a typed error,
@@ -1427,9 +1435,14 @@ Rules:
   own user id, read once per token from `auth.test`.
 - **A thread that cannot be read blocks the delete.** Not knowing whether a
   conversation is there is not permission to destroy one, so the failure is
-  reported rather than falling through. `conversations.replies` needs a history
-  scope (`channels:history` and its private, DM and group-DM siblings); the app
-  already holds all four.
+  reported rather than falling through. Only `thread_not_found`,
+  `channel_not_found` and a vanished message are tolerated — a message that is
+  already gone has no thread to protect. Everything else stops the delete and
+  wedges the digest until someone looks, which is the intended trade: a stuck
+  tidy-up is recoverable, a destroyed conversation is not.
+  `conversations.replies` needs a history scope (`channels:history` and its
+  private, DM and group-DM siblings); the app already holds all four — so when
+  this path fails, suspect the request before the permissions (§7).
 - **A vanished digest stays vanished.** Unlike a card, a digest whose message is
   gone is not re-posted: its items come back on their own cooldown, and
   resurrecting a message the reader dismissed is the wrong answer.
@@ -1793,6 +1806,20 @@ Rollback: the previous job and rule definitions are captured under
 `/tmp/riggs-cutover-backup/` and can be restored with the same commands.
 
 ## 14. Change log
+
+- **unreleased** — Slack read methods are form-encoded (§7). `HasForeignReplies`
+  had never once succeeded: `conversations.replies` was being sent a JSON body it
+  does not read, so every call came back `invalid_arguments` and — correctly —
+  blocked the delete. `quick-coding-tasks-poll` wedged on the first digest that
+  emptied out after the check shipped and failed every three minutes for six
+  days, because the card it could not retire was still there on the next pass.
+  `users.list` had the same defect, unnoticed only because the config carries
+  raw user ids so `LookupUserID` rarely runs.
+
+  The fake Slack in `client_test.go` switched on the method name and ignored the
+  request encoding, so a malformed call tested green. It now decodes by the
+  declared `Content-Type` and fails a request it cannot parse — the encoding is
+  asserted, not assumed. Removing the fix makes four tests fail.
 
 - **unreleased** — Phase 31. Riggs schedules exactly two things, so it now has
   exactly two commands: `git pr --bulk` and `jira tickets --bulk`. Nine other
