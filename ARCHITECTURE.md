@@ -1458,6 +1458,48 @@ draws them as one line.
 - **`--config-file` is passed only when the config is not where Riggs would look
   anyway**, the same rule the installer followed.
 
+### The command arrives verbatim
+
+A ticket digest **is** its JQL. `jira tickets --bulk 'project = NYX AND labels =
+"ai-able" AND status = "Ready" AND sprint IN openSprints()'` is one command with
+one argument, and that argument has quoting of its own because JQL needs it for
+any value with a space in it. Anything that reads valid in the Jira UI has to
+survive into `job.Args` unchanged, as a single element.
+
+It did not. Both front doors split the command on whitespace and nothing else,
+which turned that line into twenty-two arguments and killed the run on
+`unexpected argument "="`. The rule was borrowed from `ai.command` (§7bb), where
+it is still right — an AI harness invocation genuinely can be a wrapper script —
+and it was wrong here, because the thing being mangled is the *argument*, not
+the command wrapped around it. No wrapper script fixes a shredded query.
+
+- **`riggs jobs add` never re-splits.** The shell already produced the argv,
+  correctly, and it is the only thing in the path that knows what the operator
+  quoted. Joining it back into a string to split it again is precisely how the
+  JQL was lost. All that survives of the old rule is dropping a leading `riggs`,
+  because typing the binary's name is the obvious thing to do.
+- **The Home tab's modal is one text field, so it needs a splitter**, and gets a
+  small one: single quotes literal, double quotes with `\"` and `\\` escapes,
+  backslash escaping outside them, whitespace separating. Any other backslash in
+  double quotes keeps itself, so a regex or a Windows path does not quietly lose
+  one.
+- **Nothing is expanded.** No `$VAR`, no globs, no backticks, no `#` comment. A
+  job is argv handed to `exec`, never a line handed to a shell, and a dialect
+  that *looks* like sh while silently declining to expand is worse than one that
+  plainly does not.
+- **An unterminated quote is refused.** The only available guess is "they meant
+  the rest of the line", which is right about half the time and ships a wrong
+  query the other half — to something that then runs every three minutes.
+- **`Command` quotes what needs quoting, and that is not cosmetic.** It renders
+  the line the Home tab's edit modal is *prefilled* with, and whatever comes back
+  from that form goes through the splitter. Rendered bare, a job whose JQL was
+  right would come apart the first time somebody opened it to change the
+  schedule and pressed Save — a silent edit to a field nobody touched. The round
+  trip is a property, and it is tested as one.
+
+Single quotes are preferred when rendering because JQL's own quoting is double:
+`'...'` leaves it visible rather than burying it under backslashes.
+
 ### One field, two dialects
 
 `3m` is an interval; `0 9 * * 1-5` is a calendar expression. They are told apart
@@ -2025,6 +2067,29 @@ Rollback: the previous job and rule definitions are captured under
 `/tmp/riggs-cutover-backup/` and can be restored with the same commands.
 
 ## 14. Change log
+
+- **unreleased** — A job's command arrives verbatim (§9c). Both front doors
+  split it on whitespace with no quote handling, so the one argument that
+  actually needs quoting — the ticket digest's JQL — came apart:
+  `--bulk 'project = NYX AND labels = "ai-able" AND status = "Ready"'` went in as
+  four arguments and was stored as twenty-two, and the child process died on
+  `unexpected argument "="`.
+
+  `riggs jobs add` now takes its trailing tokens as argv, untouched. The shell
+  had already worked the quoting out correctly and the old code threw that away
+  by joining and re-splitting. The Home tab's modal is a single text field so it
+  still needs a splitter, and gets one that honours both quote styles and the
+  backslash, expands nothing, and refuses an unterminated quote rather than
+  guessing.
+
+  `Command` now quotes what needs quoting, which is the half that would have
+  bitten later: it renders the string the edit modal is prefilled with, and that
+  string is re-split on save. Bare, it meant opening a correct job to change its
+  schedule silently shredded its query. The round trip through the splitter is
+  tested as a property.
+
+  Only the two job front doors move. `ai.command` keeps the whitespace rule
+  (§7bb), where it is still right — that one really can be a wrapper script.
 
 - **unreleased** — Phase 32. Communication states (§7f). A click is answered
   with a **reaction on the message it came from** — acknowledgement while it

@@ -17,7 +17,10 @@ import (
 // jobsUsage is printed for a missing or unknown subcommand.
 const jobsUsage = `usage: riggs jobs <command>
   list                                  what is scheduled, and how it went
-  add <name> <schedule> <command...>    e.g. add nightly "0 9 * * 1-5" jira tickets --bulk
+  add <name> <schedule> <command...>    the command is taken as typed; quote what
+                                        needs quoting and it arrives intact, e.g.
+                                        add tickets 3m jira tickets --bulk \
+                                          'project = NYX AND status = "Ready"'
   rm <name>                             forget a job and its history
   enable|disable <name>                 pause or resume without forgetting it
   run <name>                            run one now, whatever its schedule says`
@@ -125,12 +128,18 @@ func lastRun(job notify.Job) string {
 // Positional rather than flagged, and deliberately: the command being scheduled
 // is itself full of flags, and `riggs jobs add x 3m git pr --bulk miere` would
 // have any flag parser worth the name trying to interpret `--bulk`.
+//
+// The trailing tokens are taken as argv, verbatim. They used to be joined into
+// one string and split again, which threw away the boundaries the shell had
+// already worked out correctly and cost the ticket digest its JQL: one quoted
+// query went in and twenty-two arguments came out. The shell is the only thing
+// in this path that knows what the operator quoted, so its answer is kept.
 func addJob(ctx context.Context, store *notify.Store, args []string) error {
 	if len(args) < 3 {
 		return fmt.Errorf("usage: riggs jobs add <name> <schedule> <command...>")
 	}
 	name, spec, command := args[0], args[1], args[2:]
-	job, err := schedule.NewJob(name, schedule.SplitArgs(strings.Join(command, " ")),
+	job, err := schedule.NewJob(name, schedule.TrimBinary(command),
 		spec, schedule.DefaultTimeout, true)
 	if err != nil {
 		return err
