@@ -306,8 +306,8 @@ func (a *API) call(ctx context.Context, token, method string, body map[string]an
 			return fmt.Errorf("slack: %s returned non-JSON: %w", method, err)
 		}
 		if !env.OK {
-			if env.Error == "message_not_found" {
-				return ErrMessageNotFound
+			if typed := translateError(env.Error); typed != nil {
+				return typed
 			}
 			return fmt.Errorf("slack: %s failed: %s", method, env.Error)
 		}
@@ -319,6 +319,30 @@ func (a *API) call(ctx context.Context, token, method string, body map[string]an
 		return nil
 	}
 	return lastErr
+}
+
+// translateError maps the application errors a caller must be able to BRANCH on
+// into typed values, and returns nil for everything else.
+//
+// Everything here has the same shape: Slack is reporting a state the caller
+// already wanted, or one only the admin can fix, and in both cases
+// `fmt.Errorf("slack: %s failed: %s")` is the wrong answer. `message_not_found`
+// means "re-post" to the ledger rather than "fail"; `no_reaction` and
+// `already_reacted` mean "the emoji is in the state you asked for"; and
+// `invalid_name` names a shortcode the admin typed into the Customisation
+// modal, which nothing else in the process can correct for them.
+func translateError(code string) error {
+	switch code {
+	case "message_not_found":
+		return ErrMessageNotFound
+	case "no_reaction":
+		return ErrNoReaction
+	case "already_reacted":
+		return ErrAlreadyReacted
+	case "invalid_name":
+		return ErrInvalidEmoji
+	}
+	return nil
 }
 
 // retryAfter honours Slack's Retry-After header, falling back to a backoff.
