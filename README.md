@@ -113,6 +113,31 @@ default applies again. An edit is written back to `config.yaml` in place, keepin
 its comments and its `${ENV}` references, and takes effect on the next click
 rather than the next restart.
 
+## How Riggs answers a click
+
+With a **reaction on the message**, not a message under it:
+
+| | | |
+| --- | --- | --- |
+| 🫡 | `saluting_face` | picked it up — replaced when it finishes |
+| 🤐 | `zipper_mouth_face` | not something Riggs answers |
+| ✅ | `white_check_mark` | done |
+| ⚠️ | `warning` | failed, or finished with a warning |
+
+**Threads carry failures only.** Approving used to post "Approving PR…" and then
+"Approved" under the digest — two notifications to report the outcome of a button
+you were looking at when you pressed it. A failure still gets a message, because
+it carries what a glyph cannot: GitHub's own words, or the tail of the harness's
+output.
+
+The four emojis and a **banner** switch for the portrait on the Home tab live
+behind **Customisation…** in the controls menu, admin only. Type the shortcode
+(`tada`), not the emoji.
+
+> **This needs a new OAuth scope.** Add `reactions:write` to the app at
+> api.slack.com and re-install it. Until you do, the daemon runs and every button
+> works — nothing is decorated, and the log says `missing_scope`.
+
 ## Use
 
 Riggs schedules two things, so it has two commands:

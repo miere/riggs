@@ -166,6 +166,7 @@ internal/
   notify/                        # the card ledger (§9), items (§9b), jobs (§9c)
   bulk/                          # the digest rotation engine (§9b)
   ask/                           # the "hand this to somebody" tag (§7bb)
+  comms/                         # the communication-state machine (§7f)
   ai/                            # the local harness behind "Run …" (§7bb)
   github/                        # REST client, ETag cache (§8)
   jira/                          # external seam
@@ -335,7 +336,15 @@ Slack ──ws──► SocketListener ──► Daemon ──► Router ──�
   callback the daemon chose to ignore left no trace at all.
 - **An unroutable click is reported, not an error.** A retired control whose
   message is still in the channel is an ordinary occurrence, and the daemon logs
-  what it could not place.
+  what it could not place — and now also answers it with a disregard reaction
+  (§7f).
+- **Routing has THREE outcomes, not two.** `Unrouted`, `Handled` and `Ignored`.
+  The third exists because the first started meaning something: a control
+  registered through `router.Ignore` is one Riggs deliberately does not act on —
+  a link button Slack opened itself — and stamping "I will not do that" on a
+  digest every time somebody opens a pull request in their browser is not what
+  the disregard state is for. `Router.Lookup` answers the same question without
+  dispatching, because the acknowledgement has to go on before the handler runs.
 
 ## 7bb. The digests' actions
 
@@ -344,7 +353,7 @@ a live row and three are answered by the daemon:
 
 | Option | Intent | Handler |
 | --- | --- | --- |
-| ⧉ Open on Browser | `open_browser` | none — the option carries a `url` and Slack opens it |
+| ⧉ Open on Browser | `open_browser` | none — the option carries a `url` and Slack opens it, and the route is declared IGNORED (§7f) |
 | ✎ Ask for Code Review | `ask_review` | `pullrequest.Asker` — tags a person, starts nothing |
 | ▸ Run Code Review | `run_review` | `ai.Runner` — runs the local harness |
 | ✓ Approve and Merge | `approve_merge` | `pullrequest.Approver`, rebase-only (§8) |
@@ -563,6 +572,145 @@ request, and that is not the tool's to volunteer.
 The approval body was `"Approved via Riggs."` until Phase 9. It is now
 `"Approved."`, and `assertNoSelfReference` in the tests holds the line.
 
+## 7f. Communication states
+
+Riggs answers a click with a **reaction on the message it came from**, and keeps
+the thread for the one thing a reaction cannot carry: why something failed.
+
+Before this, a click was narrated. Approving a pull request posted "Approving PR
+— verifying with GitHub…" and then "Approved"; a harness run posted "Running a
+code review on o/r#7. This takes a few minutes." and rewrote it at the end. Two
+notifications, permanent, under a digest that already said everything either of
+them added — to tell somebody the outcome of a button they were looking at when
+they pressed it. §8c retired the idle nudge on the argument that a queue you
+have learnt to skip is worse than one that says its piece once; a thread of
+Riggs talking to itself is how a reader learns to skip a thread.
+
+Four states, one of them temporary:
+
+| State | Default emoji | Terminal | When |
+| --- | --- | --- | --- |
+| Acknowledgement | `saluting_face` | no | Riggs recognised the control and started the work |
+| Disregard | `zipper_mouth_face` | yes | Riggs was handed something it does not answer |
+| Success | `white_check_mark` | yes | the handler finished |
+| Warning | `warning` | yes | the handler failed; the reason is in the thread |
+
+Rules:
+
+- **The new emoji goes on BEFORE the old ones come off.** There is a moment in
+  every transition where the message carries both, and a moment where it would
+  carry neither. Only one of those can be chosen, and "briefly both" reads as a
+  machine working while "briefly neither" reads as a machine that forgot.
+- **The removal is blind, not read-then-remove.** Every other state's emoji is
+  removed without first asking what is on the message. Slack scopes
+  `reactions.remove` to the **calling user's own** reaction and answers
+  `no_reaction` when there is none, so the worst case is two wasted calls — and
+  the best case is one fewer round trip and one fewer OAuth scope
+  (`reactions:read`) to ask for. That scoping is also the safety property the
+  whole design rests on: this cannot remove a colleague's reaction, however the
+  two overlap.
+- **The states are driven from the DAEMON, not from the handlers.** It is the
+  only place that knows all four answers without being told: whether the control
+  is one Riggs answers, whether the work has started, and whether it finished.
+  Pushing it into the eight handlers would mean eight copies of the same four
+  calls, and the first one somebody forgot would be a click that silently never
+  acknowledged.
+- **The acknowledgement is applied before the handler runs**, which is the whole
+  point of a transient state: approving and merging makes several GitHub calls
+  with retries, and a saluting face applied afterwards would appear at the same
+  moment as the tick replacing it.
+- **A failure to react is logged and swallowed.** This is Riggs describing its
+  own work; it is not the work. An approval that lands and then cannot be
+  decorated is still an approval, and turning a missing scope into a failed
+  click would break every button on the way to fixing nothing.
+- **Unrouted and ignored are now different things** (§7b). An unregistered
+  control is one Riggs does not understand and earns a disregard; a link button
+  is not, so `router.Ignore` declares those explicitly. Before the states
+  existed the two were indistinguishable and it cost nothing, which is why they
+  were one branch — the `open_browser` comment saying "a handler that returns
+  nil is worse than the router's own log line" was right until an unregistered
+  pair started meaning something.
+- **A surface with no message gets no reaction.** A Home tab click and a modal
+  submission carry neither a channel nor a ts. That is not a failure to react —
+  there is nothing there to react to, and those surfaces report by DM.
+
+### One message, many rows
+
+A digest is **one message carrying many rows**, so two people approving two
+different pull requests in it are two transitions on the same message. A message
+has one reaction set and cannot mean two things at once, so this is not solved —
+it is bounded. `internal/comms` holds a per-message lock, and what that
+guarantees is that the set is always some transition's intended **outcome**
+rather than a mixture of two, with the last transition to finish being the one
+showing.
+
+Without it, the second click's removal can run before the first click's add, and
+the message is left carrying an acknowledgement that nothing will ever clear.
+
+The locks are reference-counted and dropped when nobody holds them, so a daemon
+running for weeks does not accumulate one mutex per message it has ever
+answered.
+
+### What is left in a thread
+
+Only failures, and only where a reaction is not enough:
+
+- `pullrequest.Approver.fail` — which pull request, which verb, and GitHub's own
+  words ("Base branch was modified", not "HTTP 405").
+- `ai.Runner` — which item, how long it ran, and the tail of the harness's own
+  output.
+- `pullrequest.Completer.Fail` — an approval that landed but could not redraw
+  its row.
+- The daemon's `clickReporter`, which is **ephemeral** and therefore not in the
+  thread at all.
+
+That last distinction matters to §9b: an ephemeral message never appears in
+`conversations.replies`, and the real ones are Riggs' own and are excluded by
+user id. The rule that an emptied digest is **kept** when somebody replied in
+its thread is unchanged, and so is the reason — deleting a Slack message deletes
+its whole thread with it, and a colleague's reply is work where an emptied
+digest is only tidiness.
+
+**Reactions are not replies.** A human reacting to a digest does not protect it
+from being tidied away; only a reply does. That is the rule as specified, and it
+is worth knowing rather than discovering.
+
+### The emojis are configuration
+
+`config.Reactions` names the four, and `internal/config/reactions.go` is the
+prompt registry's twin (§7e): an id, a label, a hint, a YAML path and a default,
+so a surface can list and edit them without knowing where each one lives.
+
+- **They are stored as NAMES, never as codepoints.** `reactions.add` takes
+  `white_check_mark`, not the character, and a literal emoji in a Go string is
+  the exact mistake §7bb's source scan exists to prevent. Storing names keeps
+  this file inside that rule rather than an exception to it.
+- **The colons are absorbed.** `:tada:` is how an emoji is written everywhere a
+  human types one, and the bare name is what the API takes. Rejecting the colons
+  would be a message about a syntax nobody sees.
+- **A bad name is refused at the modal AND at load.** The modal catches what
+  somebody types; the load catches a hand edit. Neither can prove the workspace
+  *has* the emoji — only Slack knows that — but both catch the two mistakes
+  people actually make: pasting the character, and pasting more than one word.
+  Without the check the symptom is one `invalid_name` per click in a log nobody
+  is reading, while the button appears to work.
+- **An emoji typed to match the built-in is stored as a reset**, not as an
+  override, on the same rule a prompt follows: a later change to the default
+  then reaches this machine.
+- **The set is read per transition, not captured at wiring time.** The
+  Customisation modal edits these while the daemon is running, and a captured
+  set would keep reacting with the old emoji until the next restart — and,
+  worse, would fail to REMOVE an acknowledgement it had placed with the new one.
+
+### The scope
+
+`reactions:write` is a **new OAuth scope**, and an app installed before this
+existed does not have it. The daemon runs perfectly without it and every button
+works; nothing is decorated, and the log says `missing_scope` with a line naming
+the fix. Add it at api.slack.com and re-install the app.
+
+`reactions:read` is deliberately NOT needed — see the blind-removal rule above.
+
 ## 7c. The bulk block
 
 `internal/blockkit` now renders two shapes, and they are separate on purpose.
@@ -753,8 +901,9 @@ was skipped is worse than no line at all.
 
 ### The controls menu
 
-The version line is a `section` with an `overflow` accessory (`app_menu`), whose
-one option today is **Restart** (`restart`).
+The version line is a `section` with an `overflow` accessory (`app_menu`),
+carrying **Restart** (`restart`), **New job…** (`new_job`) and
+**Customisation…** (`customise`).
 
 It sits on the version line rather than below the divider with the update,
 because it is not *about* a release: there is something to restart whether or
@@ -774,6 +923,32 @@ The menu is `app_menu` rather than a second `home_*` id because it is Riggs'
 own controls, as opposed to the Update button, which belongs to a release. New
 operations go in here as options; a bare token value each, so the routing table
 keeps matching them exactly.
+
+**Customisation** opens a modal carrying the four reaction emojis (§7f) and the
+banner switch. It is one modal for five settings rather than five rows, which is
+the opposite call to the prompts directly below it — and the reason is the
+traffic. A row is for something you come back to; these are set once and
+forgotten, and five rows of them above the jobs would push what an admin reads
+daily below the fold to make room for what they read annually.
+
+It is the only modal here with no `private_metadata`, because there is no
+per-item identity to carry: the form IS the item. Every field is read back by
+`(block_id, action_id)` like the job editor's, and the banner — a `static_select`
+rather than a text input — is read with `slack.ViewSelect`, because Slack reports
+a select's answer under `selected_option` and reading it as a text input comes
+back empty, indistinguishable from a field left blank.
+
+The banner setting lives in its own `home` section rather than beside the
+emojis. One modal edits both, but a modal is a surface, not a schema:
+`reactions` is how Riggs answers a click in a channel and `home` is what its own
+tab looks like, and a shared section would mean the next setting has to pick a
+side. It is a `*bool`, so "unset" stays distinguishable from "set to false", and
+it is written UNQUOTED — `show-banner: "false"` is a string, and the next load
+would refuse to unmarshal a string into a bool.
+
+**Everyone sees the banner setting's effect, admin or not.** It is what the app
+LOOKS like rather than something it lets you do, which makes it the one thing on
+this tab that is not behind the audience split.
 
 ### The jobs
 
@@ -981,6 +1156,12 @@ Tab enabled** and an **`app_home_opened` event subscription**, plus the
 `views.publish` capability the bot token already carries. Without them the daemon
 runs perfectly and the tab stays empty, with nothing in the log to say why —
 because the event never arrives.
+
+**`reactions:write` is a separate manual step** (§7f), and an app installed
+before the communication states existed does not have it. The failure is the
+same shape: the daemon runs, every button works, and nothing is decorated. It is
+at least *logged* — `missing_scope`, with a line naming the fix — which the Home
+tab's own missing subscription is not.
 
 ## 8. GitHub access
 
@@ -1443,10 +1624,17 @@ Rules:
   only to update or delete that message, and this decides we will never do
   either again.
 - **Riggs' own replies do not count as a conversation.** It posts into a
-  digest's own thread on two paths — narrating an approval, and reporting a
-  failed click — so a plain "does this thread have replies" would keep every
-  digest that ever saw a click. The check compares each reply against the bot's
-  own user id, read once per token from `auth.test`.
+  digest's own thread only to report a failure now (§7f), but the rule is
+  unchanged and still load-bearing: a plain "does this thread have replies"
+  would keep every digest that ever saw a failed click. The check compares each
+  reply against the bot's own user id, read once per token from `auth.test`.
+  The daemon's own backstop reporter is ephemeral and never appears in
+  `conversations.replies` at all.
+- **A REACTION is not a reply, and does not protect a digest.** Only a message
+  in the thread does. That is the rule as specified rather than an oversight,
+  and it is worth stating now that Riggs puts reactions on these messages
+  itself — a state glyph must not make a digest undeletable, and a colleague's
+  ✋ deliberately does not either.
 - **A thread that cannot be read blocks the delete.** Not knowing whether a
   conversation is there is not permission to destroy one, so the failure is
   reported rather than falling through. Only `thread_not_found`,
@@ -1469,8 +1657,9 @@ Rules:
 ## 10. Configuration file
 
 `internal/config` owns the admin identity, the Slack profiles, the two ask
-sections and the AI harness. It is loaded once, in the composition root — and,
-uniquely among them, its four prompts can be written back (§7e).
+sections, the AI harness, the four reaction emojis and the banner switch. It is
+loaded once, in the composition root — and the last three of those can be
+written back from the Home tab (§7e, §7f).
 
 Precedence, first hit wins:
 
@@ -1503,6 +1692,21 @@ Rules:
   asks for both, separately, for the same reason.
 - **An unset user disables its action; it does not fall back to the admin**
   (§7bb).
+- **`reactions` and `home` are separate sections even though one modal edits
+  both** (§7f). A modal is a surface, not a schema: `reactions` is how Riggs
+  answers a click in a channel and `home` is what its own tab looks like, and a
+  shared section would mean the next setting has to pick a side.
+- **Three kinds of editable setting, one write path.** `setScalarSetting` locates
+  the value, splices the bytes, re-parses the result, replaces the file
+  atomically and only then touches the loaded struct. Prose and emoji names are
+  written quoted; `home.show-banner` is written UNQUOTED, because
+  `show-banner: "false"` is a string and the next load would refuse to unmarshal
+  a string into a bool. That is the one reason quoting is a parameter and not a
+  rule.
+- **`home.show-banner` is a `*bool`.** "Unset" has to stay distinguishable from
+  "set to false", on the same rule an unset prompt follows — a plain bool would
+  make an untouched config indistinguishable from one that had deliberately
+  turned the banner off.
 - **`ai-assistance` is the retired name for `sme-assistance`,** and is parsed as
   an alias rather than refused. Unlike `admin.github-login` — which was refused
   by name because leaving it in place would silently steer the review queue at
@@ -1795,6 +1999,7 @@ one *would* live at still decides, which is the state a fresh machine and
 | 29 | Riggs owns the schedule: `internal/schedule` in the daemon, jobs on the Home tab, `riggs service` for launchd and systemd (§9c, §12b) | done |
 | 30 | Sweep the ask-review cards, so one settled outside Riggs collapses too (§7bb) | done |
 | 31 | Two commands and nothing else: nine tools, the card loops, the MCP frontend and the tool registry deleted (§2, §3) | done |
+| 32 | Communication states: reactions replace the running commentary, threads carry failures only, and the emojis and banner become configurable (§7f) | done |
 
 ## 13b. Cutover
 
@@ -1820,6 +2025,43 @@ Rollback: the previous job and rule definitions are captured under
 `/tmp/riggs-cutover-backup/` and can be restored with the same commands.
 
 ## 14. Change log
+
+- **unreleased** — Phase 32. Communication states (§7f). A click is answered
+  with a **reaction on the message it came from** — acknowledgement while it
+  runs, then success, warning or disregard — and the thread is left for the one
+  thing a reaction cannot carry: why something failed. `internal/comms` owns the
+  machine, driven from the daemon rather than from the eight handlers, because
+  the daemon is the only place that knows all four answers without being told.
+
+  What goes: the approver's "Approving PR — verifying with GitHub…" and
+  "Approved", and the harness runner's "Running… / Finished…" pair. What stays:
+  every failure, with the part a glyph cannot say — GitHub's own words, or the
+  tail of the harness's output.
+
+  Routing gains a third outcome. `Ignored` exists because `Unrouted` started
+  meaning something: a link button Slack opened itself is not a task Riggs
+  declined, so `router.Ignore` declares those four routes rather than leaving
+  them out of the table with a comment. The comment was right until the day it
+  was not.
+
+  The four emojis and a new banner switch are edited from **Customisation…** on
+  the Home tab's controls menu — one modal for five settings, which is the
+  opposite call to the prompt rows beside it and made on traffic: a row is for
+  something you come back to. `config.Reactions` and `config.Home` join the
+  file, `SetPrompt`'s body becomes `setScalarSetting` so all three kinds of
+  editable setting share one write path, and `renderScalar` learns to write an
+  unquoted scalar — `show-banner: "false"` is a string, and the next load would
+  refuse it.
+
+  **Needs a manual step**: `reactions:write` is a new OAuth scope. Until the app
+  is re-installed with it the daemon runs, every button works, and nothing is
+  decorated — logged as `missing_scope` with a line naming the fix.
+
+  It also fixes a bug it tripped over. `renderScalar` claimed to preserve the
+  trailing comment beside an edited setting and never had: yaml.v3 attaches
+  `key: value  # note` to the VALUE node, and `locate` returned only the key —
+  so the comment-preserving branch had not once run, and every prompt edited
+  from the Home tab silently dropped whatever note was beside it.
 
 - **unreleased** — Delete confirms in a modal, and the Home tab publishes again
   (§7e). The Jobs section hung a `confirm` off an overflow *option*; Slack only
