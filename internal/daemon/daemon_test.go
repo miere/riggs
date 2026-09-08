@@ -60,9 +60,9 @@ func TestRouterDispatchesOnActionAndIntent(t *testing.T) {
 
 	for _, intent := range []string{"ask_review", "approve_merge"} {
 		in, _ := slack.DecodeInteraction(overflowCallback("pr_overflow", intent, "o/r#1"))
-		matched, err := r.Route(context.Background(), in)
-		if err != nil || !matched {
-			t.Fatalf("Route(%s) = %v, %v", intent, matched, err)
+		outcome, err := r.Route(context.Background(), in)
+		if err != nil || outcome != Handled {
+			t.Fatalf("Route(%s) = %v, %v", intent, outcome, err)
 		}
 	}
 
@@ -81,9 +81,9 @@ func TestRouterDoesNotMatchAnUnknownIntent(t *testing.T) {
 	}))
 
 	in, _ := slack.DecodeInteraction(overflowCallback("pr_overflow", "run_local_review", "o/r#1"))
-	matched, err := r.Route(context.Background(), in)
-	if matched || err != nil {
-		t.Fatalf("Route = %v, %v; want no match and no error", matched, err)
+	outcome, err := r.Route(context.Background(), in)
+	if outcome != Unrouted || err != nil {
+		t.Fatalf("Route = %v, %v; want Unrouted and no error", outcome, err)
 	}
 }
 
