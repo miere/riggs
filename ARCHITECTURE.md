@@ -1435,12 +1435,17 @@ single code path that is identical on both.
 
 ### What a job is
 
-A name, an argument list, a schedule, a timeout and an enabled flag — stored in
-the **ledger**, not in `config.yaml`. Half of every record is what *happened*
-(when it last ran, for how long, whether it worked, what it said when it did
-not), and that has no place in a hand-edited file whose comments are the reason
-it can be fixed. The definition and its outcome are one row because the Home tab
-draws them as one line.
+A name, a **kind**, the parameters that kind declares, a schedule and an enabled
+flag — stored in the **ledger**, not in `config.yaml`. Half of every record is
+what *happened* (when it last ran, for how long, whether it worked, what it said
+when it did not), and that has no place in a hand-edited file whose comments are
+the reason it can be fixed. The definition and its outcome are one row because
+the Home tab draws them as one line.
+
+The argument list is **derived** from the kind (§9d), not stored. The timeout is
+**configured** per kind (§9d), not stored either. Both used to be on the row and
+both are gone from it; the columns remain, unread, because dropping a column
+needs a migration on every existing ledger and buys nothing.
 
 - **A job runs THIS binary again, as a child process.** Not an in-process call
   through the command directly, which would be cheaper. The argv is byte-identical
@@ -1458,47 +1463,24 @@ draws them as one line.
 - **`--config-file` is passed only when the config is not where Riggs would look
   anyway**, the same rule the installer followed.
 
-### The command arrives verbatim
+### The argument that has to arrive intact
 
 A ticket digest **is** its JQL. `jira tickets --bulk 'project = NYX AND labels =
 "ai-able" AND status = "Ready" AND sprint IN openSprints()'` is one command with
 one argument, and that argument has quoting of its own because JQL needs it for
 any value with a space in it. Anything that reads valid in the Jira UI has to
-survive into `job.Args` unchanged, as a single element.
+reach the child process unchanged, as a single element.
 
-It did not. Both front doors split the command on whitespace and nothing else,
-which turned that line into twenty-two arguments and killed the run on
-`unexpected argument "="`. The rule was borrowed from `ai.command` (§7bb), where
-it is still right — an AI harness invocation genuinely can be a wrapper script —
-and it was wrong here, because the thing being mangled is the *argument*, not
-the command wrapped around it. No wrapper script fixes a shredded query.
+It did not, for two releases. Both front doors took a command LINE and split it
+on whitespace, which turned that query into twenty-two arguments and killed the
+run on `unexpected argument "="`. The first fix taught the splitter about
+quotes. The second removed the splitter: a form that asks for a JQL and stores
+it as a parameter never has a boundary to lose in the first place (§9d).
 
-- **`riggs jobs add` never re-splits.** The shell already produced the argv,
-  correctly, and it is the only thing in the path that knows what the operator
-  quoted. Joining it back into a string to split it again is precisely how the
-  JQL was lost. All that survives of the old rule is dropping a leading `riggs`,
-  because typing the binary's name is the obvious thing to do.
-- **The Home tab's modal is one text field, so it needs a splitter**, and gets a
-  small one: single quotes literal, double quotes with `\"` and `\\` escapes,
-  backslash escaping outside them, whitespace separating. Any other backslash in
-  double quotes keeps itself, so a regex or a Windows path does not quietly lose
-  one.
-- **Nothing is expanded.** No `$VAR`, no globs, no backticks, no `#` comment. A
-  job is argv handed to `exec`, never a line handed to a shell, and a dialect
-  that *looks* like sh while silently declining to expand is worse than one that
-  plainly does not.
-- **An unterminated quote is refused.** The only available guess is "they meant
-  the rest of the line", which is right about half the time and ships a wrong
-  query the other half — to something that then runs every three minutes.
-- **`Command` quotes what needs quoting, and that is not cosmetic.** It renders
-  the line the Home tab's edit modal is *prefilled* with, and whatever comes back
-  from that form goes through the splitter. Rendered bare, a job whose JQL was
-  right would come apart the first time somebody opened it to change the
-  schedule and pressed Save — a silent edit to a field nobody touched. The round
-  trip is a property, and it is tested as one.
-
-Single quotes are preferred when rendering because JQL's own quoting is double:
-`'...'` leaves it visible rather than burying it under backslashes.
+What survives is the rendering half. `schedule.Command` quotes what needs
+quoting so the Home tab's row and `riggs jobs list` show one command rather than
+eleven arguments — single quotes preferred, because JQL's own quoting is double
+and `'...'` leaves it visible rather than burying it under backslashes.
 
 ### One field, two dialects
 
@@ -1561,16 +1543,147 @@ arguments, its cadence — into a component that has no business holding an
 opinion about it, and a definition living in two places is one that eventually
 disagrees with itself.
 
-So the schedule is entirely the operator's: the App Home tab's editor, or
-`riggs jobs add <name> <schedule> <command...>`. The install says so on its way
-out, because an install that ends silently leaves the impression that the
-digests are already running.
+So the schedule is entirely the operator's: the App Home tab's editors, or
+`riggs jobs add github|jira <name> <schedule> <login|jql>`. The install says so
+on its way out, because an install that ends silently leaves the impression that
+the digests are already running.
 
 **Nothing here asserts what another scheduler holds.** Riggs cannot see another
 tool's configuration, and a warning describing a state it has not checked is how
 a tool teaches people to ignore its output. If the same job is defined in two
 places both will run, racing to write the same ledger rows; `riggs jobs list`
 says what Riggs runs.
+
+## 9d. A job has a kind
+
+A job used to be a name and a command line, and the Home tab's editor asked for
+it in a box labelled "arguments for riggs". That made the ADMIN the parser. To
+schedule a ticket digest they had to know that the command is spelled
+`jira tickets --bulk`, that the query after it is one argument however many
+spaces are in it, and that a typo produces not an error but a job which fails
+every three minutes into a log. It is the same reason the JQL kept coming apart:
+a free-text field is a place to make exactly that mistake.
+
+Riggs knows the command spellings. It knows a review digest needs a login and a
+ticket digest needs a query. So the free-text field is gone, and a job carries a
+**kind** instead — `github-reviews` or `jira-tickets` — plus the parameters that
+kind declares. The argument list is rendered from the pair (`schedule.Args`), in
+the one place that knows the spelling, which is also what makes the contract
+with `internal/frontends/cli` enforceable rather than a comment asking people to
+be careful.
+
+The cost is that Riggs can no longer schedule an arbitrary command. That is not
+a loss being tolerated, it is the feature: a scheduler that runs whatever argv a
+Slack modal contained is one where a typo runs forever and the only symptom is a
+red line on a tab nobody opened.
+
+### Two kinds, two forms
+
+**One modal per kind, not one modal with a kind selector.** They are different
+shapes, not different values of one shape — and a Slack modal cannot swap half
+its fields on a selection without a round trip.
+
+- **Configure GitHub Jobs** edits a **singleton**. There is one review queue and
+  it is the admin's, so the form has no name field — Riggs names the job
+  (`schedule.GitHubJobName`) — and carries a **checkbox** instead, because the
+  question it is really asking is whether Riggs watches the queue at all.
+  Unticking it **deletes** the job. That is the harsher of the two readings and
+  the deliberate one: Disable already exists on the row, one click away, and it
+  keeps the definition and the history; a checkbox that quietly did the same
+  would leave two controls that look different and are not. The field says so at
+  the moment of ticking.
+- **Configure a New Jira Job** creates **instances**. A JQL is a question, an
+  install has several worth asking, and each is its own job with its own cadence
+  and row — so the name IS a field here. All three are required: a digest with
+  no query advertises nothing, and Slack refusing an empty box beats a handler
+  explaining it after the modal has closed.
+- **The row's Edit is one control over both forms**, dispatched on the kind. The
+  row is where somebody looks when they want to change something, and asking
+  them to remember which menu option configured this one is asking them to hold
+  the implementation in their head. A kind this build does not know opens
+  **nothing** and says so — guessing at a form, or opening an empty one, both
+  end in a save that rewrites the job into something it was not.
+- **The GitHub singleton is found by KIND, not by name.** A ledger that has been
+  through the migration keeps whatever the operator called theirs; looking up
+  Riggs' own name would find nothing, offer an empty form, and create a SECOND
+  digest racing the first to write the same message.
+
+**The JQL is checked against Jira before the job is saved**, when there is a
+tenant to ask. A query that does not parse is not a job that fails once — it is
+a job that fails every three minutes, for good, into a log, and the admin who
+typed it has closed the modal and moved on. One search of one row is the
+difference between finding out now and finding out never. With no Jira
+configured the check is skipped rather than the save refused: the digest cannot
+run on that machine either, and that is one complaint about one missing setting.
+
+Neither form can report a field error *in* the modal. The socket listener acks
+every callback before handling it (§7b), which is what a three-second budget and
+a handler that may take minutes require, and `response_action` has to travel on
+that ack. So a refusal arrives as a DM from the click reporter — the same route
+every other failed control uses.
+
+### Timeouts are configured per kind
+
+`Configuration…` on the controls menu, beside `Customisation…`. Two settings,
+`jobs.github-timeout` and `jobs.jira-timeout`, defaulting to two minutes.
+
+It is a **second** modal rather than two more fields on Customisation, and the
+split is the one §10 keeps making. Customisation is how Riggs *presents* itself
+— the emoji on a message, the portrait on the tab — and is opened out of taste.
+Configuration is how Riggs *behaves* when nobody is watching, and is opened
+because a digest has started timing out. A shared surface means the next setting
+has to pick a side, and the wrong side is only discovered when changing one
+silently moves the other.
+
+The timeout moved off the job for the same reason the command did: "how long may
+a ticket digest take" is a fact about ticket digests, not about the particular
+query one of them runs. Asking it per job meant several boxes to keep in step
+and an answer nothing ever revisited.
+
+- **A broken setting resolves to the DEFAULT, never to zero.** The scheduler is
+  about to run something and has nobody to tell; of the two readings of a
+  malformed duration, only one lets a job run until the daemon is restarted. It
+  is refused at the modal instead, where a human is standing.
+- **The vocabularies are joined by a switch in the composition root**, not by a
+  string conversion. `config` knows there are two timeouts and nothing about
+  what a ticket digest is; `schedule` knows the kinds and nothing about YAML.
+  The switch means the first divergence is a compile error rather than a kind
+  that silently runs on the default forever — the same call `configEmojis` made
+  for the reaction states (§7f).
+
+### The migration, and what it throws away
+
+Every ledger that has been running Riggs has untyped rows in it. They cannot be
+left alone: a job with no kind has no timeout to look up, no modal to edit it
+with and no way to render the arguments it would run, so it would sit on the
+Home tab doing nothing, with no explanation and no control that worked.
+
+So `schedule.Migrate` runs at **daemon start**, before the scheduler's first
+pass — a job is either typed or gone by the time anything tries to run it — and
+on every start, because that is cheaper than a "have I migrated yet" flag to get
+wrong. `riggs jobs migrate` runs the same pass from a terminal, which is how an
+upgrade can be inspected without restarting the daemon to find out.
+
+The old argv is a complete description of the two commands Riggs schedules, so
+adoption is a match on the exact spelling the CLI resolves. A shredded JQL —
+one stored before the command was taken verbatim, split into twenty-odd
+arguments — is reassembled by joining them with single spaces: the quotes came
+apart as literal characters, so they are still there. What it cannot recover is
+a query whose own spacing was not single spaces, which is a formatting
+difference in a language that does not care about it.
+
+**What cannot be adopted is deleted, and reported.** That is the harsher option
+and the honest one. A job that survives the upgrade but never fires again is a
+job somebody is still counting on; deleting it costs a definition that took
+thirty seconds to type, and keeping it costs the assumption that the schedule is
+working — which is the one thing this whole surface exists to protect. The
+definition goes into the report verbatim, command and cadence, to a log line and
+to a DM, because the admin will read it hours after Riggs restarted itself.
+
+**A job that already has a kind is left completely alone**, including one this
+build does not know. That is a ledger shared with a NEWER Riggs — a downgrade,
+not a corruption — and deleting a job because the running binary is out of date
+would be the worst possible reading of "best effort".
 
 ## 9b. The item ledger (bulk digests)
 
@@ -2067,6 +2180,32 @@ Rollback: the previous job and rule definitions are captured under
 `/tmp/riggs-cutover-backup/` and can be restored with the same commands.
 
 ## 14. Change log
+
+- **unreleased** — A job has a kind (§9d). The Home tab's job editor was a
+  free-text command box, which made the admin responsible for the spelling of a
+  command Riggs already knows: to schedule a ticket digest you typed
+  `jira tickets --bulk` and a JQL, from memory, correctly, into a single-line
+  Slack input. A typo there is not an error — it is a job that fails every three
+  minutes into a log nobody reads.
+
+  A job now carries a **type** and the parameters that type declares, and the
+  argument list is derived from the pair. `New job…` becomes two options:
+  **Configure GitHub Jobs…**, which edits the one review digest and whose
+  checkbox creates or deletes it, and **Configure a New Jira Job…**, which takes
+  a name, a JQL and a cadence. The row's Edit dispatches to whichever form the
+  job belongs to. A JQL is checked against Jira before the job is saved.
+
+  The timeout leaves the job and becomes a setting per kind, edited from
+  **Configuration…** on the same menu — a second modal beside Customisation
+  because one is how Riggs looks and the other is how it behaves. `riggs jobs
+  add` takes the kind as its first word; `riggs jobs migrate` is new.
+
+  **Every existing job is migrated on the next daemon start.** The old argv is
+  matched against the two commands Riggs schedules — including the shredded
+  shape a JQL used to be stored in, which is reassembled — and anything that
+  cannot be adopted is DELETED and reported, in the log and in a DM, with the
+  command and cadence it had. A job that survives an upgrade but never fires
+  again is a job somebody is still counting on.
 
 - **unreleased** — A job's command arrives verbatim (§9c). Both front doors
   split it on whitespace with no quote handling, so the one argument that

@@ -8,10 +8,12 @@ import (
 
 func jobRows() []HomeJob {
 	return []HomeJob{
-		{ID: "github-review-queue", Schedule: "3m", Command: "git pr --bulk miere",
-			Status: MarkerDone + " ran 2m ago in 1.4s · next in 58s", Enabled: true},
-		{ID: "nightly", Schedule: "0 9 * * 1-5", Command: "jira tickets --bulk",
-			Status: MarkerWarning + " disabled", Enabled: false},
+		{ID: "github-review-queue", Kind: "Pull Requests — Reviewer", Schedule: "3m",
+			Command: "git pr --bulk miere",
+			Status:  MarkerDone + " ran 2m ago in 1.4s · next in 58s", Enabled: true},
+		{ID: "nightly", Kind: "Jira tickets", Schedule: "0 9 * * 1-5",
+			Command: "jira tickets --bulk 'project = NYX'",
+			Status:  MarkerWarning + " disabled", Enabled: false},
 	}
 }
 
@@ -29,7 +31,8 @@ func TestHomeRendersTheJobRows(t *testing.T) {
 		t.Fatalf("block_id = %v, want the job's identity", row["block_id"])
 	}
 	text := row["text"].(map[string]any)["text"].(string)
-	for _, want := range []string{"*github-review-queue*", "_3m_", "`git pr --bulk miere`", "ran 2m ago"} {
+	for _, want := range []string{"*github-review-queue*", "Pull Requests", "_3m_",
+		"`git pr --bulk miere`", "ran 2m ago"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("row text = %q, want it to contain %q", text, want)
 		}
@@ -44,7 +47,7 @@ func TestAnEmptyScheduleSaysSo(t *testing.T) {
 		t.Fatalf("blocks = %s", got)
 	}
 	elements := blocks[4]["elements"].([]any)
-	if text := elements[0].(map[string]any)["text"].(string); !strings.Contains(text, "New job") {
+	if text := elements[0].(map[string]any)["text"].(string); !strings.Contains(text, "Configure GitHub Jobs") {
 		t.Fatalf("the empty state does not point at the control: %q", text)
 	}
 }
@@ -199,67 +202,175 @@ func jobOptions(t *testing.T, block map[string]any) []jobOption {
 	return out
 }
 
-// A new job has no identity yet, so the name is a field. An existing one's is
-// not: it is what the ledger keys on and what the row's block_id carries.
-func TestJobModalAsksForANameOnlyWhenCreating(t *testing.T) {
-	fresh := modalOf(t, JobModal{Schedule: "3m"})
-	// Absent, not empty: a new job has no identity, and the submission reads
-	// the missing field back as the empty string either way.
+// --- the job editors --------------------------------------------------------
+
+// The GitHub form is about the ONE review queue, so it has no name field: the
+// job's identity is Riggs' to choose, or already decided.
+func TestGitHubJobModalFields(t *testing.T) {
+	fresh := modalOf(t, GitHubJobModal{Schedule: "3m"})
 	if got, present := fresh["private_metadata"]; present && got != "" {
-		t.Fatalf("a new job carries an identity: %v", got)
+		t.Fatalf("a job that does not exist yet carries an identity: %v", got)
 	}
-	if fresh["title"].(map[string]any)["text"] != "New job" {
-		t.Fatalf("title = %v", fresh["title"])
+	blocks := fresh["blocks"].([]any)
+	if len(blocks) != 3 {
+		t.Fatalf("blocks = %d, want the checkbox, the login and the frequency", len(blocks))
 	}
-	if got := len(fresh["blocks"].([]any)); got != 4 {
-		t.Fatalf("blocks = %d, want name, command, schedule and timeout", got)
+	ids := []string{
+		GitHubJobModalEnabledBlockID,
+		GitHubJobModalLoginBlockID,
+		GitHubJobModalScheduleBlockID,
+	}
+	for i, want := range ids {
+		if got := blocks[i].(map[string]any)["block_id"]; got != want {
+			t.Fatalf("block %d = %v, want %q", i, got, want)
+		}
 	}
 
-	existing := modalOf(t, JobModal{Name: "github-review-queue",
-		Command: "git pr --bulk miere", Schedule: "3m", Timeout: "2m"})
-	if existing["private_metadata"] != "github-review-queue" {
+	existing := modalOf(t, GitHubJobModal{
+		Name: "pull-requests-reviewer", Login: "miere", Schedule: "5m", Enabled: true})
+	if existing["private_metadata"] != "pull-requests-reviewer" {
 		t.Fatalf("private_metadata = %v", existing["private_metadata"])
 	}
-	blocks := existing["blocks"].([]any)
-	if len(blocks) != 3 {
-		t.Fatalf("blocks = %d, want no name field when editing", len(blocks))
-	}
-	if blocks[0].(map[string]any)["block_id"] != JobModalCommandBlockID {
-		t.Fatalf("first block = %v", blocks[0])
-	}
-	// Pre-filled, so an edit starts from what is actually scheduled.
-	element := blocks[0].(map[string]any)["element"].(map[string]any)
-	if element["initial_value"] != "git pr --bulk miere" {
-		t.Fatalf("initial_value = %v", element["initial_value"])
+	// Pre-filled, so opening it to change the cadence does not silently forget
+	// the login.
+	login := existing["blocks"].([]any)[1].(map[string]any)["element"].(map[string]any)
+	if login["initial_value"] != "miere" {
+		t.Fatalf("initial_value = %v", login["initial_value"])
 	}
 }
 
-// A job with no command runs nothing and a job with no schedule runs never;
-// Slack refusing an empty box beats a handler explaining it afterwards.
-func TestOnlyTheTimeoutIsOptional(t *testing.T) {
-	blocks := modalOf(t, JobModal{Name: "x"})["blocks"].([]any)
-	for _, b := range blocks {
+// The checkbox is what creates and destroys the job, so its two states have to
+// be expressible. An unticked checkbox group is EMPTY, and Slack refuses to
+// submit a required input that is empty — a required one could be ticked and
+// never unticked.
+func TestTheGitHubCheckboxIsOptional(t *testing.T) {
+	blocks := modalOf(t, GitHubJobModal{})["blocks"].([]any)
+	enabled := blocks[0].(map[string]any)
+	if optional, _ := enabled["optional"].(bool); !optional {
+		t.Fatal("the checkbox is required, so it could never be unticked")
+	}
+	for _, b := range blocks[1:] {
 		block := b.(map[string]any)
-		optional, _ := block["optional"].(bool)
-		if block["block_id"] == JobModalTimeoutBlockID {
-			if !optional {
-				t.Error("the timeout is required")
-			}
-			continue
-		}
-		if optional {
+		if optional, _ := block["optional"].(bool); optional {
 			t.Errorf("%v is optional and should not be", block["block_id"])
 		}
 	}
 }
 
-// Single-line inputs: every one of these is a name, a command or a duration,
-// and a newline is a value none of them can carry.
-func TestTheJobFieldsAreSingleLine(t *testing.T) {
-	for _, b := range modalOf(t, JobModal{})["blocks"].([]any) {
+// `initial_options` must be ABSENT when nothing is ticked. An empty array is
+// not "none selected" to Slack — it is an invalid element, and the modal simply
+// does not open.
+func TestTheGitHubCheckboxOmitsAnEmptyInitialOptions(t *testing.T) {
+	off := modalOf(t, GitHubJobModal{Enabled: false})["blocks"].([]any)
+	element := off[0].(map[string]any)["element"].(map[string]any)
+	if got, present := element["initial_options"]; present {
+		t.Fatalf("initial_options = %v on an unticked box, want it omitted", got)
+	}
+	if element["type"] != "checkboxes" || element["action_id"] != JobModalActionID {
+		t.Fatalf("element = %v", element)
+	}
+
+	on := modalOf(t, GitHubJobModal{Enabled: true})["blocks"].([]any)
+	initial := on[0].(map[string]any)["element"].(map[string]any)["initial_options"].([]any)
+	if len(initial) != 1 || initial[0].(map[string]any)["value"] != GitHubJobModalEnabledValue {
+		t.Fatalf("initial_options = %v", initial)
+	}
+}
+
+// Unticking deletes, and Disable pauses. The two are one click apart on the
+// same surface, so the destructive one says what it does at the moment of
+// ticking rather than afterwards.
+func TestTheGitHubCheckboxSaysThatUntickingDeletes(t *testing.T) {
+	blocks := modalOf(t, GitHubJobModal{})["blocks"].([]any)
+	option := blocks[0].(map[string]any)["element"].(map[string]any)["options"].([]any)[0]
+	description := text(option.(map[string]any)["description"])
+	for _, want := range []string{"DELETES", "Disable"} {
+		if !strings.Contains(description, want) {
+			t.Errorf("description = %q, want it to mention %q", description, want)
+		}
+	}
+}
+
+// A new job has no identity yet, so the name is a field. An existing one's is
+// not: it is what the ledger keys on and what the row's block_id carries.
+func TestJiraJobModalAsksForANameOnlyWhenCreating(t *testing.T) {
+	fresh := modalOf(t, JiraJobModal{Schedule: "3m"})
+	if got, present := fresh["private_metadata"]; present && got != "" {
+		t.Fatalf("a new job carries an identity: %v", got)
+	}
+	if fresh["title"].(map[string]any)["text"] != "New Jira job" {
+		t.Fatalf("title = %v", fresh["title"])
+	}
+	if got := len(fresh["blocks"].([]any)); got != 3 {
+		t.Fatalf("blocks = %d, want name, JQL and frequency", got)
+	}
+
+	existing := modalOf(t, JiraJobModal{
+		Name: "tickets", JQL: `project = NYX AND status = "Ready"`, Schedule: "3m"})
+	if existing["private_metadata"] != "tickets" {
+		t.Fatalf("private_metadata = %v", existing["private_metadata"])
+	}
+	blocks := existing["blocks"].([]any)
+	if len(blocks) != 2 {
+		t.Fatalf("blocks = %d, want no name field when editing", len(blocks))
+	}
+	if blocks[0].(map[string]any)["block_id"] != JiraJobModalJQLBlockID {
+		t.Fatalf("first block = %v", blocks[0])
+	}
+	element := blocks[0].(map[string]any)["element"].(map[string]any)
+	if element["initial_value"] != `project = NYX AND status = "Ready"` {
+		t.Fatalf("initial_value = %v", element["initial_value"])
+	}
+}
+
+// Every field on either job form is required. A digest with no query advertises
+// nothing and one with no schedule runs never, and Slack refusing an empty box
+// beats a handler explaining it after the modal has closed.
+func TestEveryJiraJobFieldIsRequired(t *testing.T) {
+	for _, b := range modalOf(t, JiraJobModal{})["blocks"].([]any) {
+		block := b.(map[string]any)
+		if optional, _ := block["optional"].(bool); optional {
+			t.Errorf("%v is optional and should not be", block["block_id"])
+		}
+	}
+}
+
+// The JQL box is the one multiline job field, and alone in that. A real query
+// runs to several clauses, and a single-line input shows about forty characters
+// of it — which is how somebody edits the wrong half of their own filter.
+func TestOnlyTheJQLIsMultiline(t *testing.T) {
+	for _, b := range modalOf(t, JiraJobModal{})["blocks"].([]any) {
+		block := b.(map[string]any)
+		element := block["element"].(map[string]any)
+		multiline, _ := element["multiline"].(bool)
+		if block["block_id"] == JiraJobModalJQLBlockID {
+			if !multiline {
+				t.Error("the JQL field is single-line")
+			}
+			continue
+		}
+		if multiline {
+			t.Errorf("%v is multiline", block["block_id"])
+		}
+	}
+	for _, b := range modalOf(t, GitHubJobModal{})["blocks"].([]any)[1:] {
 		element := b.(map[string]any)["element"].(map[string]any)
 		if multiline, _ := element["multiline"].(bool); multiline {
 			t.Errorf("%v is multiline", b.(map[string]any)["block_id"])
 		}
+	}
+}
+
+// Two forms, two callback_ids. A router matching them apart is what keeps a
+// submission of one from ever being read as the other — one of them carries a
+// checkbox that deletes a job.
+func TestTheTwoJobEditorsAreToldApart(t *testing.T) {
+	github := modalOf(t, GitHubJobModal{})["callback_id"]
+	jira := modalOf(t, JiraJobModal{})["callback_id"]
+	if github == jira {
+		t.Fatalf("both editors submit under %v", github)
+	}
+	if github != GitHubJobModalCallbackID || jira != JiraJobModalCallbackID {
+		t.Fatalf("callback ids = %v / %v", github, jira)
 	}
 }

@@ -52,14 +52,24 @@ func (f *fakeStore) recorded() []recorded {
 	return append([]recorded{}, f.runs...)
 }
 
-// job builds an enabled job with a stable UpdatedAt.
-func job(name, spec string, args ...string) Job {
-	if len(args) == 0 {
-		args = []string{"git", "pr", "--bulk", "miere"}
+// job builds an enabled pull-request digest with a stable UpdatedAt.
+func job(name, spec string, login ...string) Job {
+	who := "miere"
+	if len(login) > 0 {
+		who = login[0]
 	}
-	return Job{Name: name, Args: args, Spec: spec, Timeout: time.Minute,
-		Enabled: true, UpdatedAt: at("2026-09-01 08:00")}
+	return Job{
+		Name: name, Type: string(KindGitHubReviews),
+		Params:  map[string]string{ParamLogin: who},
+		Spec:    spec,
+		Enabled: true, UpdatedAt: at("2026-09-01 08:00"),
+	}
 }
+
+// fixedTimeouts is a Timeouts that answers the same for every kind.
+type fixedTimeouts time.Duration
+
+func (f fixedTimeouts) JobTimeout(Kind) time.Duration { return time.Duration(f) }
 
 // rig assembles a scheduler over a fake store and a recording exec.
 type rig struct {
@@ -299,9 +309,8 @@ func TestATimedOutJobSaysSo(t *testing.T) {
 	r.block = make(chan struct{})
 	defer close(r.block)
 
-	j := job("slow", "3m")
-	j.Timeout = 10 * time.Millisecond
-	result, err := r.RunNow(context.Background(), j, at("2026-09-01 09:00"))
+	r.Scheduler.WithTimeouts(fixedTimeouts(10 * time.Millisecond))
+	result, err := r.RunNow(context.Background(), job("slow", "3m"), at("2026-09-01 09:00"))
 	if err == nil {
 		t.Fatal("a job past its bound reported success")
 	}
@@ -357,3 +366,66 @@ func TestRunReturnsCleanlyOnCancellation(t *testing.T) {
 		t.Fatalf("Run = %v, want nil on cancellation", err)
 	}
 }
+
+// The bound comes from the kind now, not from the job. A ticket digest given
+// ten minutes and a review digest given two is the point of the setting.
+func TestTheTimeoutComesFromTheKind(t *testing.T) {
+	r := newRig(t)
+	r.block = make(chan struct{})
+	defer close(r.block)
+
+	// Generous for reviews, instant for tickets: a run of the second must be
+	// the one that gets cut off.
+	r.Scheduler.WithTimeouts(perKind{
+		KindGitHubReviews: time.Minute,
+		KindJiraTickets:   10 * time.Millisecond,
+	})
+
+	tickets := Job{
+		Name: "tickets", Type: string(KindJiraTickets),
+		Params: map[string]string{ParamJQL: "project = NYX"}, Spec: "3m", Enabled: true,
+	}
+	result, err := r.RunNow(context.Background(), tickets, at("2026-09-01 09:00"))
+	if err == nil || !result.TimedOut {
+		t.Fatalf("the ticket digest was not bounded by its own kind: %v", err)
+	}
+}
+
+// A scheduler with no Timeouts at all — every test rig, and a build with no
+// config — falls back to the default rather than to no bound whatsoever.
+func TestNoTimeoutsMeansTheDefault(t *testing.T) {
+	r := newRig(t)
+	if got := r.Scheduler.timeoutFor(job("reviews", "3m")); got != DefaultTimeout {
+		t.Fatalf("timeout = %v, want %v", got, DefaultTimeout)
+	}
+	// And so does a Timeouts with no opinion about this kind: zero means "no
+	// answer", not "no time".
+	r.Scheduler.WithTimeouts(fixedTimeouts(0))
+	if got := r.Scheduler.timeoutFor(job("reviews", "3m")); got != DefaultTimeout {
+		t.Fatalf("timeout = %v, want %v", got, DefaultTimeout)
+	}
+}
+
+// A job whose kind this build cannot render arguments for is a recorded
+// FAILURE, not a silent skip. The row on the Home tab is the only place anybody
+// would find out, and it can only say so if the run was written down.
+func TestAJobWithNoUsableKindIsRecordedAsAFailure(t *testing.T) {
+	r := newRig(t)
+	future := Job{Name: "future", Type: "slack-digest", Spec: "3m", Enabled: true}
+
+	if _, err := r.RunNow(context.Background(), future, at("2026-09-01 09:00")); err == nil {
+		t.Fatal("a job of an unknown kind reported success")
+	}
+	rec := r.store.recorded()
+	if len(rec) != 1 || rec[0].err == nil {
+		t.Fatalf("recorded = %+v, want one failure", rec)
+	}
+	if got := r.started(); len(got) != 0 {
+		t.Fatalf("something was executed: %q", got)
+	}
+}
+
+// perKind is a Timeouts backed by a table.
+type perKind map[Kind]time.Duration
+
+func (p perKind) JobTimeout(kind Kind) time.Duration { return p[kind] }

@@ -39,6 +39,17 @@ const (
 	// own comment gives: five settings nobody touches twice have no business
 	// occupying five lines above the jobs somebody reads every day.
 	HomeCustomiseIntent = "customise"
+	// HomeConfigureIntent opens the Configuration modal: how long a run of each
+	// KIND of job may take (§9d).
+	//
+	// A second modal beside Customisation rather than two more fields on it,
+	// and the split is the one §10 keeps making. Customisation is how Riggs
+	// PRESENTS itself — the emojis on a message, the portrait on this tab — and
+	// is read by whoever is looking at it. Configuration is how Riggs BEHAVES
+	// when nobody is looking, and is read when a digest has started timing out.
+	// A shared modal would mean the next setting has to pick a side, and the
+	// wrong side is only discovered when changing one silently moves the other.
+	HomeConfigureIntent = "configure"
 
 	// HomePromptActionID is the action_id of the overflow beside each editable
 	// prompt. One id for all of them, like a digest's rows: the router matches
@@ -104,6 +115,10 @@ type Home struct {
 	// menu entry that opens nothing, which is the mistake this file keeps not
 	// making.
 	ShowCustomisation bool
+	// ShowConfiguration puts the Configuration option on the controls menu, on
+	// the same rule as ShowCustomisation: there has to be somewhere to write
+	// the settings to before the option that edits them is drawn.
+	ShowConfiguration bool
 	// HideBanner drops the portrait.
 	//
 	// Negative, so the zero value draws it. Every other flag on this type is
@@ -202,11 +217,23 @@ func (h Home) Blocks() []any {
 			ActionID: HomeMenuActionID,
 			Options: []menuOptionObj{
 				{Text: plainVerbatim("Restart"), Value: HomeRestartIntent},
-				// Directly below Restart, and on the same menu, because a
-				// job editor has nowhere else to live when there are no jobs
-				// yet — which is exactly when somebody goes looking for it.
-				{Text: plainVerbatim("New job…"), Value: HomeNewJobIntent},
+				// Directly below Restart, and on the same menu, because a job
+				// editor has nowhere else to live when there are no jobs yet —
+				// which is exactly when somebody goes looking for it.
+				//
+				// TWO options where there was one (§9d). "New job…" opened a
+				// form with a free-text command box, which meant configuring
+				// the ticket digest was typing `jira tickets --bulk` and a JQL
+				// from memory into a single-line Slack input. There are two
+				// kinds of job; each one gets the option that asks for what it
+				// actually needs.
+				{Text: plainVerbatim("Configure GitHub Jobs…"), Value: HomeGitHubJobIntent},
+				{Text: plainVerbatim("Configure a New Jira Job…"), Value: HomeNewJiraJobIntent},
 			},
+		}
+		if h.ShowConfiguration {
+			menu.Options = append(menu.Options,
+				menuOptionObj{Text: plainVerbatim("Configuration…"), Value: HomeConfigureIntent})
 		}
 		if h.ShowCustomisation {
 			// Last, because it is the option somebody opens least often and

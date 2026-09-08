@@ -6,12 +6,14 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/miere/riggs-mcp/internal/apphome"
 	"github.com/miere/riggs-mcp/internal/blockkit"
 	"github.com/miere/riggs-mcp/internal/config"
 	"github.com/miere/riggs-mcp/internal/daemon"
 	"github.com/miere/riggs-mcp/internal/pullrequest"
+	"github.com/miere/riggs-mcp/internal/schedule"
 	"github.com/miere/riggs-mcp/internal/slack"
 	"github.com/miere/riggs-mcp/internal/ticket"
 )
@@ -157,10 +159,12 @@ func TestDaemonRegistersTheHomeControls(t *testing.T) {
 
 	want := []string{
 		blockkit.HomeMenuActionID + "/" + blockkit.HomeCustomiseIntent,
+		blockkit.HomeMenuActionID + "/" + blockkit.HomeConfigureIntent,
 		blockkit.HomeMenuActionID + "/" + blockkit.HomeRestartIntent,
 		blockkit.HomePromptActionID + "/" + blockkit.HomePromptEditIntent,
 		blockkit.HomePromptActionID + "/" + blockkit.HomePromptResetIntent,
 		blockkit.CustomisationModalCallbackID + "/" + slack.ViewSubmitIntent,
+		blockkit.ConfigurationModalCallbackID + "/" + slack.ViewSubmitIntent,
 		blockkit.HomeUpdateActionID + "/" + blockkit.HomeUpdateIntent,
 		blockkit.PromptModalCallbackID + "/" + slack.ViewSubmitIntent,
 	}
@@ -207,8 +211,12 @@ func TestDaemonRegistersTheJobControls(t *testing.T) {
 		blockkit.HomeJobActionID + "/" + blockkit.HomeJobEditIntent,
 		blockkit.HomeJobActionID + "/" + blockkit.HomeJobRunIntent,
 		blockkit.HomeJobActionID + "/" + blockkit.HomeJobToggleIntent,
-		blockkit.HomeMenuActionID + "/" + blockkit.HomeNewJobIntent,
-		blockkit.JobModalCallbackID + "/" + slack.ViewSubmitIntent,
+		blockkit.HomeMenuActionID + "/" + blockkit.HomeGitHubJobIntent,
+		blockkit.HomeMenuActionID + "/" + blockkit.HomeNewJiraJobIntent,
+		// One editor per kind of job, so a submission carrying a checkbox that
+		// deletes a digest can never be read as one carrying a query.
+		blockkit.GitHubJobModalCallbackID + "/" + slack.ViewSubmitIntent,
+		blockkit.JiraJobModalCallbackID + "/" + slack.ViewSubmitIntent,
 		// Delete is two routes, not one: the click opens the confirmation and
 		// this submission is what actually forgets the job.
 		blockkit.JobDeleteModalCallbackID + "/" + slack.ViewSubmitIntent,
@@ -216,7 +224,8 @@ func TestDaemonRegistersTheJobControls(t *testing.T) {
 	assertRoutes(t, router.Routes(), want)
 }
 
-// `New job…` and Restart share the controls menu, so they must not collide.
+// Every option on the controls menu shares one action_id, so they must not
+// collide.
 func TestTheControlsMenuRoutesEveryOneOfItsOptions(t *testing.T) {
 	a := &Application{cfg: &config.Config{}}
 	router := daemon.NewRouter()
@@ -233,8 +242,9 @@ func TestTheControlsMenuRoutesEveryOneOfItsOptions(t *testing.T) {
 			menu++
 		}
 	}
-	if menu != 3 {
-		t.Fatalf("controls-menu routes = %d, want Restart, New job and Customisation: %v", menu, got)
+	if menu != 5 {
+		t.Fatalf("controls-menu routes = %d, want Restart, Customisation, Configuration "+
+			"and the two job editors: %v", menu, got)
 	}
 }
 
@@ -274,5 +284,36 @@ func TestJobNameStripsTheNamespace(t *testing.T) {
 	// A modal's private_metadata carries the bare name and must survive.
 	if got := jobName("github-review-queue"); got != "github-review-queue" {
 		t.Fatalf("jobName = %q", got)
+	}
+}
+
+// The switch that joins two vocabularies. It is a switch rather than a string
+// conversion even though both kinds are spelled identically on either side
+// today — that agreement is a coincidence of naming, not a contract.
+//
+// What this actually defends is the failure mode: a kind that fell through
+// would silently run on the default forever, which looks exactly like a setting
+// nobody had got round to changing.
+func TestConfigTimeoutsMapEveryKind(t *testing.T) {
+	cfg := &config.Config{Jobs: config.Jobs{GitHubTimeout: "5m", JiraTimeout: "10m"}}
+	timeouts := JobTimeouts(cfg)
+
+	if got := timeouts.JobTimeout(schedule.KindGitHubReviews); got != 5*time.Minute {
+		t.Errorf("github = %v, want 5m", got)
+	}
+	if got := timeouts.JobTimeout(schedule.KindJiraTickets); got != 10*time.Minute {
+		t.Errorf("jira = %v, want 10m", got)
+	}
+	// Every kind this build runs has to be answered by name. A new one added to
+	// schedule and forgotten here is what this catches.
+	for _, spec := range schedule.Kinds() {
+		if got := timeouts.JobTimeout(spec.Kind); got == 0 {
+			t.Errorf("kind %q has no timeout setting behind it", spec.Kind)
+		}
+	}
+	// An unknown kind falls through to zero, which the scheduler reads as "no
+	// opinion" and answers with its own default.
+	if got := timeouts.JobTimeout("slack-digest"); got != 0 {
+		t.Errorf("an unknown kind = %v, want no opinion", got)
 	}
 }

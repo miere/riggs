@@ -159,3 +159,52 @@ func TestTheCustomisationOptionIsGated(t *testing.T) {
 		}
 	}
 }
+
+// --- Configuration ----------------------------------------------------------
+
+// The form IS the item, like Customisation's: no private_metadata, every field
+// read back by (block_id, action_id).
+func TestConfigurationModalFields(t *testing.T) {
+	got := modalOf(t, ConfigurationModal{Timeouts: []ConfigurationTimeout{
+		{ID: "github-reviews", Label: "Pull requests timeout", Hint: "How long one pass may take.", Value: "2m0s"},
+		{ID: "jira-tickets", Label: "Jira tickets timeout", Hint: "How long one pass may take.", Value: "10m0s"},
+	}})
+
+	if got["callback_id"] != ConfigurationModalCallbackID {
+		t.Fatalf("callback_id = %v", got["callback_id"])
+	}
+	if meta, present := got["private_metadata"]; present && meta != "" {
+		t.Fatalf("private_metadata = %v, want none: the form is the item", meta)
+	}
+	blocks := got["blocks"].([]any)
+	if len(blocks) != 2 {
+		t.Fatalf("blocks = %d, want one per kind", len(blocks))
+	}
+	first := blocks[0].(map[string]any)
+	if first["block_id"] != ConfigurationTimeoutBlockPrefix+"github-reviews" {
+		t.Fatalf("block_id = %v, want the kind's own token namespaced", first["block_id"])
+	}
+	// Pre-filled with what is IN FORCE, so an admin giving a digest more room
+	// starts from what it has now.
+	element := first["element"].(map[string]any)
+	if element["initial_value"] != "2m0s" || element["action_id"] != ConfigurationActionID {
+		t.Fatalf("element = %v", element)
+	}
+}
+
+// Every field is optional, like Customisation's: an empty box here has exactly
+// one reading — "use the built-in bound" — and there is nowhere else on a modal
+// that edits several settings at once to express a reset.
+func TestEveryConfigurationFieldIsOptional(t *testing.T) {
+	blocks := modalOf(t, ConfigurationModal{Timeouts: []ConfigurationTimeout{
+		{ID: "jira-tickets", Label: "Jira tickets timeout", Hint: "How long."},
+	}})["blocks"].([]any)
+
+	block := blocks[0].(map[string]any)
+	if optional, _ := block["optional"].(bool); !optional {
+		t.Fatal("a timeout is required, so it could never be reset")
+	}
+	if hint := text(block["hint"]); !strings.Contains(hint, "Empty uses the default") {
+		t.Fatalf("hint = %q, want it to say what an empty box means", hint)
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/miere/riggs-mcp/internal/app"
 	"github.com/miere/riggs-mcp/internal/config"
 	"github.com/miere/riggs-mcp/internal/notify"
 	"github.com/miere/riggs-mcp/internal/schedule"
@@ -17,13 +18,14 @@ import (
 // jobsUsage is printed for a missing or unknown subcommand.
 const jobsUsage = `usage: riggs jobs <command>
   list                                  what is scheduled, and how it went
-  add <name> <schedule> <command...>    the command is taken as typed; quote what
-                                        needs quoting and it arrives intact, e.g.
-                                        add tickets 3m jira tickets --bulk \
+  add github <name> <schedule> <login>  the pull-request digest for one GitHub user
+  add jira <name> <schedule> <jql>      the ticket digest for one query, e.g.
+                                        add jira ready 3m \
                                           'project = NYX AND status = "Ready"'
   rm <name>                             forget a job and its history
   enable|disable <name>                 pause or resume without forgetting it
-  run <name>                            run one now, whatever its schedule says`
+  run <name>                            run one now, whatever its schedule says
+  migrate                               adopt jobs written by an older Riggs`
 
 // runJobs is the command-line half of the schedule.
 //
@@ -72,6 +74,8 @@ func runJobs(ctx context.Context, args []string, configPath string) error {
 		return oneNamed(ctx, rest, "run", func(name string) error {
 			return runJobNow(ctx, cfg, store, name)
 		})
+	case "migrate":
+		return migrateJobs(ctx, store)
 	default:
 		return fmt.Errorf("unknown jobs command %q\n%s", action, jobsUsage)
 	}
@@ -88,12 +92,29 @@ func listJobs(ctx context.Context, store *notify.Store) error {
 		return nil
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tSCHEDULE\tSTATE\tLAST RUN\tCOMMAND")
+	fmt.Fprintln(w, "NAME\tKIND\tSCHEDULE\tSTATE\tLAST RUN\tCOMMAND")
 	for _, job := range jobs {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
-			job.Name, job.Spec, jobState(job), lastRun(job), schedule.Command(job))
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			job.Name, jobKind(job), job.Spec, jobState(job), lastRun(job), schedule.Command(job))
 	}
 	return w.Flush()
+}
+
+// jobKind is the second column: what sort of job this is.
+//
+// An unknown kind is printed as the raw stored token rather than as a blank or
+// a dash. This is the terminal, and the person reading it is the person who
+// will have to fix the row — the token is the only thing that tells them
+// whether they are looking at a newer Riggs' job or a typo in the ledger.
+func jobKind(job notify.Job) string {
+	spec, ok := schedule.LookupKind(schedule.KindOf(job))
+	if ok {
+		return string(spec.Kind)
+	}
+	if strings.TrimSpace(job.Type) == "" {
+		return "UNMIGRATED"
+	}
+	return job.Type + " (unknown)"
 }
 
 // jobState is the middle column: paused, or not.
@@ -123,27 +144,49 @@ func lastRun(job notify.Job) string {
 	return fmt.Sprintf("FAILED %s ago: %s", ago, reason)
 }
 
-// addJob defines one.
+// addJob defines one, of a named kind.
 //
-// Positional rather than flagged, and deliberately: the command being scheduled
-// is itself full of flags, and `riggs jobs add x 3m git pr --bulk miere` would
-// have any flag parser worth the name trying to interpret `--bulk`.
+// The kind is the FIRST word, and it is not optional. This used to take a
+// command line — `add tickets 3m jira tickets --bulk '<jql>'` — which made the
+// operator responsible for the spelling of a command the binary already knows,
+// and made a typo in it a job that fails every three minutes rather than a
+// usage error at the prompt. A job has a type now (§9d), and there is no way to
+// write one down without saying which.
 //
-// The trailing tokens are taken as argv, verbatim. They used to be joined into
-// one string and split again, which threw away the boundaries the shell had
-// already worked out correctly and cost the ticket digest its JQL: one quoted
-// query went in and twenty-two arguments came out. The shell is the only thing
-// in this path that knows what the operator quoted, so its answer is kept.
+// Positional rather than flagged, and deliberately: the value that ends a jira
+// line is a JQL query, which is full of things a flag parser would take an
+// interest in. The shell has already worked out where it starts and ends —
+// that is the one thing in this path that knows — so it is taken as one
+// argument, verbatim, and never re-split.
 func addJob(ctx context.Context, store *notify.Store, args []string) error {
-	if len(args) < 3 {
-		return fmt.Errorf("usage: riggs jobs add <name> <schedule> <command...>")
+	if len(args) < 4 {
+		return fmt.Errorf("usage: riggs jobs add github|jira <name> <schedule> <login|jql>")
 	}
-	name, spec, command := args[0], args[1], args[2:]
-	job, err := schedule.NewJob(name, schedule.TrimBinary(command),
-		spec, schedule.DefaultTimeout, true)
+	kind, name, spec, value := args[0], args[1], args[2], args[3]
+	if len(args) > 4 {
+		// Almost always an unquoted JQL: the shell split it and only the first
+		// word arrived. Refused rather than joined back up, because joining is
+		// a guess at the operator's spacing and the failure is silent.
+		return fmt.Errorf("unexpected argument %q — quote the whole value, e.g. 'project = NYX AND status = \"Ready\"'",
+			args[4])
+	}
+
+	var (
+		job schedule.Job
+		err error
+	)
+	switch kind {
+	case "github":
+		job, err = schedule.NewGitHubJob(name, value, spec)
+	case "jira":
+		job, err = schedule.NewJiraJob(name, value, spec)
+	default:
+		return fmt.Errorf("unknown job kind %q: it is github or jira\n%s", kind, jobsUsage)
+	}
 	if err != nil {
 		return err
 	}
+
 	if _, exists, err := store.Job(ctx, job.Name); err != nil {
 		return err
 	} else if exists {
@@ -155,6 +198,34 @@ func addJob(ctx context.Context, store *notify.Store, args []string) error {
 	}
 	fmt.Printf("Added %s: %s, %s\n", job.Name, schedule.Command(job), job.Spec)
 	fmt.Println("The daemon picks it up on its next tick.")
+	return nil
+}
+
+// migrateJobs adopts the jobs an older Riggs wrote, from a terminal.
+//
+// The daemon does this on every start, which is where it normally happens. This
+// exists for the case that matters most on an upgrade: seeing what WOULD be
+// discarded, and what it ran, without restarting the daemon to find out — and
+// on a machine where the daemon is not running at all.
+func migrateJobs(ctx context.Context, store *notify.Store) error {
+	report, err := schedule.Migrate(ctx, store, time.Now())
+	if err != nil {
+		return err
+	}
+	if !report.Changed() {
+		fmt.Println("Every job is already typed; nothing to migrate.")
+		return nil
+	}
+	for _, name := range report.Adopted {
+		fmt.Printf("Upgraded %s.\n", name)
+	}
+	for _, gone := range report.Discarded {
+		// To stderr, and with the whole definition: this is the only copy of a
+		// job that has just been deleted, and a terminal is where somebody can
+		// still copy it back out.
+		fmt.Fprintf(os.Stderr, "REMOVED %s — %s\n  it ran: %s\n  on: %s\n",
+			gone.Name, gone.Reason, gone.Command, gone.Spec)
+	}
 	return nil
 }
 
@@ -198,7 +269,12 @@ func runJobNow(ctx context.Context, cfg *config.Config, store *notify.Store, nam
 	// Output at Info on stderr: this is somebody standing at a terminal waiting
 	// for it, not a daemon writing a log nobody reads.
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	result, runErr := schedule.New(store, exec, logger).RunNow(ctx, job, time.Now())
+	// The same per-kind bounds the daemon applies. A manual run given a
+	// different timeout from a scheduled one would be a way to prove the wrong
+	// thing works — which is the same reason this goes through RunNow at all.
+	result, runErr := schedule.New(store, exec, logger).
+		WithTimeouts(app.JobTimeouts(cfg)).
+		RunNow(ctx, job, time.Now())
 	if out := strings.TrimSpace(result.Output); out != "" {
 		fmt.Println(out)
 	}

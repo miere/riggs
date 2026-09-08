@@ -154,6 +154,26 @@ admin:
 #   # A boolean, unquoted. Also a switch on the Customisation modal.
 #   show-banner: true
 
+# The SCHEDULE's settings. The jobs themselves are not here: they live in the
+# ledger beside their run history (§9c), because half of every one of them is
+# what happened. What is configuration is how long a run of each KIND may take.
+#
+# One setting per kind rather than per job, because "how long may a ticket
+# digest take" is a fact about ticket digests, not about the particular query
+# one of them runs. Both default to 2m, which is enough for a digest pass — one
+# search, a handful of conditional reads, one Slack call — and short enough that
+# a wedged one is skipped rather than blocking the next tick all afternoon.
+#
+# A value longer than an hour is refused: something that runs that long is a
+# service, not a job. One that will not parse falls back to the default rather
+# than to no bound at all, and is refused at the Configuration modal, which is
+# where somebody is standing to be told.
+#
+# Both are also edited from Configuration… on the Home tab's controls menu.
+# jobs:
+#   github-timeout: 2m
+#   jira-timeout: 2m
+
 # The Slack accounts Riggs may deliver through. A tool picks one with
 # --slack-profile; with none given, the profile named "default" is used, and a
 # missing "default" is an error rather than a silent no-op.

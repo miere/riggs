@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/miere/riggs-mcp/internal/ai"
 	"github.com/miere/riggs-mcp/internal/apphome"
@@ -14,6 +15,7 @@ import (
 	"github.com/miere/riggs-mcp/internal/comms"
 	"github.com/miere/riggs-mcp/internal/config"
 	"github.com/miere/riggs-mcp/internal/daemon"
+	"github.com/miere/riggs-mcp/internal/jira"
 	"github.com/miere/riggs-mcp/internal/notify"
 	"github.com/miere/riggs-mcp/internal/pullrequest"
 	"github.com/miere/riggs-mcp/internal/schedule"
@@ -62,6 +64,9 @@ func (a *Application) runDaemon(ctx context.Context) error {
 	}
 	if store != nil {
 		defer store.Close()
+		// Before the scheduler is wired up, and before anything can fire: a job
+		// is either typed or gone by the time the first tick reads the table.
+		a.migrateJobs(ctx, store, creds, logger)
 	}
 
 	router := daemon.NewRouter()
@@ -142,7 +147,83 @@ func (a *Application) scheduler(logger *slog.Logger) (*notify.Store, *schedule.S
 		store.Close()
 		return nil, nil, err
 	}
-	return store, schedule.New(store, exec, logger), nil
+	return store, schedule.New(store, exec, logger).WithTimeouts(configTimeouts{cfg: a.cfg}), nil
+}
+
+// migrateJobs adopts the jobs an older Riggs wrote, and tells the admin what it
+// could not.
+//
+// It runs on every start, and on a ledger that has already been through it that
+// is one read of a table with a handful of rows — which is the price of not
+// having a "have I migrated yet" flag to get wrong.
+//
+// Nothing here is fatal. A migration that fails outright leaves the schedule
+// exactly as it was: the untyped jobs will not run, which is the situation the
+// pass was trying to fix, and refusing to boot over it would also take away
+// every button in every digest. It is logged loudly and the daemon comes up.
+func (a *Application) migrateJobs(ctx context.Context, store *notify.Store,
+	creds slack.Credentials, logger *slog.Logger) {
+
+	report, err := schedule.Migrate(ctx, store, time.Now())
+	if err != nil {
+		logger.Error("could not migrate the schedule; jobs written by an older Riggs will not run",
+			"error", err)
+		return
+	}
+	if !report.Changed() {
+		return
+	}
+	logger.Info("migrated the schedule",
+		"adopted", len(report.Adopted), "discarded", len(report.Discarded))
+	for _, gone := range report.Discarded {
+		// One line per discarded job, at Error. This is the only record of a
+		// definition that has just been deleted, and a log is the one place it
+		// survives a Slack outage.
+		logger.Error("discarded a job that could not be migrated",
+			"job", gone.Name, "command", gone.Command, "spec", gone.Spec, "reason", gone.Reason)
+	}
+	a.reportMigration(ctx, creds, report, logger)
+}
+
+// reportMigration DMs the admin about a migration that changed something.
+//
+// It is a DM rather than a line on the Home tab because the tab shows what is
+// scheduled NOW, and the thing worth saying is about a job that is no longer
+// there. A row that has vanished explains itself to nobody.
+//
+// A discarded job's whole definition goes in the message — the command it ran
+// and the cadence it ran on — because that is what it takes to put it back, and
+// the admin will be reading this some hours after Riggs restarted itself.
+func (a *Application) reportMigration(ctx context.Context, creds slack.Credentials,
+	report schedule.Report, logger *slog.Logger) {
+
+	admin := strings.TrimSpace(a.cfg.Admin.SlackUserID)
+	if admin == "" {
+		return
+	}
+	var b strings.Builder
+	if len(report.Adopted) > 0 {
+		fmt.Fprintf(&b, "%s Riggs upgraded %d scheduled job(s) to the new typed format: %s.\n",
+			blockkit.MarkerDone, len(report.Adopted), strings.Join(report.Adopted, ", "))
+	}
+	for _, gone := range report.Discarded {
+		fmt.Fprintf(&b, "%s *%s* could not be upgraded and has been removed — %s.\n"+
+			"It ran `%s` on `%s`. Re-create it from the Home tab if you still want it.\n",
+			blockkit.MarkerFailed, gone.Name, gone.Reason, gone.Command, gone.Spec)
+	}
+	text := strings.TrimSpace(b.String())
+	if text == "" {
+		return
+	}
+	target := slack.Target{Profile: creds.Profile, BotToken: creds.BotToken, AdminUserID: admin}
+	if _, err := slack.NewAPI().Post(ctx, target, slack.Message{
+		Text:   text,
+		Blocks: blockkit.ContextBlocks(text),
+	}); err != nil {
+		// The log line above already carries every discarded definition, which
+		// is the part that cannot be reconstructed. This one is about delivery.
+		logger.Error("could not tell the admin about the schedule migration", "error", err)
+	}
 }
 
 // jobConfigFlag is the config path a job is told to use, and empty when it is
@@ -224,6 +305,12 @@ func (a *Application) appHome(creds slack.Credentials, logger *slog.Logger,
 		// next restart.
 		Prompts:       a.cfg,
 		Customisation: a.cfg,
+		Configuration: a.cfg,
+		// Nil when there is no tenant to ask, which is the same gate the ticket
+		// digest itself is behind (§ticketDigest): a machine that cannot run
+		// the query should not refuse to save it on the grounds that it could
+		// not check it.
+		JQL: jqlCheckerOrNil(a.cfg),
 		// Typed nils would satisfy the interfaces and then panic on first use,
 		// so an unavailable ledger leaves the fields genuinely empty and the
 		// Jobs section is not drawn at all.
@@ -257,6 +344,24 @@ func (a *Application) registerHomeInteractions(router *daemon.Router, home *apph
 	router.Handle(blockkit.HomeMenuActionID, blockkit.HomeCustomiseIntent,
 		daemon.HandlerFunc(func(ctx context.Context, in slack.Interaction) error {
 			return home.Customise(ctx, in.UserID, in.TriggerID)
+		}))
+
+	router.Handle(blockkit.HomeMenuActionID, blockkit.HomeConfigureIntent,
+		daemon.HandlerFunc(func(ctx context.Context, in slack.Interaction) error {
+			return home.Configure(ctx, in.UserID, in.TriggerID)
+		}))
+
+	// The Configuration modal coming back. Like Customisation's it carries no
+	// private_metadata: the form IS the item.
+	router.Handle(blockkit.ConfigurationModalCallbackID, slack.ViewSubmitIntent,
+		daemon.HandlerFunc(func(ctx context.Context, in slack.Interaction) error {
+			timeouts := map[string]string{}
+			for _, spec := range config.JobTimeoutSpecs() {
+				id := string(spec.ID)
+				timeouts[id] = slack.ViewInput(in.Raw,
+					blockkit.ConfigurationTimeoutBlockPrefix+id, blockkit.ConfigurationActionID)
+			}
+			return home.SaveConfiguration(ctx, in.UserID, timeouts)
 		}))
 
 	// The Customisation modal coming back. Unlike the prompt and job editors it
@@ -359,6 +464,70 @@ func (a *Application) registerRunInteractions(router *daemon.Router, creds slack
 		}))
 }
 
+// configTimeouts maps a kind of job onto the config setting that bounds it.
+//
+// The mapping lives HERE rather than in either package it joins, exactly like
+// configEmojis above. config knows there are two job timeouts and nothing about
+// what a ticket digest is; schedule knows the kinds and nothing about YAML.
+//
+// It is a switch rather than a string conversion even though the two
+// vocabularies spell both kinds identically today. That agreement is a
+// coincidence of naming, not a contract, and a `config.JobTimeoutID(kind)`
+// would turn the first divergence into a kind that silently runs on the default
+// forever rather than a compile error.
+// It is exported through JobTimeouts because `riggs jobs run` builds its own
+// scheduler, in another package, and a manual run bounded differently from a
+// scheduled one would be a way to prove the wrong thing works.
+type configTimeouts struct{ cfg *config.Config }
+
+// JobTimeouts is the per-kind bounds a config supplies, for a caller building
+// its own scheduler.
+func JobTimeouts(cfg *config.Config) schedule.Timeouts { return configTimeouts{cfg: cfg} }
+
+// JobTimeout implements schedule.Timeouts.
+//
+// An unknown kind falls through to zero, which the scheduler reads as "no
+// opinion" and answers with its own default. That is the right answer for a job
+// written by a newer Riggs: it will not run here anyway, and inventing a bound
+// for it would be a second guess on top of the first.
+func (t configTimeouts) JobTimeout(kind schedule.Kind) time.Duration {
+	switch kind {
+	case schedule.KindGitHubReviews:
+		return t.cfg.JobTimeout(config.JobTimeoutGitHub)
+	case schedule.KindJiraTickets:
+		return t.cfg.JobTimeout(config.JobTimeoutJira)
+	}
+	return 0
+}
+
+// jqlChecker proves a query by asking Jira to run it.
+//
+// One page of one result, which is the cheapest question that still exercises
+// the parser: a malformed query fails on the way in, before anything is
+// counted, and a valid one that matches nothing is not an error — an empty
+// digest is a perfectly good digest.
+type jqlChecker struct{ client *jira.Client }
+
+// CheckJQL implements apphome.JQLChecker.
+func (c jqlChecker) CheckJQL(ctx context.Context, jql string) error {
+	_, err := c.client.Search(ctx, jql, 1)
+	return err
+}
+
+// jqlCheckerOrNil builds the checker, and returns a genuinely nil interface
+// when there is no tenant to ask.
+//
+// The same gate ticketDigest applies, for the same reason: with no token or no
+// tenant every call would fail identically, and a save refused because Riggs
+// could not reach Jira would be a complaint about the wrong thing.
+func jqlCheckerOrNil(cfg *config.Config) apphome.JQLChecker {
+	email, token := cfg.JiraCredentials()
+	if email == "" || token == "" || cfg.JiraBaseURL() == "" {
+		return nil
+	}
+	return jqlChecker{client: jiraClient(cfg)}
+}
+
 // jobStoreOrNil keeps a nil *notify.Store out of a non-nil interface.
 //
 // The classic Go trap: a nil pointer in an interface is not a nil interface, so
@@ -386,9 +555,14 @@ func jobRunnerOrNil(s *schedule.Scheduler) apphome.JobRunner {
 // confirmation modal (§7e), and the delete happens on that modal's submission,
 // where the job name arrives in private_metadata instead.
 func (a *Application) registerJobInteractions(router *daemon.Router, home *apphome.Publisher) {
-	router.Handle(blockkit.HomeMenuActionID, blockkit.HomeNewJobIntent,
+	router.Handle(blockkit.HomeMenuActionID, blockkit.HomeGitHubJobIntent,
 		daemon.HandlerFunc(func(ctx context.Context, in slack.Interaction) error {
-			return home.NewJob(ctx, in.UserID, in.TriggerID)
+			return home.ConfigureGitHubJob(ctx, in.UserID, in.TriggerID)
+		}))
+
+	router.Handle(blockkit.HomeMenuActionID, blockkit.HomeNewJiraJobIntent,
+		daemon.HandlerFunc(func(ctx context.Context, in slack.Interaction) error {
+			return home.NewJiraJob(ctx, in.UserID, in.TriggerID)
 		}))
 
 	for intent, handle := range map[string]func(context.Context, *apphome.Publisher, slack.Interaction) error{
@@ -412,18 +586,40 @@ func (a *Application) registerJobInteractions(router *daemon.Router, home *appho
 			}))
 	}
 
-	// The job editor coming back. Every field is read by (block_id, action_id),
-	// which is how Slack reports a submission's state.
-	router.Handle(blockkit.JobModalCallbackID, slack.ViewSubmitIntent,
+	// The two job editors coming back. Every field is read by (block_id,
+	// action_id), which is how Slack reports a submission's state.
+	//
+	// Two callback_ids rather than one with a kind field, because they are two
+	// forms: one carries a checkbox that deletes a job and the other carries a
+	// query. A router matching them apart is what keeps a submission of one
+	// from ever being read as the other.
+	router.Handle(blockkit.GitHubJobModalCallbackID, slack.ViewSubmitIntent,
+		daemon.HandlerFunc(func(ctx context.Context, in slack.Interaction) error {
+			// ViewChecked, not ViewInput: a checkbox reports `selected_options`,
+			// and reading it as a text input comes back empty — which here would
+			// mean "the admin unticked it" and would delete the job on every
+			// save.
+			enabled := slack.ViewChecked(in.Raw, blockkit.GitHubJobModalEnabledBlockID,
+				blockkit.JobModalActionID, blockkit.GitHubJobModalEnabledValue)
+			// in.Item — the form's private_metadata — is deliberately not passed
+			// on. The singleton is re-resolved from the ledger at save time, so
+			// a modal opened before somebody changed the schedule elsewhere
+			// cannot create a second digest.
+			return home.SaveGitHubJob(ctx, in.UserID,
+				slack.ViewInput(in.Raw, blockkit.GitHubJobModalLoginBlockID, blockkit.JobModalActionID),
+				slack.ViewInput(in.Raw, blockkit.GitHubJobModalScheduleBlockID, blockkit.JobModalActionID),
+				enabled)
+		}))
+
+	router.Handle(blockkit.JiraJobModalCallbackID, slack.ViewSubmitIntent,
 		daemon.HandlerFunc(func(ctx context.Context, in slack.Interaction) error {
 			field := func(blockID string) string {
 				return slack.ViewInput(in.Raw, blockID, blockkit.JobModalActionID)
 			}
-			return home.SaveJob(ctx, in.UserID, in.Item,
-				field(blockkit.JobModalNameBlockID),
-				field(blockkit.JobModalCommandBlockID),
-				field(blockkit.JobModalScheduleBlockID),
-				field(blockkit.JobModalTimeoutBlockID))
+			return home.SaveJiraJob(ctx, in.UserID, in.Item,
+				field(blockkit.JiraJobModalNameBlockID),
+				field(blockkit.JiraJobModalJQLBlockID),
+				field(blockkit.JiraJobModalScheduleBlockID))
 		}))
 
 	// The delete confirmation coming back. No fields to read: the job's name is

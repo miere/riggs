@@ -28,17 +28,42 @@ type Job struct {
 	// Slack block_id on the Home tab, so it is constrained (see
 	// schedule.ValidateName) rather than free text.
 	Name string
-	// Args is the argument list handed to the riggs binary — {"git", "pr",
-	// "--bulk", "miere"} — exactly as Murtaugh passed it.
-	Args []string
+	// Type is what KIND of job this is, and it decides everything else about
+	// it: which parameters Params carries, which modal edits it, which timeout
+	// applies, and what argument list it is eventually run as.
+	//
+	// The ledger never interprets it — it is an opaque domain label here, the
+	// same way a card's State is (§9c). The vocabulary is schedule.Kind's, and
+	// a row carrying a kind this build does not know is a row this build will
+	// not run, which is the point: a type it cannot render arguments for is
+	// better refused than guessed at.
+	Type string
+	// Params is the job's own configuration, bespoke to its Type: a GitHub
+	// login for the review digest, a JQL query for the ticket one.
+	//
+	// A map rather than a struct per kind because this table stores it as one
+	// JSON column and has no business knowing what the keys mean. The typed
+	// reading of it — which keys are required, what they are called, what a
+	// missing one means — belongs to schedule, which owns the kinds.
+	Params map[string]string
 	// Spec is the schedule as written: "3m", or "0 9 * * 1-5".
 	Spec string
-	// Timeout bounds one run.
-	Timeout time.Duration
 	// Enabled is whether the scheduler will fire it. A disabled job keeps its
 	// definition and its history: "off for now" and "deleted" are different
 	// intentions, and only one of them is recoverable.
 	Enabled bool
+
+	// LegacyArgs is the argument list a build before typed jobs stored, and it
+	// is the ONLY thing that still reads the `args` column.
+	//
+	// It exists for the migration and for nothing else: a job written by an
+	// older Riggs has no type and no params, and the only description of what
+	// it did is the argv it was going to run. schedule.Adopt reads it back into
+	// a Type and a Params, after which the column is written empty and this
+	// field stays that way. Nothing in the running system may reach for it — a
+	// job's arguments are DERIVED from its type now (schedule.Args), and a
+	// second source for them is how the two would come apart.
+	LegacyArgs []string
 
 	CreatedAt time.Time
 	UpdatedAt time.Time
@@ -101,7 +126,16 @@ func (s *Store) Job(ctx context.Context, name string) (Job, bool, error) {
 // the one piece of evidence anybody has when a job starts failing after a
 // change — which is exactly when they would look.
 func (s *Store) SaveJob(ctx context.Context, job Job) error {
-	args, err := json.Marshal(job.Args)
+	params, err := json.Marshal(job.Params)
+	if err != nil {
+		return fmt.Errorf("notify: encoding the parameters of job %s: %w", job.Name, err)
+	}
+	// The legacy column is written back EMPTY, always. A typed job's arguments
+	// are derived from its type and its parameters; leaving the old argv beside
+	// them would be a second answer to "what does this run", and the migration
+	// would find it again on the next start and try to adopt an already-adopted
+	// row.
+	args, err := json.Marshal([]string{})
 	if err != nil {
 		return fmt.Errorf("notify: encoding the arguments of job %s: %w", job.Name, err)
 	}
@@ -114,13 +148,13 @@ func (s *Store) SaveJob(ctx context.Context, job Job) error {
 		created = now
 	}
 	_, err = s.db.ExecContext(ctx,
-		`INSERT INTO jobs (name, args, spec, timeout_ms, enabled, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO jobs (name, type, params, args, spec, timeout_ms, enabled, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)
 		 ON CONFLICT(name) DO UPDATE SET
-		   args = excluded.args, spec = excluded.spec,
-		   timeout_ms = excluded.timeout_ms, enabled = excluded.enabled,
+		   type = excluded.type, params = excluded.params, args = excluded.args,
+		   spec = excluded.spec, timeout_ms = 0, enabled = excluded.enabled,
 		   updated_at = excluded.updated_at`,
-		job.Name, string(args), job.Spec, job.Timeout.Milliseconds(), boolToInt(job.Enabled),
+		job.Name, job.Type, string(params), string(args), job.Spec, boolToInt(job.Enabled),
 		created.UTC().Format(time.RFC3339), now.UTC().Format(time.RFC3339))
 	if err != nil {
 		return fmt.Errorf("notify: saving job %s: %w", job.Name, err)
@@ -183,7 +217,7 @@ func (s *Store) RecordJobRun(ctx context.Context, name string, at time.Time,
 
 // jobColumns is the SELECT list every read shares, so scanJob can serve them
 // all and a column added in one place cannot be forgotten in another.
-const jobColumns = `SELECT name, args, spec, timeout_ms, enabled, created_at, updated_at,
+const jobColumns = `SELECT name, type, params, args, spec, enabled, created_at, updated_at,
 	last_run_at, last_ok, last_ms, last_error, last_output`
 
 // scanner is the shared shape of *sql.Row and *sql.Rows.
@@ -192,32 +226,51 @@ type scanner interface{ Scan(dest ...any) error }
 // scanJob reads one row.
 func scanJob(row scanner) (Job, error) {
 	var (
-		job                                Job
-		args, created, updated, lastRun    string
-		enabled, lastOK                    int
-		timeoutMS, lastMS                  int64
-		lastError, lastOutput, spec, jname string
+		job                                     Job
+		args, params, created, updated, lastRun string
+		enabled, lastOK                         int
+		lastMS                                  int64
+		lastError, lastOutput, spec, jname      string
+		jtype                                   string
 	)
-	if err := row.Scan(&jname, &args, &spec, &timeoutMS, &enabled, &created, &updated,
+	if err := row.Scan(&jname, &jtype, &params, &args, &spec, &enabled, &created, &updated,
 		&lastRun, &lastOK, &lastMS, &lastError, &lastOutput); err != nil {
 		return Job{}, err
 	}
-	job.Name, job.Spec = jname, spec
-	job.Timeout = time.Duration(timeoutMS) * time.Millisecond
+	job.Name, job.Type, job.Spec = jname, jtype, spec
 	job.Enabled = enabled != 0
 	job.LastOK = lastOK != 0
 	job.LastDuration = time.Duration(lastMS) * time.Millisecond
 	job.LastError, job.LastOutput = lastError, lastOutput
-	// A stored argument list that will not decode is a corrupted row rather
-	// than a job with no arguments, and running the binary with none would
-	// print the usage line every three minutes.
-	if err := json.Unmarshal([]byte(args), &job.Args); err != nil {
+	// Unreadable parameters are a corrupted row rather than a job with none: a
+	// ticket digest with no query is not a smaller version of the job, it is a
+	// different one, and the caller is better told than handed it.
+	if err := decodeJobJSON(params, &job.Params); err != nil {
+		return Job{}, fmt.Errorf("the stored parameters of job %s are unreadable: %w", jname, err)
+	}
+	// The legacy column, which only the migration reads. It is tolerated rather
+	// than enforced: an untyped row IS the thing being migrated, and refusing to
+	// load it would leave the admin with a job they can neither run nor see.
+	if err := decodeJobJSON(args, &job.LegacyArgs); err != nil {
 		return Job{}, fmt.Errorf("the stored arguments of job %s are unreadable: %w", jname, err)
 	}
 	job.CreatedAt = parseJobTime(created)
 	job.UpdatedAt = parseJobTime(updated)
 	job.LastRun = parseJobTime(lastRun)
 	return job, nil
+}
+
+// decodeJobJSON reads one of the two JSON columns into dest.
+//
+// An empty string decodes to the zero value rather than to an error. Both
+// columns are DEFAULT ” on a ledger that predates them, and "this row was
+// written before the column existed" is a fact to carry forward, not a
+// corruption to refuse.
+func decodeJobJSON(raw string, dest any) error {
+	if raw == "" {
+		return nil
+	}
+	return json.Unmarshal([]byte(raw), dest)
 }
 
 // parseJobTime reads a stored timestamp, treating an empty or unparseable one
