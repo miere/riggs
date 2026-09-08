@@ -108,16 +108,18 @@ func (a *Approver) run(ctx context.Context, ref string, merge bool, target slack
 	}
 	result := ApproveResult{Ref: ref}
 
-	// Resolve where to reply. An explicit thread wins (the workflow rule knows
-	// which message was clicked); otherwise the ledger knows where the card
-	// is, which is what makes this work when invoked by hand.
+	// Resolve where to reply. An explicit thread wins (the click knows which
+	// message it came from); otherwise the ledger knows where the card is,
+	// which is what makes this work when invoked by hand.
+	//
+	// Nothing is said here any more. This used to open with "Approving PR —
+	// verifying with GitHub…" and close with "Approved", which is two
+	// notifications to tell somebody the outcome of a button they had just
+	// pressed while looking at it. Both are now a reaction on the message
+	// itself (§7f): the acknowledgement goes on before this runs and the tick
+	// replaces it after. What survives is `fail` — a reaction can say that
+	// something went wrong, and cannot say what.
 	channel, thread := a.thread(ctx, ref, target, threadTS)
-
-	action := "Approving PR"
-	if merge {
-		action = "Approving & rebase-merging"
-	}
-	a.say(ctx, target, channel, thread, fmt.Sprintf("%s %s — verifying with GitHub…", blockkit.MarkerRunning, action))
 
 	login, err := a.gh.AuthenticatedLogin(ctx)
 	if err != nil {
@@ -162,7 +164,9 @@ func (a *Approver) run(ctx context.Context, ref string, merge bool, target slack
 		result.Message = fmt.Sprintf("%s Approved %s.", blockkit.MarkerDone, ref)
 	}
 
-	a.say(ctx, target, channel, thread, result.Message)
+	// Returned, not posted. Message is what the CLI prints and what the caller
+	// records; on the click path the success reaction is the whole
+	// announcement.
 	return result, nil
 }
 

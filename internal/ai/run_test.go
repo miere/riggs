@@ -16,9 +16,7 @@ import (
 type poster struct {
 	mu      sync.Mutex
 	posts   []slack.Message
-	updates []slack.Message
 	postErr error
-	updErr  error
 	ts      int
 }
 
@@ -33,13 +31,6 @@ func (p *poster) Post(_ context.Context, _ slack.Target, msg slack.Message) (sla
 	return slack.Ref{Channel: "C-digest", TS: fmt.Sprintf("170%d.1", p.ts)}, nil
 }
 
-func (p *poster) Update(_ context.Context, _ slack.Target, _ slack.Ref, msg slack.Message) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.updates = append(p.updates, msg)
-	return p.updErr
-}
-
 func runner(t *testing.T, rec *recorder, p *poster) *Runner {
 	t.Helper()
 	return NewRunner(harness(t, "claude", rec), p, "a code review",
@@ -48,33 +39,21 @@ func runner(t *testing.T, rec *recorder, p *poster) *Runner {
 
 var digest = slack.Target{Profile: "riggs", BotToken: "xoxb", Channel: "C-digest"}
 
-// A run takes minutes. A menu option that shows nothing for four of them reads
-// as one that did not work, which is the complaint that put a failure reporter
-// in the daemon in the first place.
-func TestRunSaysSoBeforeItStarts(t *testing.T) {
+// A run that works says NOTHING in the thread.
+//
+// It used to post "Running…" and then rewrite it with "Finished…", because an
+// option that shows nothing for four minutes reads as one that did not work.
+// That reasoning is intact and the acknowledgement reaction now carries it
+// (§7f), which leaves the thread for the one thing a reaction cannot say.
+func TestASuccessfulRunSaysNothingInTheThread(t *testing.T) {
 	rec, p := &recorder{out: "reviewed"}, &poster{}
 	item := Item{Ref: "o/r#7", URL: "https://github.com/o/r/pull/7"}
 
 	if _, err := runner(t, rec, p).Run(context.Background(), item, digest, "1700.1"); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-
-	if len(p.posts) != 1 {
-		t.Fatalf("posts = %d, want the one status line", len(p.posts))
-	}
-	if !strings.Contains(p.posts[0].Text, "Running a code review on o/r#7") {
-		t.Fatalf("opening line = %q", p.posts[0].Text)
-	}
-	if p.posts[0].ThreadTS != "1700.1" {
-		t.Fatalf("the line was not threaded under the clicked message: %+v", p.posts[0])
-	}
-	// One line, updated in place. Three messages saying "started", "still
-	// going", "finished" would bury the digest under its own progress report.
-	if len(p.updates) != 1 {
-		t.Fatalf("updates = %d, want the outcome rewritten in place", len(p.updates))
-	}
-	if !strings.Contains(p.updates[0].Text, "Finished a code review on o/r#7") {
-		t.Fatalf("closing line = %q", p.updates[0].Text)
+	if len(p.posts) != 0 {
+		t.Fatalf("posts = %d, want silence: %+v", len(p.posts), p.posts)
 	}
 }
 
@@ -126,12 +105,20 @@ func TestAFailedRunQuotesTheTail(t *testing.T) {
 	if !slack.WasReported(err) {
 		t.Fatalf("the failure was not marked as reported: %v", err)
 	}
-	text := p.updates[0].Text
+	if len(p.posts) != 1 {
+		t.Fatalf("posts = %d, want the one failure line: %+v", len(p.posts), p.posts)
+	}
+	text := p.posts[0].Text
 	if !strings.Contains(text, "Could not finish a code review on o/r#7") {
-		t.Fatalf("closing line = %q", text)
+		t.Fatalf("failure line = %q", text)
 	}
 	if !strings.Contains(text, "fatal: no such repository") {
 		t.Fatalf("the output tail was dropped: %q", text)
+	}
+	// Threaded under the message that was clicked, not dropped at the bottom of
+	// the channel.
+	if p.posts[0].ThreadTS != "1700.1" {
+		t.Fatalf("the failure was not threaded under the clicked message: %+v", p.posts[0])
 	}
 }
 
@@ -215,28 +202,32 @@ func TestDifferentItemsRunConcurrently(t *testing.T) {
 	}
 }
 
-// Slack declining to carry the commentary is not a reason to abandon the run.
+// Slack declining to carry the commentary is not a reason to change what the
+// run reports. The harness failed, so a failure comes back — with or without a
+// line in the thread explaining it.
 func TestSlackFailuresDoNotStopTheRun(t *testing.T) {
-	rec := &recorder{out: "reviewed"}
+	rec := &recorder{out: "reviewed", err: errors.New("exit status 1")}
 	p := &poster{postErr: errors.New("channel_not_found")}
 
-	if _, err := runner(t, rec, p).Run(context.Background(), Item{Ref: "o/r#7", URL: "u"}, digest, "1700.1"); err != nil {
-		t.Fatalf("Run: %v", err)
+	if _, err := runner(t, rec, p).Run(context.Background(), Item{Ref: "o/r#7", URL: "u"}, digest, "1700.1"); err == nil {
+		t.Fatal("a failing run reported success")
 	}
 	if rec.lastPrompt() == "" {
 		t.Fatal("the harness never ran")
 	}
 }
 
-// With no thread there is nowhere to narrate, and dropping a status line at the
-// bottom of a channel is worse than saying nothing.
+// With no thread there is nowhere to narrate, and dropping a failure at the
+// bottom of a channel is worse than saying nothing — the daemon's own reporter
+// still reaches whoever clicked.
 func TestWithNoThreadNothingIsPosted(t *testing.T) {
-	rec, p := &recorder{}, &poster{}
-	if _, err := runner(t, rec, p).Run(context.Background(), Item{Ref: "o/r#7", URL: "u"}, digest, ""); err != nil {
-		t.Fatalf("Run: %v", err)
+	rec := &recorder{err: errors.New("exit status 1")}
+	p := &poster{}
+	if _, err := runner(t, rec, p).Run(context.Background(), Item{Ref: "o/r#7", URL: "u"}, digest, ""); err == nil {
+		t.Fatal("a failing run reported success")
 	}
-	if len(p.posts)+len(p.updates) != 0 {
-		t.Fatalf("posted %d, updated %d, want silence", len(p.posts), len(p.updates))
+	if len(p.posts) != 0 {
+		t.Fatalf("posted %d, want silence: %+v", len(p.posts), p.posts)
 	}
 }
 

@@ -113,15 +113,13 @@ func TestApprovesAndVerifies(t *testing.T) {
 	if !strings.Contains(res.Message, "✓ Approved o/r#1") {
 		t.Errorf("message = %q", res.Message)
 	}
-	// The acknowledgement goes out before the work, the outcome after it.
-	if len(r.slack.Calls) != 2 {
-		t.Fatalf("slack calls = %d, want an ack and an outcome", len(r.slack.Calls))
-	}
-	if !strings.Contains(r.slack.Calls[0].Msg.Text, "verifying with GitHub") {
-		t.Errorf("first message = %q, want the acknowledgement", r.slack.Calls[0].Msg.Text)
-	}
-	if r.slack.Calls[1].Msg.Text != res.Message {
-		t.Errorf("last message = %q, want the real outcome", r.slack.Calls[1].Msg.Text)
+	// Nothing is said in the thread. The approval used to open with "Approving
+	// PR — verifying with GitHub…" and close with "Approved", which is two
+	// notifications to tell somebody the outcome of a button they were looking
+	// at when they pressed it. Both are reactions on the message now (§7f), and
+	// the outcome survives here as res.Message for the CLI.
+	if len(r.slack.Calls) != 0 {
+		t.Fatalf("slack calls = %d, want silence: %+v", len(r.slack.Calls), r.slack.Calls)
 	}
 }
 
@@ -279,9 +277,14 @@ func TestUnknownLoginStillApproves(t *testing.T) {
 	}
 }
 
-// With no explicit thread, the outcome lands on the tracked card.
+// With no explicit thread, a FAILURE lands on the tracked card.
+//
+// The lookup survived the move to reactions even though nothing successful is
+// posted any more: a `riggs git pr --approve` run from a terminal has no
+// clicked message to thread under, and its failure still belongs beside the
+// card rather than at the bottom of a channel.
 func TestFallsBackToTheTrackedCardsThread(t *testing.T) {
-	gh := &fakeWriter{login: "miere", reviewsAfter: approved("miere")}
+	gh := &fakeWriter{login: "miere", approveErr: errors.New("branch is protected")}
 	r := newApproverRig(t, gh)
 	ctx := context.Background()
 
@@ -291,8 +294,11 @@ func TestFallsBackToTheTrackedCardsThread(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := r.Run(ctx, "o/r#1", false, approveTarget, ""); err != nil {
-		t.Fatalf("Run: %v", err)
+	if _, err := r.Run(ctx, "o/r#1", false, approveTarget, ""); err == nil {
+		t.Fatal("a failing approval reported success")
+	}
+	if len(r.slack.Calls) != 1 {
+		t.Fatalf("slack calls = %d, want the one failure line", len(r.slack.Calls))
 	}
 	call := r.slack.Calls[0]
 	if call.Msg.ThreadTS != "1699.9" || call.Target.Channel != "C-CARD" {
