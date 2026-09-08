@@ -46,6 +46,29 @@ func (c *Config) SetPrompt(id PromptID, text string) error {
 	if !ok {
 		return fmt.Errorf("config: %q is not an editable prompt", id)
 	}
+	text = strings.TrimSpace(text)
+	return c.setScalarSetting(spec.Path, text, true, func(cfg *Config) { spec.set(cfg, text) })
+}
+
+// setScalarSetting is the write path every editable setting goes through:
+// locate, splice, re-parse, replace the file, then update the loaded Config.
+//
+// It was SetPrompt's body. The Customisation modal added two more kinds of
+// editable setting — an emoji name and a boolean — and every one of the five
+// steps was identical for all three, including the two that are easy to get
+// subtly wrong: re-reading the file rather than trusting the loaded copy, and
+// touching the in-memory value only AFTER the rename succeeded.
+//
+// quoted decides how the value is rendered. Prose and emoji names are quoted
+// unconditionally (see renderScalar); a boolean must not be, because
+// `show-banner: "false"` is a string and the next load would refuse to
+// unmarshal it into a bool. That is the whole reason this is a parameter rather
+// than a rule.
+//
+// apply writes the accepted value into the loaded Config. It is a callback
+// rather than a field to assign because each caller knows its own field and
+// this function has no business knowing any of them.
+func (c *Config) setScalarSetting(path []string, value string, quoted bool, apply func(*Config)) error {
 	if c.Path == "" || c.Path == NoFilePath {
 		return fmt.Errorf("config: there is no config file to write to (run `riggs install`)")
 	}
@@ -53,11 +76,15 @@ func (c *Config) SetPrompt(id PromptID, text string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// Re-read rather than remembered from load. The daemon holds a Config for
+	// days; the file underneath it may have been edited by hand or by `riggs
+	// install` in the meantime, and rewriting a remembered copy would undo that
+	// silently.
 	data, err := os.ReadFile(c.Path)
 	if err != nil {
 		return fmt.Errorf("config: reading %s: %w", c.Path, err)
 	}
-	updated, err := setScalar(data, spec.Path, strings.TrimSpace(text))
+	updated, err := setScalar(data, path, value, quoted)
 	if err != nil {
 		return fmt.Errorf("config: editing %s: %w", c.Path, err)
 	}
@@ -72,8 +99,8 @@ func (c *Config) SetPrompt(id PromptID, text string) error {
 		return err
 	}
 	// Only now. The in-memory value must never claim an edit the file did not
-	// take: the daemon would act on a prompt that vanishes at the next restart.
-	spec.set(c, strings.TrimSpace(text))
+	// take: the daemon would act on a setting that vanishes at the next restart.
+	apply(c)
 	return nil
 }
 
@@ -115,7 +142,10 @@ func writeAtomic(path string, data []byte) error {
 //
 // path is a sequence of mapping keys, two deep in every current use
 // ("review-request", "prompt"). An empty value deletes the key.
-func setScalar(data []byte, path []string, value string) ([]byte, error) {
+//
+// quoted is passed straight through to renderScalar: true for anything that is
+// text, false for a value YAML has to read as a scalar of its own type.
+func setScalar(data []byte, path []string, value string, quoted bool) ([]byte, error) {
 	if len(path) != 2 {
 		return nil, fmt.Errorf("only a two-level path is supported, got %v", path)
 	}
@@ -125,7 +155,7 @@ func setScalar(data []byte, path []string, value string) ([]byte, error) {
 	}
 	lines := splitLines(data)
 
-	sectionKey, sectionValue, keyNode := locate(&doc, path)
+	sectionKey, sectionValue, keyNode, valueNode := locate(&doc, path)
 	switch {
 	case keyNode != nil:
 		// The key is there. Replace everything it spans — which for a block
@@ -137,7 +167,7 @@ func setScalar(data []byte, path []string, value string) ([]byte, error) {
 			return joinLines(cut(lines, first, last)), nil
 		}
 		return joinLines(splice(lines, first, last,
-			renderScalar(indent, path[1], value, keyNode.LineComment))), nil
+			renderScalar(indent, path[1], value, quoted, lineComment(keyNode, valueNode)))), nil
 
 	case sectionValue != nil && sectionValue.Kind == yaml.MappingNode:
 		// The section exists but not the key. Nothing to delete.
@@ -149,7 +179,7 @@ func setScalar(data []byte, path []string, value string) ([]byte, error) {
 		// belongs to this section or heads the next one, and that is not
 		// decidable from the text; inserting at the top never has to ask.
 		return joinLines(insert(lines, sectionKey.Line,
-			renderScalar(sectionIndent(sectionKey, lines), path[1], value, ""))), nil
+			renderScalar(sectionIndent(sectionKey, lines), path[1], value, quoted, ""))), nil
 
 	case sectionKey != nil:
 		// The section is declared with nothing under it (`ai:` and a newline),
@@ -164,7 +194,7 @@ func setScalar(data []byte, path []string, value string) ([]byte, error) {
 		last := blockEnd(lines, first, indent)
 		return joinLines(splice(lines, first, last,
 			strings.Repeat(" ", indent)+path[0]+":",
-			renderScalar(indent+2, path[1], value, ""))), nil
+			renderScalar(indent+2, path[1], value, quoted, ""))), nil
 
 	default:
 		if value == "" {
@@ -176,28 +206,50 @@ func setScalar(data []byte, path []string, value string) ([]byte, error) {
 		for len(out) > 0 && strings.TrimSpace(out[len(out)-1]) == "" {
 			out = out[:len(out)-1]
 		}
-		out = append(out, "", path[0]+":", renderScalar(2, path[1], value, ""))
+		out = append(out, "", path[0]+":", renderScalar(2, path[1], value, quoted, ""))
 		return joinLines(out), nil
 	}
 }
 
 // locate finds the section's key and value nodes and, within the section, the
-// target key. Any of the three may be nil, which is how the caller tells
-// "replace" from "insert" from "rewrite the empty section" from "append".
-func locate(doc *yaml.Node, path []string) (sectionKey, sectionValue, key *yaml.Node) {
+// target key and ITS value. Any of the four may be nil, which is how the caller
+// tells "replace" from "insert" from "rewrite the empty section" from "append".
+//
+// The target's value node is returned for one reason: the trailing comment.
+// yaml.v3 attaches `key: value  # note` to the VALUE, not to the key — so
+// reading it off the key node, as this did, returned empty every time and the
+// comment-preserving branch in renderScalar had never once run. Every prompt
+// edited from the Home tab quietly dropped whatever note was beside it.
+func locate(doc *yaml.Node, path []string) (sectionKey, sectionValue, key, value *yaml.Node) {
 	if len(doc.Content) == 0 {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	root := doc.Content[0]
 	if root.Kind != yaml.MappingNode {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	sectionKey, sectionValue = mappingEntry(root, path[0])
 	if sectionValue == nil || sectionValue.Kind != yaml.MappingNode {
-		return sectionKey, sectionValue, nil
+		return sectionKey, sectionValue, nil, nil
 	}
-	k, _ := mappingEntry(sectionValue, path[1])
-	return sectionKey, sectionValue, k
+	k, v := mappingEntry(sectionValue, path[1])
+	return sectionKey, sectionValue, k, v
+}
+
+// lineComment is the note beside a setting, wherever the parser hung it.
+//
+// The value first, because that is where a plain `key: value  # note` lands.
+// The key second, because a value written as a block or a nested mapping puts
+// it there instead — and one of the two is always empty, so preferring either
+// is safe.
+func lineComment(key, value *yaml.Node) string {
+	if value != nil && value.LineComment != "" {
+		return value.LineComment
+	}
+	if key != nil {
+		return key.LineComment
+	}
+	return ""
 }
 
 // mappingEntry returns the key and value nodes for name in a mapping.
@@ -244,15 +296,26 @@ func sectionIndent(sectionKey *yaml.Node, lines []string) int {
 	return sectionKey.Column - 1 + 2
 }
 
-// renderScalar writes one `key: "value"` line.
+// renderScalar writes one `key: value` line.
 //
-// Always double-quoted and always on one line, whatever the value contains. A
-// prompt is prose: it can hold a colon, a leading `{`, a `#`, or a newline from
-// a multi-line modal input, and every one of those changes what a plain scalar
-// means. Quoting unconditionally means the writer never has to be right about
-// which of them needs it.
-func renderScalar(indent int, key, value, lineComment string) string {
-	line := strings.Repeat(" ", indent) + key + ": " + quote(value)
+// A quoted value is always double-quoted and always on one line, whatever it
+// contains. A prompt is prose: it can hold a colon, a leading `{`, a `#`, or a
+// newline from a multi-line modal input, and every one of those changes what a
+// plain scalar means. Quoting unconditionally means the writer never has to be
+// right about which of them needs it.
+//
+// An UNQUOTED value is written verbatim, and there is exactly one kind: a
+// value whose YAML type is the point. `show-banner: "false"` is a string, and
+// unmarshalling a string into a bool fails — so the one setting that is not
+// text is also the one the quoting rule cannot serve. Callers pass quoted=false
+// only for values they have themselves produced (`"true"`, `"false"`), never
+// for anything a human typed.
+func renderScalar(indent int, key, value string, quoted bool, lineComment string) string {
+	rendered := value
+	if quoted {
+		rendered = quote(value)
+	}
+	line := strings.Repeat(" ", indent) + key + ": " + rendered
 	if c := strings.TrimSpace(lineComment); c != "" {
 		// Kept: it is the admin's note about this setting, and losing it
 		// because the setting was edited is a poor trade.
