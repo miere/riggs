@@ -17,21 +17,23 @@ import (
 // item somewhere else entirely — another channel, or a DM to the person being
 // asked — because its whole point is to reach somebody who is not looking at
 // the digest. A run reaches nobody: the work happens on this machine and its
-// result lands wherever the prompt sent it. So it says what it is doing in the
-// thread of the message that was clicked, and nowhere else.
+// result lands wherever the prompt sent it. So when something goes wrong it says
+// so in the thread of the message that was clicked, and nowhere else.
 //
-// One line, updated in place, rather than one message per state. A run takes
-// minutes; three messages saying "started", "still going", "finished" would
-// bury the digest under its own progress report.
+// It says nothing at all when nothing goes wrong. A run takes minutes and used
+// to hold its place with a "Running…" line rewritten at the end; the
+// acknowledgement reaction on the clicked message now covers that gap for free
+// (§7f), which leaves this with only the half a reaction cannot carry — what
+// failed, and what the harness printed on its way out.
 
-// Poster is the Slack seam this needs: post a line, then rewrite it.
+// Poster is the Slack seam this needs: post a line.
 //
-// Narrower than slack.Poster, which also deletes messages and inspects threads.
-// Neither belongs to a harness run, and a fake in this package's tests should
-// not have to implement them to prove that a failing command says so.
+// Narrower than slack.Poster, which also updates, deletes and inspects threads.
+// None of those belongs to a harness run any more — the placeholder that needed
+// Update is gone — and a fake in this package's tests should not have to
+// implement them to prove that a failing command says so.
 type Poster interface {
 	Post(ctx context.Context, target slack.Target, msg slack.Message) (slack.Ref, error)
-	Update(ctx context.Context, target slack.Target, ref slack.Ref, msg slack.Message) error
 }
 
 // Item is what one run is about: a pull request, or a ticket.
@@ -111,16 +113,23 @@ func (r *Runner) Run(ctx context.Context, item Item, target slack.Target, thread
 	}
 	defer r.release(item.Ref)
 
-	// Posted before the harness starts, not after. A run takes minutes, and a
-	// menu option that shows nothing for four of them reads as one that did not
-	// work — which is exactly the complaint that put a failure reporter in the
-	// daemon.
-	ref := r.say(ctx, target, threadTS, slack.Ref{}, fmt.Sprintf(
-		"%s Running %s on %s. This takes a few minutes.", blockkit.MarkerRunning, r.label, item.Ref))
-
+	// Nothing is said before the run any more, and nothing after a successful
+	// one.
+	//
+	// A run takes minutes, and the "Running…, this takes a few minutes" line
+	// existed because an option that shows nothing for four of them reads as
+	// one that did not work. That reasoning is intact; what changed is the
+	// cheaper way of saying it. The acknowledgement reaction goes on the digest
+	// before this is called and stays there for the whole run, so the wait is
+	// visibly covered without a message — and a message that was going to be
+	// rewritten a few minutes later was always the expensive way to hold a
+	// place.
+	//
+	// A failure still gets one, because it carries something a reaction cannot:
+	// which item, how long, and the tail of the harness's own output.
 	result, runErr := r.harness.Run(ctx, Text(r.prompt(), item.Ref, item.URL))
-	r.say(ctx, target, threadTS, ref, r.outcome(item, result, runErr))
 	if runErr != nil {
+		r.say(ctx, target, threadTS, r.failure(item, result, runErr))
 		// Marked: the line above has already put this in front of the person who
 		// clicked, and the daemon would otherwise report the same failure again
 		// in a second message.
@@ -129,44 +138,39 @@ func (r *Runner) Run(ctx context.Context, item Item, target slack.Target, thread
 	return result, nil
 }
 
-// outcome is the line a finished run leaves behind.
-func (r *Runner) outcome(item Item, result Result, err error) string {
-	took := result.Duration.Round(time.Second)
-	if err == nil {
-		return fmt.Sprintf("%s Finished %s on %s in %s.", blockkit.MarkerDone, r.label, item.Ref, took)
-	}
+// failure is the line a run that did not finish leaves behind.
+//
+// The tail of the harness's output is on it because that is the whole reason a
+// failure is still a message: "it went wrong" is what the warning reaction
+// already says, and the only thing worth a notification is the part that says
+// what went wrong.
+func (r *Runner) failure(item Item, result Result, err error) string {
 	line := fmt.Sprintf("%s Could not finish %s on %s after %s — %v",
-		blockkit.MarkerFailed, r.label, item.Ref, took, err)
+		blockkit.MarkerFailed, r.label, item.Ref, result.Duration.Round(time.Second), err)
 	if tail := tail(result.Output); tail != "" {
 		line += "\n```\n" + tail + "\n```"
 	}
 	return line
 }
 
-// say posts the status line, or rewrites the one already there.
+// say posts one line into the thread the run was started from.
 //
-// Every failure here is swallowed and the zero Ref returned. Slack declining to
-// carry the commentary is not a reason to abandon the run, and on the closing
-// call there is nothing left to report it to — the run is over either way, and
-// its result is on the pull request rather than in this message.
-func (r *Runner) say(ctx context.Context, target slack.Target, threadTS string, existing slack.Ref, text string) slack.Ref {
+// It used to post a placeholder and then rewrite it, which is why it took an
+// existing Ref and returned one. With only failures left to report there is
+// never a line already there to rewrite, so the update branch and both refs are
+// gone — a post-or-update helper with exactly one caller that always posts is a
+// second code path nothing exercises.
+//
+// A failure here is swallowed. Slack declining to carry the commentary is not a
+// reason to change what the run reports: the harness has already finished, and
+// the daemon's own failure reporter is still behind this.
+func (r *Runner) say(ctx context.Context, target slack.Target, threadTS, text string) {
 	if r.poster == nil || threadTS == "" {
-		return slack.Ref{}
+		return
 	}
-	msg := slack.Message{Text: text, Blocks: blockkit.ContextBlocks(text), ThreadTS: threadTS}
-	if existing.TS != "" {
-		if err := r.poster.Update(ctx, target, existing, msg); err == nil {
-			return existing
-		}
-		// The line it would have rewritten is gone — deleted, or posted by an
-		// app whose token no longer works. A fresh message is the honest
-		// fallback: the outcome matters more than where it sits.
-	}
-	ref, err := r.poster.Post(ctx, target, msg)
-	if err != nil {
-		return slack.Ref{}
-	}
-	return ref
+	_, _ = r.poster.Post(ctx, target, slack.Message{
+		Text: text, Blocks: blockkit.ContextBlocks(text), ThreadTS: threadTS,
+	})
 }
 
 // claim reserves an item, refusing a second concurrent run of the same one.
