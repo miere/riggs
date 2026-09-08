@@ -7,6 +7,7 @@ import (
 
 	slackgo "github.com/slack-go/slack"
 
+	"github.com/miere/riggs-mcp/internal/comms"
 	"github.com/miere/riggs-mcp/internal/slack"
 )
 
@@ -62,6 +63,22 @@ type Reporter interface {
 	ReportFailure(ctx context.Context, in slack.Interaction, cause error) error
 }
 
+// States reports what Riggs is doing with a click, on the message the click
+// came from.
+//
+// It is an interface here for the same reason Reporter is: this package knows
+// that a click was recognised, ran and finished — it does not know that
+// "recognised" is drawn as a saluting face, or that the emoji is configurable,
+// or that two clicks on one digest have to be serialised. internal/comms knows
+// all three.
+//
+// Apply returns nothing on purpose. Decorating a message is not the work, and a
+// decoration that fails must not turn a successful approval into a failed
+// click.
+type States interface {
+	Apply(ctx context.Context, target slack.Target, ref slack.Ref, s comms.State)
+}
+
 // Daemon holds the connection open and routes what arrives on it.
 type Daemon struct {
 	listener Listener
@@ -70,6 +87,11 @@ type Daemon struct {
 	profile  string
 	home     AppHome
 	reporter Reporter
+	states   States
+	// target is the credentials reactions are placed with: this daemon's own
+	// app, since a click is only ever delivered to the app that posted the
+	// message it came from.
+	target slack.Target
 }
 
 // New builds a daemon over a listener and a routing table.
@@ -100,6 +122,18 @@ func (d *Daemon) WithReporter(r Reporter) *Daemon {
 	return d
 }
 
+// WithStates registers the communication-state machine and the credentials it
+// reacts with.
+//
+// Optional, like the two above, and for the same reason: a daemon with none
+// still routes every click, it simply says nothing about doing so. That is also
+// what an app installed before `reactions:write` existed degrades to, rather
+// than every button failing.
+func (d *Daemon) WithStates(s States, target slack.Target) *Daemon {
+	d.states, d.target = s, target
+	return d
+}
+
 // Run connects and serves until ctx is cancelled.
 //
 // A handler error is logged and swallowed. One failed click must not take the
@@ -122,28 +156,76 @@ func (d *Daemon) Run(ctx context.Context) error {
 	})
 }
 
-// handleInteraction routes one click.
+// handleInteraction routes one click, and says so on the message it came from.
+//
+// The communication states are driven from HERE rather than from the eight
+// handlers below, because here is the only place that knows all four answers
+// without being told: whether the control is one Riggs answers, whether the
+// work has started, and whether it finished or failed. Pushing that into the
+// handlers would mean eight copies of the same four calls, and the first one
+// somebody forgot would be a click that silently never acknowledged.
+//
+// The acknowledgement goes on BEFORE the handler runs, not after. Approving and
+// merging a pull request takes several GitHub calls with retries; the whole
+// point of the transient state is that it covers exactly that gap, and a
+// saluting face applied afterwards would appear at the same moment as the tick
+// that replaces it.
 func (d *Daemon) handleInteraction(ctx context.Context, cb slackgo.InteractionCallback) {
 	in, ok := slack.DecodeInteraction(cb)
 	if !ok {
 		d.logger.Debug("ignoring non-block-action callback", "type", string(cb.Type))
 		return
 	}
-	matched, err := d.router.Route(ctx, in)
-	switch {
-	case err != nil:
+
+	// Peeked before dispatching, so the acknowledgement can be applied to a
+	// control that is about to be handled and withheld from one that is not.
+	// The alternative — acknowledge everything, then correct it — puts a
+	// saluting face on a message for a click nobody was ever going to act on.
+	switch d.router.Lookup(in) {
+	case Handled:
+		d.apply(ctx, in, comms.Acknowledgement)
+	case Unrouted:
+		// Terminal, and applied without dispatching: there is nothing to run.
+		d.apply(ctx, in, comms.Disregard)
+		d.logger.Info("no handler for interaction",
+			"action_id", in.ActionID, "intent", in.Intent, "item", in.Item)
+		return
+	case Ignored:
+		// No state at all. A link button is not a task Riggs declined; Slack
+		// opened the URL and the interaction is a formality (§7b).
+		d.logger.Debug("interaction deliberately not acted on",
+			"action_id", in.ActionID, "intent", in.Intent, "item", in.Item)
+		return
+	}
+
+	_, err := d.router.Route(ctx, in)
+	if err != nil {
+		d.apply(ctx, in, comms.Warning)
 		d.logger.Error("interaction handler failed",
 			"action_id", in.ActionID, "intent", in.Intent, "item", in.Item,
 			"user", in.UserID, "error", err)
 		d.report(ctx, in, err)
-	case !matched:
-		d.logger.Info("no handler for interaction",
-			"action_id", in.ActionID, "intent", in.Intent, "item", in.Item)
-	default:
-		d.logger.Info("interaction handled",
-			"action_id", in.ActionID, "intent", in.Intent, "item", in.Item,
-			"user", in.UserID)
+		return
 	}
+	d.apply(ctx, in, comms.Success)
+	d.logger.Info("interaction handled",
+		"action_id", in.ActionID, "intent", in.Intent, "item", in.Item,
+		"user", in.UserID)
+}
+
+// apply moves the clicked message into a state, when a state machine is wired.
+//
+// The message is the one the control is attached to. A Home tab click and a
+// modal submission carry neither a channel nor a ts, and comms treats that as
+// "nothing to react to" rather than as a failure — those surfaces are the
+// admin's own and report their outcomes by DM.
+func (d *Daemon) apply(ctx context.Context, in slack.Interaction, s comms.State) {
+	if d.states == nil {
+		return
+	}
+	target := d.target
+	target.Channel = in.Channel
+	d.states.Apply(ctx, target, slack.Ref{Channel: in.Channel, TS: in.MessageTS}, s)
 }
 
 // report shows a failed click's cause to the person who made it.
