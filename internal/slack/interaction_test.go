@@ -165,3 +165,42 @@ func TestViewInputReadsTheSubmittedText(t *testing.T) {
 		t.Fatalf("ViewInput = %q, want empty", got)
 	}
 }
+
+// A select and a text input are read from DIFFERENT fields of the same state
+// entry, and a select read as an input comes back empty — which looks exactly
+// like a field the user left blank.
+//
+// That is a bug that cannot fail loudly, so the two reads are kept apart rather
+// than merged behind a fallback, and this is what says so.
+func TestViewSelectAndViewInputReadDifferentFields(t *testing.T) {
+	cb := slackgo.InteractionCallback{
+		Type: slackgo.InteractionTypeViewSubmission,
+		View: slackgo.View{
+			CallbackID: "customisation",
+			State: &slackgo.ViewState{
+				Values: map[string]map[string]slackgo.BlockAction{
+					"emoji:success": {"value": {Value: "tada"}},
+					"banner":        {"value": {SelectedOption: slackgo.OptionBlockObject{Value: "hide"}}},
+				},
+			},
+		},
+	}
+
+	if got := ViewInput(cb, "emoji:success", "value"); got != "tada" {
+		t.Errorf("ViewInput on a text input = %q, want the typed value", got)
+	}
+	if got := ViewSelect(cb, "banner", "value"); got != "hide" {
+		t.Errorf("ViewSelect on a select = %q, want the chosen option", got)
+	}
+	// The trap, stated: reading the select as an input is silently empty.
+	if got := ViewInput(cb, "banner", "value"); got != "" {
+		t.Errorf("ViewInput on a select = %q; if this ever stops being empty the "+
+			"two readers could be merged", got)
+	}
+	// A block the submission never carried is empty rather than a panic: it is a
+	// modal this build no longer renders, and the handler's own "that is empty"
+	// is a better message than a decoding one.
+	if got := ViewSelect(cb, "gone", "value"); got != "" {
+		t.Errorf("ViewSelect on a missing block = %q", got)
+	}
+}

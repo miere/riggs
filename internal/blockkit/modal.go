@@ -285,3 +285,160 @@ func (m JobDeleteModal) name() string {
 	}
 	return "This job"
 }
+
+// The Customisation editor: the fourth modal, and the only one that edits
+// several unrelated settings at once.
+//
+// The other three are about ONE thing — a prompt, a job, a deletion — because
+// each of those has a row of its own on the Home tab to be reached from. These
+// do not. Four emoji names and a banner switch would be five rows of a surface
+// that is already long, every one of them a setting somebody touches once and
+// then never again, pushing the jobs and the prompts they touch weekly further
+// down the page. So they live behind one menu option instead, and the modal
+// carries the lot.
+//
+// That means it has no `private_metadata`: there is no per-item identity,
+// because the item IS the whole form. Every field is read back by (block_id,
+// action_id) like the job editor's, and the ids are exported for exactly that.
+
+const (
+	// CustomisationModalCallbackID identifies a submission of this modal.
+	CustomisationModalCallbackID = "customisation"
+	// CustomisationActionID names the input element inside every block. One id
+	// across all of them, because the block_id is what distinguishes the
+	// fields and a second varying id would only be a second thing to keep in
+	// step.
+	CustomisationActionID = "value"
+	// CustomisationEmojiBlockPrefix namespaces one emoji's input block. The
+	// state's own token follows it, so a field is addressed the same way a
+	// prompt row is (§7b).
+	CustomisationEmojiBlockPrefix = "emoji:"
+	// CustomisationBannerBlockID names the banner switch.
+	CustomisationBannerBlockID = "banner"
+	// The banner switch's two options. Bare tokens, matched exactly, like every
+	// other value in this package.
+	CustomisationBannerShow = "show"
+	CustomisationBannerHide = "hide"
+)
+
+// CustomisationEmoji is one editable emoji on the modal.
+type CustomisationEmoji struct {
+	// ID is the state's token. It follows CustomisationEmojiBlockPrefix in the
+	// block_id and is how a submission is mapped back to a setting.
+	ID string
+	// Label names the state: "Acknowledgement".
+	Label string
+	// Hint says when this emoji appears. It is the only place the state machine
+	// is explained to the person changing it, which is why every field has one
+	// even though three of them are nearly the same sentence.
+	Hint string
+	// Value is the shortcode in force, pre-filled so an edit starts from what
+	// is actually running rather than from an empty box.
+	Value string
+}
+
+// CustomisationModal is the editor for how Riggs presents itself.
+type CustomisationModal struct {
+	// Emojis are the reaction states, in lifecycle order.
+	Emojis []CustomisationEmoji
+	// ShowBanner is the banner switch's current position.
+	ShowBanner bool
+}
+
+// staticSelectOption is one choice on a select. It is a separate wire type from
+// the overflow's menuOptionObj even though the JSON is identical today: an
+// overflow option can carry a `url` (§7c) and this can carry an initial-option
+// pointer, and a shared type would mean a change to either re-rendering the
+// other's bytes.
+type staticSelectOption struct {
+	Text  textObj `json:"text"`
+	Value string  `json:"value"`
+}
+
+type staticSelectElem struct {
+	Type          string               `json:"type"`
+	ActionID      string               `json:"action_id"`
+	Options       []staticSelectOption `json:"options"`
+	InitialOption *staticSelectOption  `json:"initial_option,omitempty"`
+}
+
+// View renders the payload `views.open` takes.
+//
+// Every emoji input is OPTIONAL, which is the opposite of the prompt editor and
+// deliberate. There, an empty box could only mean "reset" or "say nothing", and
+// a Reset option already existed — so Slack was left to refuse it. Here an
+// empty box has exactly one sensible reading, "use the built-in emoji", and
+// there is nowhere else to express it: a modal that edits four settings at once
+// cannot also carry four Reset options without becoming a different, worse
+// surface.
+//
+// The banner select is not optional and has no empty state: it is a switch, and
+// a switch is always in one of its positions.
+func (m CustomisationModal) View() any {
+	blocks := make([]any, 0, len(m.Emojis)+1)
+	for _, e := range m.Emojis {
+		blocks = append(blocks, inputBlock{
+			Type:    "input",
+			BlockID: CustomisationEmojiBlockPrefix + e.ID,
+			Label:   plain(e.label()),
+			Element: plainTextInput{
+				Type:         "plain_text_input",
+				ActionID:     CustomisationActionID,
+				InitialValue: e.Value,
+			},
+			Hint:     e.hint(),
+			Optional: true,
+		})
+	}
+
+	show := staticSelectOption{Text: plainVerbatim("Show"), Value: CustomisationBannerShow}
+	hide := staticSelectOption{Text: plainVerbatim("Hide"), Value: CustomisationBannerHide}
+	initial := hide
+	if m.ShowBanner {
+		initial = show
+	}
+	bannerHint := plain("The portrait at the top of this tab. Hiding it leaves the version line and everything under it.")
+	blocks = append(blocks, inputBlock{
+		Type:    "input",
+		BlockID: CustomisationBannerBlockID,
+		Label:   plain("Banner"),
+		Element: staticSelectElem{
+			Type:          "static_select",
+			ActionID:      CustomisationActionID,
+			Options:       []staticSelectOption{show, hide},
+			InitialOption: &initial,
+		},
+		Hint: &bannerHint,
+	})
+
+	return modalView{
+		Type:       "modal",
+		CallbackID: CustomisationModalCallbackID,
+		Title:      plain(Truncate("Customisation", modalTitleLimit, modalTitleLimit-1)),
+		Submit:     plain("Save"),
+		Close:      plain("Cancel"),
+		Blocks:     blocks,
+	}
+}
+
+// label is the field's name, with a fallback so a modal built from a state this
+// build does not know about still renders rather than being rejected for an
+// empty text object.
+func (e CustomisationEmoji) label() string {
+	if l := strings.TrimSpace(e.Label); l != "" {
+		return l
+	}
+	return "Emoji"
+}
+
+// hint is the field's explanation, absent when there is none.
+func (e CustomisationEmoji) hint() *textObj {
+	h := strings.TrimSpace(e.Hint)
+	if h == "" {
+		return nil
+	}
+	// The shortcode is spelled out because the box takes a NAME and people type
+	// the emoji. Saying so at the field is cheaper than rejecting it after.
+	t := plain(h + " Type the shortcode, not the emoji.")
+	return &t
+}

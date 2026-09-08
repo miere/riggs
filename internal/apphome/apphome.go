@@ -79,6 +79,11 @@ type Deps struct {
 	Modals slack.ViewOpener
 	// Prompts is the wording store. Nil renders no prompt rows.
 	Prompts PromptStore
+	// Customisation is the presentation store: the reaction emojis and the
+	// banner. Nil drops the Customisation option from the menu — the same rule
+	// as everywhere else on this surface, that a control which cannot act is
+	// not drawn.
+	Customisation CustomisationStore
 	// Jobs is the schedule. Nil renders no Jobs section at all — which is not
 	// the same as an empty one: "nothing is scheduled" is a fact, and "this
 	// build cannot schedule anything" is a different fact.
@@ -175,6 +180,10 @@ func (p *Publisher) render(ctx context.Context, userID string) blockkit.Home {
 	// to restart. The update section needs a release AND something able to
 	// install it.
 	home := blockkit.Home{Version: p.deps.Version, Admin: admin && p.deps.Restart != nil}
+	// The banner is the one setting on this tab that everyone sees, admin or
+	// not: it is what the app LOOKS like, not something it lets you do.
+	home.HideBanner = p.deps.Customisation != nil && !p.deps.Customisation.ShowBanner()
+	home.ShowCustomisation = admin && p.deps.Customisation != nil && p.deps.Modals != nil
 	home.ShowJobs = admin && p.deps.Jobs != nil
 	home.Jobs = p.jobRows(ctx, admin)
 	home.Prompts = p.promptRows(admin)

@@ -32,6 +32,13 @@ const (
 	HomeMenuActionID = "app_menu"
 	// HomeRestartIntent is the menu's restart option.
 	HomeRestartIntent = "restart"
+	// HomeCustomiseIntent opens the Customisation modal: the reaction emojis
+	// and the banner switch.
+	//
+	// On this menu rather than as a row of its own, for the reason the modal's
+	// own comment gives: five settings nobody touches twice have no business
+	// occupying five lines above the jobs somebody reads every day.
+	HomeCustomiseIntent = "customise"
 
 	// HomePromptActionID is the action_id of the overflow beside each editable
 	// prompt. One id for all of them, like a digest's rows: the router matches
@@ -89,6 +96,22 @@ type Home struct {
 	// there a release to install", Admin is "may this viewer operate Riggs at
 	// all". Restarting is available whether or not anything is out of date.
 	Admin bool
+	// ShowCustomisation puts the Customisation option on the controls menu.
+	//
+	// Separate from Admin, like every other capability flag here: Admin is "may
+	// this viewer operate Riggs", and this is "is there anything behind that
+	// option to operate". A build with no settings store would otherwise draw a
+	// menu entry that opens nothing, which is the mistake this file keeps not
+	// making.
+	ShowCustomisation bool
+	// HideBanner drops the portrait.
+	//
+	// Negative, so the zero value draws it. Every other flag on this type is
+	// positive and it grated to write this one the other way — but a `Banner
+	// bool` would mean every construction of a Home that forgot to set it
+	// silently turned the portrait off, and the tests that build one directly
+	// are exactly where that would go unnoticed.
+	HideBanner bool
 	// ShowJobs draws the Jobs section, empty state included. It is separate
 	// from a non-empty Jobs slice because "no jobs are scheduled" is a fact
 	// worth rendering and "this build cannot schedule anything" is not.
@@ -174,7 +197,7 @@ func (h Home) Blocks() []any {
 	// still admin-only — a non-admin is shown no menu at all, not a menu whose
 	// one option refuses them.
 	if h.Admin {
-		version.Accessory = menuElem{
+		menu := menuElem{
 			Type:     "overflow",
 			ActionID: HomeMenuActionID,
 			Options: []menuOptionObj{
@@ -185,12 +208,24 @@ func (h Home) Blocks() []any {
 				{Text: plainVerbatim("New job…"), Value: HomeNewJobIntent},
 			},
 		}
+		if h.ShowCustomisation {
+			// Last, because it is the option somebody opens least often and
+			// the one whose effect is least urgent.
+			menu.Options = append(menu.Options,
+				menuOptionObj{Text: plainVerbatim("Customisation…"), Value: HomeCustomiseIntent})
+		}
+		version.Accessory = menu
 	}
 
-	blocks := []any{
-		imageBlock{Type: "image", ImageURL: HomePortraitURL, AltText: HomePortraitAlt},
-		version,
+	// The version line is always drawn; the portrait is not. Hiding the banner
+	// must not leave a tab with nothing at the top of it — what is being turned
+	// off is the picture, not the identity.
+	var blocks []any
+	if !h.HideBanner {
+		blocks = append(blocks,
+			imageBlock{Type: "image", ImageURL: HomePortraitURL, AltText: HomePortraitAlt})
 	}
+	blocks = append(blocks, version)
 	blocks = append(blocks, h.jobBlocks()...)
 	blocks = append(blocks, h.promptBlocks()...)
 	if h.Update == nil {

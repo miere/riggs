@@ -28,22 +28,48 @@ func TestDaemonRegistersTheDigestActions(t *testing.T) {
 	got := router.Routes()
 	// Sorted, as Routes() reports them.
 	want := []string{
+		// The ticket ask card's link button, declared as deliberately not acted
+		// on rather than left out. An unregistered pair now means "Riggs does
+		// not understand this" and earns a disregard reaction (§7f); a link
+		// Slack opened itself is not that.
+		ticket.AskActionID + "/",
 		// The ticket digest rows' menu. "Assign to Me" is absent because it is
 		// not rendered: the verb exists, the option deliberately does not.
 		ticket.BulkActionID + "/" + ticket.IntentAskAssist,
+		ticket.BulkActionID + "/" + ticket.IntentOpenBrowser,
+		pullrequest.AskOpenActionID + "/",
 		// The ask-review card's Approve, which leaves no comment.
 		pullrequest.AskActionID + "/" + pullrequest.IntentApprove,
 		// The pull-request digest rows' menu.
 		pullrequest.BulkActionID + "/" + pullrequest.IntentApproveMerge,
 		pullrequest.BulkActionID + "/" + pullrequest.IntentAskReview,
+		pullrequest.BulkActionID + "/" + pullrequest.IntentOpenBrowser,
 	}
-	if len(got) != len(want) {
-		t.Fatalf("routes = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("routes = %v, want %v", got, want)
+	assertRoutes(t, got, want)
+}
+
+// The link buttons are REGISTERED, and registered as ignored. The distinction
+// is invisible in Routes() and is the whole point of the entry: an ignored
+// control gets no reaction at all, where an unrouted one gets a disregard.
+func TestTheLinkButtonsAreIgnoredRatherThanUnrouted(t *testing.T) {
+	a := &Application{cfg: &config.Config{}}
+	router := daemon.NewRouter()
+	a.registerInteractions(router, slack.Credentials{Profile: "riggs"})
+
+	for _, in := range []slack.Interaction{
+		{ActionID: pullrequest.BulkActionID, Intent: pullrequest.IntentOpenBrowser},
+		{ActionID: ticket.BulkActionID, Intent: ticket.IntentOpenBrowser},
+		{ActionID: pullrequest.AskOpenActionID},
+		{ActionID: ticket.AskActionID},
+	} {
+		if got := router.Lookup(in); got != daemon.Ignored {
+			t.Fatalf("Lookup(%s/%s) = %v, want Ignored", in.ActionID, in.Intent, got)
 		}
+	}
+	// And something genuinely retired still reads as unrouted, so the two have
+	// not been collapsed.
+	if got := router.Lookup(slack.Interaction{ActionID: "pr_bulk_overflow", Intent: "retired"}); got != daemon.Unrouted {
+		t.Fatalf("Lookup(retired) = %v, want Unrouted", got)
 	}
 }
 
@@ -130,9 +156,11 @@ func TestDaemonRegistersTheHomeControls(t *testing.T) {
 	a.registerHomeInteractions(router, apphome.New(apphome.Deps{Logger: quietLogger()}))
 
 	want := []string{
+		blockkit.HomeMenuActionID + "/" + blockkit.HomeCustomiseIntent,
 		blockkit.HomeMenuActionID + "/" + blockkit.HomeRestartIntent,
 		blockkit.HomePromptActionID + "/" + blockkit.HomePromptEditIntent,
 		blockkit.HomePromptActionID + "/" + blockkit.HomePromptResetIntent,
+		blockkit.CustomisationModalCallbackID + "/" + slack.ViewSubmitIntent,
 		blockkit.HomeUpdateActionID + "/" + blockkit.HomeUpdateIntent,
 		blockkit.PromptModalCallbackID + "/" + slack.ViewSubmitIntent,
 	}
@@ -189,7 +217,7 @@ func TestDaemonRegistersTheJobControls(t *testing.T) {
 }
 
 // `New job…` and Restart share the controls menu, so they must not collide.
-func TestTheControlsMenuRoutesBothOfItsOptions(t *testing.T) {
+func TestTheControlsMenuRoutesEveryOneOfItsOptions(t *testing.T) {
 	a := &Application{cfg: &config.Config{}}
 	router := daemon.NewRouter()
 	home := apphome.New(apphome.Deps{Logger: quietLogger()})
@@ -205,8 +233,8 @@ func TestTheControlsMenuRoutesBothOfItsOptions(t *testing.T) {
 			menu++
 		}
 	}
-	if menu != 2 {
-		t.Fatalf("controls-menu routes = %d, want Restart and New job: %v", menu, got)
+	if menu != 3 {
+		t.Fatalf("controls-menu routes = %d, want Restart, New job and Customisation: %v", menu, got)
 	}
 }
 
