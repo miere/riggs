@@ -229,7 +229,16 @@ func (p *Publisher) SaveJob(ctx context.Context, userID, original, name, command
 	if err != nil {
 		return err
 	}
-	job, err := schedule.NewJob(strings.TrimSpace(name), schedule.SplitArgs(command), spec, d, true)
+	// The modal is one text field, so unlike `riggs jobs add` there is no shell
+	// upstream to have worked the quoting out already. SplitArgs does it here,
+	// and an unterminated quote is reported rather than guessed at — the form
+	// comes back with the message, which is the only chance to say so before a
+	// wrong query starts running every three minutes.
+	argv, err := schedule.SplitArgs(command)
+	if err != nil {
+		return err
+	}
+	job, err := schedule.NewJob(strings.TrimSpace(name), argv, spec, d, true)
 	if err != nil {
 		return err
 	}
