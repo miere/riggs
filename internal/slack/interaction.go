@@ -137,3 +137,18 @@ func ViewInput(cb slackgo.InteractionCallback, blockID, actionID string) string 
 	}
 	return block[actionID].Value
 }
+
+// ViewSelect reads one select block's chosen value out of a submitted modal.
+//
+// A separate function from ViewInput because Slack reports the two differently:
+// a text input's answer is in `value` and a select's is in `selected_option`,
+// and a select read through ViewInput comes back empty — which looks exactly
+// like a field the user left blank. That is a bug that cannot fail loudly, so
+// the two reads are kept apart rather than merged behind a fallback.
+func ViewSelect(cb slackgo.InteractionCallback, blockID, actionID string) string {
+	block, ok := cb.View.State.Values[blockID]
+	if !ok {
+		return ""
+	}
+	return block[actionID].SelectedOption.Value
+}

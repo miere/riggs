@@ -11,6 +11,7 @@ import (
 	"github.com/miere/riggs-mcp/internal/ai"
 	"github.com/miere/riggs-mcp/internal/apphome"
 	"github.com/miere/riggs-mcp/internal/blockkit"
+	"github.com/miere/riggs-mcp/internal/comms"
 	"github.com/miere/riggs-mcp/internal/config"
 	"github.com/miere/riggs-mcp/internal/daemon"
 	"github.com/miere/riggs-mcp/internal/notify"
@@ -87,8 +88,43 @@ func (a *Application) runDaemon(ctx context.Context) error {
 	return daemon.New(listener, router, creds.Profile, logger).
 		WithAppHome(home).
 		WithReporter(&clickReporter{api: slack.NewAPI(), creds: creds}).
+		WithStates(comms.New(slack.NewAPI(), configEmojis{cfg: a.cfg}, logger),
+			slack.Target{Profile: creds.Profile, BotToken: creds.BotToken}).
 		Run(ctx)
 }
+
+// configEmojis maps a communication state onto the config setting that names
+// its emoji.
+//
+// The mapping lives HERE rather than in either package it joins. config knows
+// there are four named emoji settings and nothing about what a task in progress
+// looks like; comms knows the states and nothing about YAML. Putting the switch
+// in config would mean config importing the state names, which is the wrong
+// direction — a domain depends on its settings, never the reverse (§5).
+//
+// It is a switch rather than a string conversion even though the two vocabularies
+// spell all four identically today. That agreement is a coincidence of naming,
+// not a contract, and a `config.ReactionID(s)` would turn the first divergence
+// into a silently unconfigurable state rather than a compile error.
+type configEmojis struct{ cfg *config.Config }
+
+// Emoji implements comms.Emojis.
+func (c configEmojis) Emoji(s comms.State) string {
+	switch s {
+	case comms.Acknowledgement:
+		return c.cfg.ReactionEmoji(config.ReactionAcknowledgement)
+	case comms.Disregard:
+		return c.cfg.ReactionEmoji(config.ReactionDisregard)
+	case comms.Success:
+		return c.cfg.ReactionEmoji(config.ReactionSuccess)
+	case comms.Warning:
+		return c.cfg.ReactionEmoji(config.ReactionWarning)
+	}
+	return ""
+}
+
+// All implements comms.Emojis.
+func (c configEmojis) All() []string { return c.cfg.ReactionEmojis() }
 
 // scheduler opens the ledger and assembles the job loop.
 //
@@ -183,8 +219,11 @@ func (a *Application) appHome(creds slack.Credentials, logger *slog.Logger,
 		// The loaded config IS the store. An edit therefore lands in the file
 		// and in the struct this process is already reading from, which is what
 		// makes a reworded prompt take effect on the next click rather than the
+		// next restart. The emojis and the banner are the same store for the
+		// same reason: a changed tick has to reach the next approval, not the
 		// next restart.
-		Prompts: a.cfg,
+		Prompts:       a.cfg,
+		Customisation: a.cfg,
 		// Typed nils would satisfy the interfaces and then panic on first use,
 		// so an unavailable ledger leaves the fields genuinely empty and the
 		// Jobs section is not drawn at all.
@@ -213,6 +252,30 @@ func (a *Application) registerHomeInteractions(router *daemon.Router, home *apph
 	router.Handle(blockkit.HomeMenuActionID, blockkit.HomeRestartIntent,
 		daemon.HandlerFunc(func(ctx context.Context, in slack.Interaction) error {
 			return home.Restart(ctx, in.UserID)
+		}))
+
+	router.Handle(blockkit.HomeMenuActionID, blockkit.HomeCustomiseIntent,
+		daemon.HandlerFunc(func(ctx context.Context, in slack.Interaction) error {
+			return home.Customise(ctx, in.UserID, in.TriggerID)
+		}))
+
+	// The Customisation modal coming back. Unlike the prompt and job editors it
+	// carries no private_metadata: the form IS the item, so every field is read
+	// by (block_id, action_id) and nothing identifies "which one".
+	router.Handle(blockkit.CustomisationModalCallbackID, slack.ViewSubmitIntent,
+		daemon.HandlerFunc(func(ctx context.Context, in slack.Interaction) error {
+			emojis := map[string]string{}
+			for _, spec := range config.ReactionSpecs() {
+				id := string(spec.ID)
+				emojis[id] = slack.ViewInput(in.Raw,
+					blockkit.CustomisationEmojiBlockPrefix+id, blockkit.CustomisationActionID)
+			}
+			// ViewSelect, not ViewInput: a select reports its answer under
+			// `selected_option`, and reading it as a text input comes back
+			// empty — indistinguishable from a field left blank.
+			banner := slack.ViewSelect(in.Raw,
+				blockkit.CustomisationBannerBlockID, blockkit.CustomisationActionID)
+			return home.SaveCustomisation(ctx, in.UserID, emojis, banner)
 		}))
 
 	// Which prompt a click is about rides in the row's block_id, exactly as a
@@ -469,10 +532,19 @@ func (a *Application) registerInteractions(router *daemon.Router, creds slack.Cr
 			return err
 		}))
 
-	// IntentOpenBrowser is deliberately unregistered, on both digests. Slack
-	// opens the link itself; the interaction it also sends has nothing to do,
-	// and a handler that exists only to return nil is worse than the router's
-	// own "no handler" log line.
+	// The link buttons, declared as deliberately not acted on. Slack opens the
+	// URL itself and the interaction it nevertheless raises has nothing to do.
+	//
+	// They used to be left out of the table entirely, with a comment saying a
+	// handler that only returns nil is worse than the router's own "no handler"
+	// line. That held until an unregistered pair started MEANING something:
+	// Riggs now answers one with a disregard reaction (§7f), and stamping a
+	// zipper-mouth on the digest every time somebody opens a pull request in
+	// their browser is not what that state is for.
+	router.Ignore(pullrequest.BulkActionID, pullrequest.IntentOpenBrowser)
+	router.Ignore(ticket.BulkActionID, ticket.IntentOpenBrowser)
+	router.Ignore(pullrequest.AskOpenActionID, "")
+	router.Ignore(ticket.AskActionID, "")
 }
 
 // settle records what an approval did to the digest.
