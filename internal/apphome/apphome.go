@@ -84,6 +84,13 @@ type Deps struct {
 	// as everywhere else on this surface, that a control which cannot act is
 	// not drawn.
 	Customisation CustomisationStore
+	// Configuration is the job settings store: how long a run of each kind may
+	// take. Nil drops the Configuration option from the menu, on the same rule
+	// as Customisation — a control that cannot act is not drawn.
+	Configuration ConfigurationStore
+	// JQL proves a query before a ticket digest is saved with it. Nil skips the
+	// check, which is what a machine with no Jira configured looks like.
+	JQL JQLChecker
 	// Jobs is the schedule. Nil renders no Jobs section at all — which is not
 	// the same as an empty one: "nothing is scheduled" is a fact, and "this
 	// build cannot schedule anything" is a different fact.
@@ -184,6 +191,7 @@ func (p *Publisher) render(ctx context.Context, userID string) blockkit.Home {
 	// not: it is what the app LOOKS like, not something it lets you do.
 	home.HideBanner = p.deps.Customisation != nil && !p.deps.Customisation.ShowBanner()
 	home.ShowCustomisation = admin && p.deps.Customisation != nil && p.deps.Modals != nil
+	home.ShowConfiguration = admin && p.deps.Configuration != nil && p.deps.Modals != nil
 	home.ShowJobs = admin && p.deps.Jobs != nil
 	home.Jobs = p.jobRows(ctx, admin)
 	home.Prompts = p.promptRows(admin)

@@ -15,7 +15,100 @@ import (
 // kept in step with it.
 type Job = notify.Job
 
-// DefaultTimeout bounds a run whose job did not say.
+// A job has a KIND, and the kind is the whole definition.
+//
+// It used to be a name and a command line. That was defensible while the job
+// table was a like-for-like port of Murtaugh's cron — the argv was the thing
+// being migrated, byte for byte — and it stopped being defensible the moment an
+// admin had to configure one from Slack. The Home tab could offer only a free
+// text box saying "arguments for riggs", into which the operator was expected
+// to type `jira tickets --bulk 'project = NYX AND labels = "ai-able"'` from
+// memory, correctly, quoting and all, in a single-line Slack input.
+//
+// There are two things Riggs schedules, they have three parameters between
+// them, and every one of those parameters has a right answer that a form can
+// ask for directly. So the form asks: a GitHub login, or a JQL query, and a
+// cadence. The argument list is DERIVED from the answer, here, in the one place
+// that knows the spelling — which is also what makes the CLI's contract
+// (internal/frontends/cli) enforceable rather than a comment asking people to
+// be careful.
+//
+// The cost is that Riggs can no longer schedule an arbitrary command, and that
+// is not a loss being tolerated: it is the feature. A scheduler that runs
+// whatever argv a Slack modal contained is one where a typo runs every three
+// minutes forever and the only symptom is a red line on a tab nobody opened.
+type Kind string
+
+const (
+	// KindGitHubReviews is the pull-request digest: `git pr --bulk <login>`.
+	KindGitHubReviews Kind = "github-reviews"
+	// KindJiraTickets is the ticket digest: `jira tickets --bulk <jql>`.
+	KindJiraTickets Kind = "jira-tickets"
+)
+
+// The parameter names each kind declares. They are the keys of Job.Params and
+// they are stored in the ledger, so they are constants rather than literals
+// spelled out at each use: a typo in one of these is a job that loads, renders,
+// and then runs with an empty query.
+const (
+	// ParamLogin is whose review queue a GitHub digest fetches.
+	ParamLogin = "login"
+	// ParamJQL is the query a ticket digest advertises the results of.
+	ParamJQL = "jql"
+)
+
+// KindSpec describes one kind for the surfaces that have to render it.
+//
+// A table rather than a switch in each caller, for the reason config.Prompts is
+// one: the Home tab, the Configuration modal and the CLI all need the same
+// three facts about a kind, and three copies of them is three chances to
+// disagree about what a job is called.
+type KindSpec struct {
+	// Kind is the stored token.
+	Kind Kind
+	// Label is what a human calls it: "Pull Requests — Reviewer".
+	Label string
+	// Param is the one parameter this kind takes beyond its schedule.
+	Param string
+	// ParamLabel names that parameter on a form.
+	ParamLabel string
+}
+
+// kinds is the table. Order is rendering order, and it is deliberate: the
+// GitHub digest is the one job every install has.
+var kinds = []KindSpec{
+	{
+		Kind:       KindGitHubReviews,
+		Label:      "Pull Requests — Reviewer",
+		Param:      ParamLogin,
+		ParamLabel: "GitHub username",
+	},
+	{
+		Kind:       KindJiraTickets,
+		Label:      "Jira tickets",
+		Param:      ParamJQL,
+		ParamLabel: "JQL",
+	},
+}
+
+// Kinds lists every kind of job this build can run.
+func Kinds() []KindSpec { return append([]KindSpec(nil), kinds...) }
+
+// LookupKind finds a kind's spec, and reports false for one this build does not
+// know — a row written by a newer Riggs, or a hand-edited ledger.
+func LookupKind(kind Kind) (KindSpec, bool) {
+	for _, spec := range kinds {
+		if spec.Kind == kind {
+			return spec, true
+		}
+	}
+	return KindSpec{}, false
+}
+
+// KindOf reads a job's kind.
+func KindOf(job Job) Kind { return Kind(job.Type) }
+
+// DefaultTimeout bounds a run whose kind has no configured timeout.
 //
 // Two minutes, which is what Murtaugh gave both of its jobs. It is enough for a
 // digest pass — one GitHub search, a handful of conditional reads, one Slack
@@ -23,12 +116,10 @@ type Job = notify.Job
 // next tick for the rest of the afternoon.
 const DefaultTimeout = 2 * time.Minute
 
-// MaxTimeout is the longest a job may be given.
-//
-// An hour. Not a technical limit: a job that needs longer than an hour is not a
-// scheduled task, it is a service, and it should be supervised as one rather
-// than restarted from a ticker every time it fails to finish.
-const MaxTimeout = time.Hour
+// There is deliberately no MaxTimeout here any more. The upper bound belongs
+// where the value enters the process — config.MaxJobTimeout, checked at the
+// modal, where somebody is standing to be told — and a second copy in this
+// package would be an unreachable check that reads like a live one.
 
 // namePattern is what a job may be called.
 //
@@ -49,191 +140,138 @@ func ValidateName(name string) error {
 	return nil
 }
 
-// NewJob validates and assembles a job from what a modal or a command line
-// supplied.
+// GitHubJobName is what the pull-request digest is called when Riggs creates it.
 //
-// args is the argument list for the riggs binary, already split. spec is the
-// schedule in either dialect. A zero timeout takes DefaultTimeout.
+// A constant because that job is a SINGLETON: there is one review queue, it is
+// the admin's, and the Home tab configures it rather than creating instances of
+// it. A second one for a colleague's login would be a different feature —
+// per-user jobs, configured by that user — and inventing half of it here by
+// letting the name vary would leave two rows silently competing to write the
+// same digest.
 //
-// Everything is checked here, in one place, because there are two front doors —
-// the Home tab's modal and `riggs jobs add` — and a rule enforced in only one
-// of them is a rule that is not enforced.
-func NewJob(name string, args []string, spec string, timeout time.Duration, enabled bool) (Job, error) {
+// It is only used for a job Riggs creates from scratch. A job adopted from an
+// older ledger keeps whatever it was already called: renaming a row on an
+// upgrade would break every log line about it for the sake of tidiness.
+const GitHubJobName = "pull-requests-reviewer"
+
+// NewGitHubJob assembles the pull-request digest for one login.
+func NewGitHubJob(name, login, spec string) (Job, error) {
+	login = strings.TrimSpace(login)
+	if login == "" {
+		return Job{}, fmt.Errorf("a GitHub username is required: it is whose review queue this fetches")
+	}
+	if strings.ContainsFunc(login, unicode.IsSpace) {
+		// Caught here rather than by GitHub's 404 three minutes later. A login
+		// with a space in it is a pasted profile URL or two names in one box,
+		// and both are worth saying out loud at the form.
+		return Job{}, fmt.Errorf("%q is not a GitHub username: it has a space in it", login)
+	}
+	return newJob(name, KindGitHubReviews, map[string]string{ParamLogin: login}, spec)
+}
+
+// NewJiraJob assembles the ticket digest for one query.
+func NewJiraJob(name, jql, spec string) (Job, error) {
+	jql = strings.TrimSpace(jql)
+	if jql == "" {
+		return Job{}, fmt.Errorf("a JQL query is required: it is what decides which tickets are advertised")
+	}
+	return newJob(name, KindJiraTickets, map[string]string{ParamJQL: jql}, spec)
+}
+
+// newJob is the shared half: the checks that are the same whatever the kind.
+//
+// Everything is checked in one place because there are two front doors — the
+// Home tab's modals and `riggs jobs add` — and a rule enforced in only one of
+// them is a rule that is not enforced.
+//
+// A new job is always ENABLED. The old signature took it as a parameter and
+// both callers passed true; the one place the answer is genuinely "no" is an
+// edit of an existing job, where it is carried over from the row rather than
+// asked for (see apphome.saveJob), because Disable is a menu control and not a
+// form field.
+func newJob(name string, kind Kind, params map[string]string, spec string) (Job, error) {
+	name = strings.TrimSpace(name)
 	if err := ValidateName(name); err != nil {
 		return Job{}, err
 	}
-	if len(args) == 0 {
-		return Job{}, fmt.Errorf("job %s has nothing to run (e.g. `git pr --bulk miere`)", name)
+	if _, known := LookupKind(kind); !known {
+		return Job{}, fmt.Errorf("job %s: %q is not a kind of job this build runs", name, kind)
 	}
 	if _, err := Parse(spec); err != nil {
 		return Job{}, fmt.Errorf("job %s: %w", name, err)
 	}
-	switch {
-	case timeout == 0:
-		timeout = DefaultTimeout
-	case timeout < 0:
-		return Job{}, fmt.Errorf("job %s: a timeout cannot be negative", name)
-	case timeout > MaxTimeout:
-		return Job{}, fmt.Errorf("job %s: %s is longer than the %s maximum; something that runs that long is a service, not a job",
-			name, timeout, MaxTimeout)
-	}
 	return Job{
-		Name: name, Args: args, Spec: strings.TrimSpace(spec),
-		Timeout: timeout, Enabled: enabled,
+		Name: name, Type: string(kind), Params: params,
+		Spec: strings.TrimSpace(spec), Enabled: true,
 	}, nil
 }
 
-// SplitArgs reads a command line into an argument list, honouring quotes.
-//
-// It used to split on whitespace and nothing else, on the reasoning that
-// anything needing more wanted a wrapper script. That reasoning was wrong about
-// the one command Riggs actually schedules. A ticket digest IS its JQL —
-//
-//	jira tickets --bulk 'project = NYX AND labels = "ai-able" AND status = "Ready"'
-//
-// — and JQL has its own quoting, which it needs, for values with spaces in
-// them. Under the old rule that line arrived as twenty-two arguments and the
-// child process died on `unexpected argument "="`. There is no wrapper script
-// that fixes that, because the thing being mangled is the argument, not the
-// command around it.
-//
-// The dialect is the one everybody already knows, and no more of it:
-//
-//   - single quotes are literal, right through to the closing quote
-//   - double quotes take a backslash escape for `"` and `\`; any other
-//     backslash inside them stays a backslash, so a Windows path or a JQL
-//     regex does not quietly lose one
-//   - outside quotes, a backslash escapes the next character
-//   - unquoted whitespace separates arguments, and nothing else does
-//
-// No expansion of any kind: no `$VAR`, no globs, no backticks, no `#` comment.
-// A job is argv handed to exec (§exec.go), never a line handed to a shell, and
-// a quoting dialect that LOOKS like sh while silently declining to expand is
-// worse than one that plainly does not.
-//
-// An unterminated quote is an error rather than a best guess. The guess is
-// always "the operator meant the rest of the line", which is right about half
-// the time and silently ships a wrong query the other half.
-//
-// A leading `riggs` is dropped. The binary is not the operator's to choose —
-// every job runs THIS build, at the path this daemon was started from — and
-// typing the whole command Murtaugh used to run is the obvious thing to do.
-func SplitArgs(command string) ([]string, error) {
-	var (
-		args    []string
-		cur     strings.Builder
-		started bool // distinguishes an empty argument ('') from no argument
-	)
-	push := func() {
-		if started {
-			args = append(args, cur.String())
-			cur.Reset()
-			started = false
-		}
+// Param reads one of a job's parameters.
+func Param(job Job, name string) string {
+	if job.Params == nil {
+		return ""
 	}
-
-	runes := []rune(command)
-	for i := 0; i < len(runes); i++ {
-		c := runes[i]
-		switch {
-		case unicode.IsSpace(c):
-			push()
-
-		case c == '\'':
-			started = true
-			end := indexRune(runes, i+1, '\'')
-			if end < 0 {
-				return nil, unterminated('\'', command)
-			}
-			cur.WriteString(string(runes[i+1 : end]))
-			i = end
-
-		case c == '"':
-			started = true
-			j := i + 1
-			for ; j < len(runes) && runes[j] != '"'; j++ {
-				// Only `"` and `\` are escapable in here. Anything else keeps
-				// its backslash, so `\d` survives into a regex intact.
-				if runes[j] == '\\' && j+1 < len(runes) &&
-					(runes[j+1] == '"' || runes[j+1] == '\\') {
-					j++
-				}
-				cur.WriteRune(runes[j])
-			}
-			if j >= len(runes) {
-				return nil, unterminated('"', command)
-			}
-			i = j
-
-		case c == '\\':
-			if i+1 >= len(runes) {
-				return nil, fmt.Errorf("this command ends in a backslash with nothing to escape: %s", command)
-			}
-			started = true
-			i++
-			cur.WriteRune(runes[i])
-
-		default:
-			started = true
-			cur.WriteRune(c)
-		}
-	}
-	push()
-	return TrimBinary(args), nil
+	return job.Params[name]
 }
 
-// indexRune finds want in runes at or after from, or -1.
-func indexRune(runes []rune, from int, want rune) int {
-	for i := from; i < len(runes); i++ {
-		if runes[i] == want {
-			return i
-		}
-	}
-	return -1
-}
-
-// unterminated names the quote that was never closed. The message quotes the
-// character itself, because "unterminated quote" on a line containing both
-// kinds leaves the reader to guess which one this parser cared about.
-func unterminated(quote rune, command string) error {
-	return fmt.Errorf("this command has an unterminated %c quote: %s", quote, command)
-}
-
-// TrimBinary drops a leading `riggs` from an argument list.
+// Args renders the argument list a job runs as.
 //
-// Split out from SplitArgs because `riggs jobs add` never goes through a
-// splitter at all: the shell has already produced the argv, correctly, and
-// re-joining it to split it again is precisely how the JQL used to be lost.
-// The one thing that rule still has to do is forgive the operator for typing
-// the binary's name, so that is all that is left here.
-func TrimBinary(args []string) []string {
-	if len(args) > 0 && strings.EqualFold(args[0], "riggs") {
-		return args[1:]
+// This is the ONLY place the command spellings are written down for the
+// scheduler, and they are a contract with internal/frontends/cli: the child
+// process resolves `git pr --bulk` and `jira tickets --bulk` by exact match, so
+// a rename on either side does not fail to build — it fails at 3am, in a job,
+// with "unknown command".
+//
+// The JQL goes in as ONE argument, whatever is in it. That is the whole reason
+// this function exists rather than a stored string being split: a query is full
+// of spaces and quotes, and every layer that re-splits it is a layer that can
+// lose it.
+func Args(job Job) ([]string, error) {
+	switch KindOf(job) {
+	case KindGitHubReviews:
+		login := Param(job, ParamLogin)
+		if login == "" {
+			return nil, fmt.Errorf("job %s has no GitHub username to fetch reviews for", job.Name)
+		}
+		return []string{"git", "pr", "--bulk", login}, nil
+	case KindJiraTickets:
+		jql := Param(job, ParamJQL)
+		if jql == "" {
+			return nil, fmt.Errorf("job %s has no JQL query to run", job.Name)
+		}
+		return []string{"jira", "tickets", "--bulk", jql}, nil
+	default:
+		return nil, fmt.Errorf("job %s is of kind %q, which this build does not run", job.Name, job.Type)
 	}
-	return args
 }
 
 // Command renders a job's arguments as the line somebody would type.
 //
-// Quoted where quoting is needed, and that is not cosmetic: this string is what
-// the Home tab's edit modal is PREFILLED with (internal/apphome/jobs.go), and
-// whatever comes back from that form goes through SplitArgs. Rendered bare, a
-// job whose JQL was right would come apart the first time somebody opened it to
-// change the schedule and pressed Save — a silent edit, to a field nobody
-// touched. Round-tripping through SplitArgs is the property being defended.
+// For display only, now that nothing reads a command line back in. It is still
+// quoted properly — a JQL rendered bare on the Home tab reads as several
+// arguments, and the row is the one place an operator checks what a job
+// actually runs.
+//
+// A job whose kind this build does not know renders as empty rather than as an
+// error string. The row above it already says the kind is unknown; a second
+// copy of the same news in the code slot helps nobody.
 func Command(job Job) string {
-	quoted := make([]string, len(job.Args))
-	for i, a := range job.Args {
+	args, err := Args(job)
+	if err != nil {
+		return ""
+	}
+	quoted := make([]string, len(args))
+	for i, a := range args {
 		quoted[i] = QuoteArg(a)
 	}
 	return strings.Join(quoted, " ")
 }
 
-// QuoteArg renders one argument so SplitArgs reads it back unchanged.
+// QuoteArg renders one argument the way a shell would need it written.
 //
-// Only the four characters SplitArgs treats specially force quoting —
-// whitespace, both quotes, and the backslash — so ordinary tokens stay bare and
-// the line still reads like something a person typed. Single quotes are
+// Only the four characters that would change how a reader parses the line force
+// quoting — whitespace, both quotes, and the backslash — so ordinary tokens stay
+// bare and the line still reads like something a person typed. Single quotes are
 // preferred because JQL's own quoting is double, and `'...'` leaves it visible
 // rather than burying it under backslashes.
 func QuoteArg(arg string) string {
@@ -251,7 +289,7 @@ func QuoteArg(arg string) string {
 	return "'" + strings.ReplaceAll(arg, "'", `'\''`) + "'"
 }
 
-// needsQuoting reports whether c would change how SplitArgs reads a token.
+// needsQuoting reports whether c would change how a reader parses a token.
 func needsQuoting(c rune) bool {
 	return unicode.IsSpace(c) || c == '\'' || c == '"' || c == '\\'
 }

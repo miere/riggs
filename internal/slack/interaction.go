@@ -152,3 +152,28 @@ func ViewSelect(cb slackgo.InteractionCallback, blockID, actionID string) string
 	}
 	return block[actionID].SelectedOption.Value
 }
+
+// ViewChecked reports whether one checkbox option was ticked in a submitted
+// modal.
+//
+// The third reader, and a third shape again: a checkbox group reports
+// `selected_options`, a LIST, and an unticked group reports an empty one. That
+// last part is the whole reason this cannot be folded into ViewSelect — for a
+// select, empty means "not answered"; for a checkbox it means "answered, no",
+// which is a decision the admin made and the handler has to act on.
+//
+// The option's own value is matched rather than "is anything selected", so a
+// group that grows a second option later does not silently start reading as the
+// first one.
+func ViewChecked(cb slackgo.InteractionCallback, blockID, actionID, option string) bool {
+	block, ok := cb.View.State.Values[blockID]
+	if !ok {
+		return false
+	}
+	for _, selected := range block[actionID].SelectedOptions {
+		if selected.Value == option {
+			return true
+		}
+	}
+	return false
+}

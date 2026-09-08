@@ -28,11 +28,19 @@ const (
 	// HomeJobBlockPrefix namespaces a job row's block_id.
 	HomeJobBlockPrefix = "job:"
 
-	// HomeNewJobIntent is the controls-menu option that opens an empty job
-	// editor. It sits on `app_menu` beside Restart because it is about Riggs
-	// rather than about any one job — there is no row to hang it off when there
-	// are no jobs yet, which is exactly when it is needed most.
-	HomeNewJobIntent = "new_job"
+	// The two controls-menu options that create a job. They sit on `app_menu`
+	// beside Restart because they are about Riggs rather than about any one job
+	// — there is no row to hang them off when there are no jobs yet, which is
+	// exactly when they are needed most.
+	//
+	// Two of them because there are two kinds of job and they are not the same
+	// shape of thing (§9d). The GitHub digest is a SINGLETON — one review queue,
+	// the admin's — so its option CONFIGURES the one that exists, checkbox and
+	// all; the ticket digest is one job per query, so its option creates
+	// another. One "New job…" leading to a form with a free-text command box
+	// served neither.
+	HomeGitHubJobIntent  = "github_job"
+	HomeNewJiraJobIntent = "new_jira_job"
 
 	// homeJobCommandLimit is how much of a job's command line the row shows.
 	homeJobCommandLimit = 90
@@ -48,9 +56,21 @@ const (
 type HomeJob struct {
 	// ID is the job's name, and its identity in the block_id.
 	ID string
+	// Kind is what sort of job it is, already in human words: "Jira tickets".
+	//
+	// Rendered because a typed job's parameter no longer says it. `miere` on a
+	// row is a GitHub login only if you already know which job you are looking
+	// at, and a query beginning `project = NYX` could be several things. It is
+	// empty for a job whose kind this build does not know, which the row then
+	// says outright — see text().
+	Kind string
 	// Schedule is the cadence as written: "3m", "0 9 * * 1-5".
 	Schedule string
 	// Command is the argument list as a line: "git pr --bulk miere".
+	//
+	// Still the argv rather than the parameter alone, because the row is where
+	// an operator checks what a job actually runs — and the answer to "why is
+	// this failing" is more often in the command than in the schedule.
 	Command string
 	// Status is the already-rendered outcome line, marker and all.
 	Status string
@@ -77,8 +97,9 @@ func (h Home) jobBlocks() []any {
 		// fact worth rendering — the alternative reads as a section that failed
 		// to load, and the way to fix it is in the menu directly above.
 		blocks = append(blocks, contextBlock{
-			Type:     "context",
-			Elements: []textObj{mrkdwn("Nothing is scheduled. Use *New job…* in the menu above.")},
+			Type: "context",
+			Elements: []textObj{mrkdwn(
+				"Nothing is scheduled. Use *Configure GitHub Jobs…* or *Configure a New Jira Job…* in the menu above.")},
 		})
 		return blocks
 	}
@@ -116,6 +137,15 @@ func (j HomeJob) block() accessorySection {
 // text is the row body: what the job is, what it runs, and how it went.
 func (j HomeJob) text() string {
 	name := "*" + escapeMrkdwn(j.ID) + "*"
+	if kind := strings.TrimSpace(j.Kind); kind != "" {
+		name += "  " + escapeMrkdwn(kind)
+	} else {
+		// A job stored by a newer Riggs, or a hand-edited row. Said on the row
+		// rather than left as a gap: every control on this menu still works,
+		// including Run now, and the run will fail with the same news at three
+		// in the morning if the row does not say it here.
+		name += "  " + MarkerWarning + " unknown kind"
+	}
 	if schedule := strings.TrimSpace(j.Schedule); schedule != "" {
 		name += "  _" + escapeMrkdwn(schedule) + "_"
 	}

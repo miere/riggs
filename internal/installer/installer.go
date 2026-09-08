@@ -117,7 +117,7 @@ func (i *Installer) Run(ctx context.Context) error {
 	// it: an install that ends silently leaves the impression that the digests
 	// are already running.
 	i.p.Say("Nothing is scheduled yet — add jobs from the App Home tab, or with")
-	i.p.Say("`riggs jobs add <name> <schedule> <command...>`.")
+	i.p.Say("`riggs jobs add github|jira <name> <schedule> <login|jql>`.")
 	return nil
 }
 

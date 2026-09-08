@@ -125,72 +125,180 @@ func (m PromptModal) label() string {
 	return "Prompt"
 }
 
-// The job editor: the second modal, and the one that creates something.
+// The job editors: one modal per KIND of job, where there used to be one modal
+// for all of them (§9d).
 //
-// It shares the prompt editor's shape — an input block per field, the identity
-// in `private_metadata`, a callback_id the router matches exactly — and differs
-// in the one way that matters: a NEW job has no identity yet, so the name is a
-// field. On an existing job it is not, because a name is what the ledger keys
-// on and what the row's block_id carries, and "rename" is a different operation
-// from "edit" that nobody has asked for.
+// The old one had a Command field — "arguments for riggs" — and it was the
+// wrong question to ask a person standing in a Slack modal. It made the admin
+// the parser: they had to know that the ticket digest is spelled
+// `jira tickets --bulk`, that the JQL is one argument however many spaces are
+// in it, and that a typo produces a job which fails every three minutes into a
+// log. Riggs knows all three of those things. So each kind gets a form that
+// asks for the ONE thing Riggs cannot know — a GitHub login, a query — and
+// builds the command itself (schedule.Args).
+//
+// The two forms are deliberately not one with a kind selector. They are
+// different shapes, not different values of the same shape: the GitHub digest
+// is a singleton with a checkbox that creates or destroys it, and the ticket
+// digest is one job per query with a name of its own. A selector would have to
+// swap half the fields on change, which a Slack modal cannot do without a round
+// trip, and the shared half is two inputs.
+//
+// Both keep the prompt editor's shape otherwise — an input block per field, the
+// identity in `private_metadata`, a callback_id the router matches exactly.
 
 const (
-	// JobModalCallbackID identifies a submission of the job editor.
-	JobModalCallbackID = "job_edit"
+	// GitHubJobModalCallbackID identifies a submission of the GitHub editor.
+	GitHubJobModalCallbackID = "github_job"
 	// The input blocks. Slack reports a submission's values under (block_id,
 	// action_id), so both are named and both are read back.
-	JobModalNameBlockID     = "job_name"
-	JobModalCommandBlockID  = "job_command"
-	JobModalScheduleBlockID = "job_schedule"
-	JobModalTimeoutBlockID  = "job_timeout"
-	// JobModalActionID names the input element inside each block.
+	GitHubJobModalLoginBlockID    = "github_login"
+	GitHubJobModalEnabledBlockID  = "github_enabled"
+	GitHubJobModalScheduleBlockID = "github_schedule"
+	// GitHubJobModalEnabledValue is the checkbox option's value. A bare token,
+	// matched exactly, like every other value in this package.
+	GitHubJobModalEnabledValue = "enabled"
+
+	// JiraJobModalCallbackID identifies a submission of the Jira editor.
+	JiraJobModalCallbackID = "jira_job"
+	// Its input blocks.
+	JiraJobModalNameBlockID     = "jira_name"
+	JiraJobModalJQLBlockID      = "jira_jql"
+	JiraJobModalScheduleBlockID = "jira_schedule"
+
+	// JobModalActionID names the input element inside each block, on both.
 	JobModalActionID = "value"
 )
 
-// JobModal is the editor for one scheduled job.
-type JobModal struct {
-	// Name is the job being edited, and empty for a new one. It rides in
-	// private_metadata, so a submission knows which job it is about even though
-	// the name field may not be on the form.
+// GitHubJobModal configures the pull-request digest.
+//
+// One job, not a list of them: there is one review queue and it is the admin's.
+// So this form has no name field — the job's name is Riggs' to choose
+// (schedule.GitHubJobName), or already decided if one exists — and it has a
+// checkbox instead, because the question it is really asking is "should Riggs
+// be watching your reviews at all".
+type GitHubJobModal struct {
+	// Name is the existing job's name, empty when there is none yet. It rides
+	// in private_metadata: the singleton adopted from an older ledger may be
+	// called anything, and the submission has to act on THAT row rather than on
+	// the name this build would have chosen.
 	Name string
-	// Command is the argument list as a line: "git pr --bulk miere".
-	Command string
+	// Login is the GitHub username whose review queue is fetched.
+	Login string
 	// Schedule is the cadence as written.
 	Schedule string
-	// Timeout is the bound as written: "2m".
-	Timeout string
+	// Enabled is whether the job exists at all. Unticking it deletes the job —
+	// see the hint on the field, which says so, because the row's own Disable
+	// means something quieter and the two are one click apart.
+	Enabled bool
 }
-
-// New reports whether this modal creates a job rather than editing one.
-func (m JobModal) New() bool { return strings.TrimSpace(m.Name) == "" }
 
 // View renders the payload `views.open` takes.
 //
-// Only the timeout is optional. A job with no command runs nothing and a job
-// with no schedule runs never, and Slack refusing an empty box is a better
-// message than a handler explaining the same thing after the modal has closed.
-func (m JobModal) View() any {
+// The checkbox is OPTIONAL, and it has to be. Slack refuses to submit a
+// required input the user has left empty, and an unticked checkbox group IS
+// empty — so a required one could be ticked and never unticked, which is the
+// half of this control that destroys something.
+//
+// The other two are required. A digest with no login fetches nobody's reviews
+// and one with no schedule runs never, and Slack refusing an empty box is a
+// better message than a handler explaining the same thing after the modal has
+// closed.
+func (m GitHubJobModal) View() any {
+	enabled := checkboxOption{
+		Text:        plainVerbatim("Run the Pull Requests — Reviewer job"),
+		Value:       GitHubJobModalEnabledValue,
+		Description: plainPtr("Unticking this DELETES the job and its history. To pause it instead, use Disable on its row."),
+	}
+	checkbox := checkboxesElem{
+		Type:     "checkboxes",
+		ActionID: JobModalActionID,
+		Options:  []checkboxOption{enabled},
+	}
+	if m.Enabled {
+		// initial_options must be omitted entirely when nothing is ticked. An
+		// empty array is not "none selected" to Slack — it is an invalid
+		// element, and the modal does not open at all.
+		checkbox.InitialOptions = []checkboxOption{enabled}
+	}
+
+	blocks := []any{
+		inputBlock{
+			Type:     "input",
+			BlockID:  GitHubJobModalEnabledBlockID,
+			Label:    plain("Job"),
+			Element:  checkbox,
+			Optional: true,
+		},
+		jobInput(GitHubJobModalLoginBlockID, "GitHub username", m.Login,
+			"Whose review queue Riggs fetches, e.g. miere. Not a URL and not an email.", false),
+		jobInput(GitHubJobModalScheduleBlockID, "Frequency", m.Schedule,
+			"An interval like 3m, or a five-field calendar expression like 0 9 * * 1-5.", false),
+	}
+
+	return modalView{
+		Type:            "modal",
+		CallbackID:      GitHubJobModalCallbackID,
+		PrivateMetadata: m.Name,
+		Title:           plain(Truncate("GitHub jobs", modalTitleLimit, modalTitleLimit-1)),
+		Submit:          plain("Save"),
+		Close:           plain("Cancel"),
+		Blocks:          blocks,
+	}
+}
+
+// JiraJobModal creates or edits one ticket digest.
+//
+// Unlike the GitHub form this one makes instances: a JQL is a question, an
+// install has several worth asking, and each one is its own job with its own
+// cadence and its own row. Which is why the name is a field here and is not
+// there.
+type JiraJobModal struct {
+	// Name is the job being edited, and empty for a new one. It rides in
+	// private_metadata, so a submission knows which job it is about even when
+	// the name field is not on the form.
+	Name string
+	// JQL is the query, pre-filled on an edit.
+	JQL string
+	// Schedule is the cadence as written.
+	Schedule string
+}
+
+// New reports whether this modal creates a job rather than editing one.
+func (m JiraJobModal) New() bool { return strings.TrimSpace(m.Name) == "" }
+
+// View renders the payload `views.open` takes.
+//
+// The name is shown only when creating. On an existing job it is not a field,
+// because a name is what the ledger keys on and what the row's block_id
+// carries, and "rename" is a different operation from "edit" that nobody has
+// asked for.
+//
+// The JQL box is MULTILINE, alone among every job field. A real query runs to
+// several clauses and a single-line input shows about forty characters of it,
+// which is how somebody ends up editing the wrong half of their own filter. The
+// newlines it invites are harmless here: JQL treats them as whitespace, and the
+// value is stored as one argument either way.
+func (m JiraJobModal) View() any {
 	var blocks []any
 	if m.New() {
-		blocks = append(blocks, jobInput(JobModalNameBlockID, "Name", "",
+		blocks = append(blocks, jobInput(JiraJobModalNameBlockID, "Name", "",
 			"Letters, digits, dot, dash and underscore. It identifies the job everywhere.", false))
 	}
 	blocks = append(blocks,
-		jobInput(JobModalCommandBlockID, "Command", m.Command,
-			"Arguments for riggs, e.g. `git pr --bulk miere`. Split on spaces; no quoting.", false),
-		jobInput(JobModalScheduleBlockID, "Schedule", m.Schedule,
+		jqlInput(JiraJobModalJQLBlockID, "JQL", m.JQL,
+			"The query deciding which tickets are advertised. Paste it exactly as Jira accepts it."),
+		jobInput(JiraJobModalScheduleBlockID, "Frequency", m.Schedule,
 			"An interval like 3m, or a five-field calendar expression like 0 9 * * 1-5.", false),
-		jobInput(JobModalTimeoutBlockID, "Timeout", m.Timeout,
-			"How long one run may take, e.g. 2m. Empty uses the default.", true),
 	)
 
-	title := "New job"
+	title := "New Jira job"
 	if !m.New() {
 		title = m.Name
 	}
 	return modalView{
 		Type:            "modal",
-		CallbackID:      JobModalCallbackID,
+		CallbackID:      JiraJobModalCallbackID,
 		PrivateMetadata: m.Name,
 		Title:           plain(Truncate(title, modalTitleLimit, modalTitleLimit-1)),
 		Submit:          plain("Save"),
@@ -199,10 +307,29 @@ func (m JobModal) View() any {
 	}
 }
 
+// checkboxOption is one tick box. It is a third option wire type beside
+// menuOptionObj and staticSelectOption, for the reason those are separate from
+// each other: this one carries a `description`, which neither of the others
+// accepts, and a shared type would re-render their bytes.
+type checkboxOption struct {
+	Text        textObj  `json:"text"`
+	Value       string   `json:"value"`
+	Description *textObj `json:"description,omitempty"`
+}
+
+type checkboxesElem struct {
+	Type     string           `json:"type"`
+	ActionID string           `json:"action_id"`
+	Options  []checkboxOption `json:"options"`
+	// InitialOptions is omitted when nothing is ticked. An empty array is not a
+	// valid element and the view is rejected wholesale.
+	InitialOptions []checkboxOption `json:"initial_options,omitempty"`
+}
+
 // jobInput builds one single-line input block.
 //
 // Single-line, unlike the prompt editor's: every one of these is a name, a
-// command or a duration, and a multiline box invites a newline that the value
+// login or a cadence, and a multiline box invites a newline that the value
 // cannot carry.
 func jobInput(blockID, label, value, hint string, optional bool) inputBlock {
 	block := inputBlock{
@@ -221,6 +348,25 @@ func jobInput(blockID, label, value, hint string, optional bool) inputBlock {
 		block.Hint = &h
 	}
 	return block
+}
+
+// jqlInput builds the one multiline job field. See JiraJobModal.View.
+func jqlInput(blockID, label, value, hint string) inputBlock {
+	block := jobInput(blockID, label, value, hint, false)
+	block.Element = plainTextInput{
+		Type:         "plain_text_input",
+		ActionID:     JobModalActionID,
+		Multiline:    true,
+		InitialValue: value,
+	}
+	return block
+}
+
+// plainPtr is plain(), addressable — for the optional text objects on a wire
+// type that distinguishes "absent" from "empty".
+func plainPtr(s string) *textObj {
+	t := plain(s)
+	return &t
 }
 
 // The delete confirmation: the third modal, and the only one that asks a
@@ -441,4 +587,100 @@ func (e CustomisationEmoji) hint() *textObj {
 	// the emoji. Saying so at the field is cheaper than rejecting it after.
 	t := plain(h + " Type the shortcode, not the emoji.")
 	return &t
+}
+
+// The Configuration editor: the sixth modal, and the second that edits several
+// settings at once.
+//
+// It carries the per-kind job timeouts, and it is a separate modal from
+// Customisation rather than two more fields on it. The two are pointed at
+// different things by different people at different times: Customisation is how
+// Riggs LOOKS — the emoji on a message, the portrait on the tab — and is opened
+// out of taste; Configuration is how Riggs BEHAVES when nobody is watching, and
+// is opened because a digest has started timing out. That is the same call §10
+// made about `review-request` and `sme-assistance`, and the reason is the same:
+// a shared surface means the next setting has to pick a side, and the wrong side
+// is only discovered when changing one silently moves the other.
+//
+// Like Customisation it has no `private_metadata` — there is no per-item
+// identity, because the item IS the whole form — and every field is read back by
+// (block_id, action_id).
+
+const (
+	// ConfigurationModalCallbackID identifies a submission of this modal.
+	ConfigurationModalCallbackID = "configuration"
+	// ConfigurationActionID names the input element inside every block. One id
+	// across all of them, because the block_id is what distinguishes the fields.
+	ConfigurationActionID = "value"
+	// ConfigurationTimeoutBlockPrefix namespaces one timeout's input block. The
+	// kind's own token follows it, so a field is addressed the same way a
+	// prompt row is (§7b).
+	ConfigurationTimeoutBlockPrefix = "timeout:"
+)
+
+// ConfigurationTimeout is one editable timeout on the modal.
+type ConfigurationTimeout struct {
+	// ID is the kind's token. It follows ConfigurationTimeoutBlockPrefix in the
+	// block_id and is how a submission is mapped back to a setting.
+	ID string
+	// Label names it: "Jira tickets timeout".
+	Label string
+	// Hint says what the bound applies to.
+	Hint string
+	// Value is the bound in force, pre-filled so an edit starts from what is
+	// actually running rather than from an empty box.
+	Value string
+}
+
+// ConfigurationModal is the editor for how Riggs' jobs behave.
+type ConfigurationModal struct {
+	// Timeouts are the per-kind bounds, in the order the Home tab lists the
+	// kinds.
+	Timeouts []ConfigurationTimeout
+}
+
+// View renders the payload `views.open` takes.
+//
+// Every field is OPTIONAL, like Customisation's and for the same reason: an
+// empty box here has exactly one sensible reading — "use the built-in bound" —
+// and there is nowhere else on a modal that edits several settings at once to
+// express a reset without it becoming a different, worse surface.
+func (m ConfigurationModal) View() any {
+	blocks := make([]any, 0, len(m.Timeouts))
+	for _, t := range m.Timeouts {
+		block := inputBlock{
+			Type:    "input",
+			BlockID: ConfigurationTimeoutBlockPrefix + t.ID,
+			Label:   plain(t.label()),
+			Element: plainTextInput{
+				Type:         "plain_text_input",
+				ActionID:     ConfigurationActionID,
+				InitialValue: t.Value,
+			},
+			Optional: true,
+		}
+		if hint := strings.TrimSpace(t.Hint); hint != "" {
+			h := plain(hint + " Empty uses the default.")
+			block.Hint = &h
+		}
+		blocks = append(blocks, block)
+	}
+	return modalView{
+		Type:       "modal",
+		CallbackID: ConfigurationModalCallbackID,
+		Title:      plain(Truncate("Configuration", modalTitleLimit, modalTitleLimit-1)),
+		Submit:     plain("Save"),
+		Close:      plain("Cancel"),
+		Blocks:     blocks,
+	}
+}
+
+// label is the field's name, with a fallback so a modal built from a kind this
+// build does not know about still renders rather than being rejected for an
+// empty text object.
+func (t ConfigurationTimeout) label() string {
+	if l := strings.TrimSpace(t.Label); l != "" {
+		return l
+	}
+	return "Timeout"
 }

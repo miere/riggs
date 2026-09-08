@@ -40,22 +40,36 @@ says what the supervisor thinks; `riggs launchd` is the old name and forwards.
 
 ## Jobs
 
-Riggs schedules its own work. Jobs live in the ledger, are edited from the **App
-Home tab** — a Jobs section with Edit, Run now, Disable and Delete on each row,
-and **New job…** under Restart in the controls menu — and from the terminal:
+Riggs schedules its own work. There are two kinds of job — the pull-request
+digest and the ticket digest — and a job is its kind plus the one thing Riggs
+cannot know: a GitHub login, or a JQL query.
+
+They live in the ledger and are edited from the **App Home tab**: a Jobs section
+with Edit, Run now, Disable and Delete on each row, and under Restart in the
+controls menu, **Configure GitHub Jobs…** (the one review digest, with a
+checkbox that creates or deletes it) and **Configure a New Jira Job…** (a name,
+a JQL, a cadence). Also from the terminal:
 
 ```sh
 riggs jobs list
-riggs jobs add review-queue 3m git pr --bulk <github-login>
-riggs jobs add nightly "0 9 * * 1-5" jira tickets --bulk
+riggs jobs add github review-queue 3m <github-login>
+riggs jobs add jira nightly "0 9 * * 1-5" 'project = NYX AND status = "Ready"'
 riggs jobs run nightly
+riggs jobs migrate                       # adopt jobs written by an older Riggs
 ```
 
 A schedule is one field in either of two dialects: an interval (`3m`) or a
 five-field calendar expression (`0 9 * * 1-5`, local time). A job runs the riggs
-binary again as a child process, so what it does is exactly what typing the same
-command would do. Missed runs are skipped rather than caught up, and a job that
-overruns its own cadence is skipped rather than started twice.
+binary again as a child process, with the arguments its kind implies. Missed
+runs are skipped rather than caught up, and a job that overruns its own cadence
+is skipped rather than started twice.
+
+How long a run may take is a setting per kind, under **Configuration…** in the
+same menu (`jobs.github-timeout`, `jobs.jira-timeout`; both default to `2m`).
+
+**Upgrading:** jobs written before this were a name and a command line, and are
+migrated on the next daemon start. Anything that is not one of the two digests
+is removed, and Riggs DMs you what it was.
 
 Riggs ships with **nothing scheduled**: neither the installer nor any command
 creates a job for you. If the same job is also defined in another scheduler,

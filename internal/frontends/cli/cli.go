@@ -12,10 +12,16 @@
 // same shape do not need a symbol table to be parsed, so the schema, the
 // registry and the three-form command resolution went and this is what is left.
 //
-// The command spellings are a CONTRACT, not a convenience. Jobs stored in the
-// ledger invoke `git pr --bulk <login>` as literal argv and the scheduler
-// validates nothing (internal/schedule/exec.go), so a rename here does not fail
-// to build — it fails at 3am, in a job, with "unknown command".
+// The command spellings are a CONTRACT, not a convenience. `schedule.Args`
+// writes `git pr --bulk <login>` and `jira tickets --bulk <jql>` out as literal
+// argv for a child process, and nothing between there and here checks that they
+// resolve — so a rename on either side does not fail to build. It fails at 3am,
+// in a job, with "unknown command".
+//
+// Those two are now the ONLY callers that matter. A job used to carry whatever
+// argv an operator typed into a Slack modal; it carries a kind and its
+// parameters instead (§9d), which is what makes this contract enforceable
+// rather than a comment asking people to be careful.
 package cli
 
 import (

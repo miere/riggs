@@ -27,6 +27,28 @@ type JobStore interface {
 	DeleteJob(ctx context.Context, name string) (bool, error)
 }
 
+// defaultSchedule is what a new job's Frequency box is pre-filled with.
+//
+// Three minutes, which is what both jobs Riggs took over from Murtaugh use — so
+// the common case is one field of typing and the uncommon one is a field the
+// admin was going to change anyway.
+const defaultSchedule = "3m"
+
+// JQLChecker proves a query before a job is built out of it.
+//
+// A seam rather than a Jira client, because this package has no business
+// holding credentials: the composition root has one already and every other
+// dependency here arrives the same way. Nil skips the check, which is what a
+// machine with no Jira configured looks like — the digest cannot run there
+// either, and refusing to save the job would be a second complaint about the
+// same missing setting.
+type JQLChecker interface {
+	// CheckJQL reports whether Jira will run this query. An error is the reason
+	// it will not, in Jira's own words where possible: "the field 'labls' does
+	// not exist" is worth more than "invalid JQL".
+	CheckJQL(ctx context.Context, jql string) error
+}
+
 // JobRunner is the scheduler, narrowed to what this surface needs: what is
 // happening now, what happens next, and the ability to say "now".
 type JobRunner interface {
@@ -53,6 +75,7 @@ func (p *Publisher) jobRows(ctx context.Context, admin bool) []blockkit.HomeJob 
 	for _, job := range jobs {
 		rows = append(rows, blockkit.HomeJob{
 			ID:       job.Name,
+			Kind:     kindLabel(job),
 			Schedule: job.Spec,
 			Command:  schedule.Command(job),
 			Status:   p.jobStatus(job, now),
@@ -60,6 +83,16 @@ func (p *Publisher) jobRows(ctx context.Context, admin bool) []blockkit.HomeJob 
 		})
 	}
 	return rows
+}
+
+// kindLabel is what a job's kind is called on its row, and empty for a kind
+// this build does not know — which the row then says in its own words.
+func kindLabel(job notify.Job) string {
+	spec, ok := schedule.LookupKind(schedule.KindOf(job))
+	if !ok {
+		return ""
+	}
+	return spec.Label
 }
 
 // jobStatus is the row's third line: what happened, and what happens next.
@@ -175,24 +208,68 @@ func (p *Publisher) now() time.Time {
 
 // --- the controls -----------------------------------------------------------
 
-// NewJob opens an empty job editor.
+// ConfigureGitHubJob opens the pull-request digest's editor.
+//
+// One modal for the one job, whether or not it exists yet: the form's checkbox
+// is what decides which. That is why this is "Configure GitHub Jobs" rather
+// than "New GitHub job" — there is one review queue, and the question is always
+// whether Riggs is watching it, never which of several to add.
+//
+// It opens the modal and does nothing else first — a trigger id lives about
+// three seconds (§7e) — with one exception it cannot avoid: the form has to be
+// pre-filled with the job that exists, and that is a ledger read. It is one
+// indexed row from a local SQLite file, which is microseconds; the alternative
+// is an empty form that silently forgets the admin's login every time they open
+// it to change the cadence.
+func (p *Publisher) ConfigureGitHubJob(ctx context.Context, userID, triggerID string) error {
+	if err := p.mayOperateJobs(userID, "configure"); err != nil {
+		return err
+	}
+	existing, found, err := p.githubJob(ctx)
+	if err != nil {
+		return err
+	}
+	modal := blockkit.GitHubJobModal{
+		// Sensible starting points rather than an empty form. Three minutes is
+		// what the job Riggs took over from Murtaugh actually used, so the
+		// common case is one field of typing.
+		Schedule: defaultSchedule,
+		Enabled:  found,
+	}
+	if found {
+		modal.Name = existing.Name
+		modal.Login = schedule.Param(existing, schedule.ParamLogin)
+		modal.Schedule = existing.Spec
+	}
+	return p.deps.Modals.OpenView(ctx, p.deps.BotToken, triggerID, modal.View())
+}
+
+// NewJiraJob opens an empty ticket-digest editor.
 //
 // It opens the modal and does nothing else first: a trigger id lives about
-// three seconds (§7e).
-func (p *Publisher) NewJob(ctx context.Context, userID, triggerID string) error {
+// three seconds (§7e), and unlike the GitHub form there is nothing to pre-fill
+// — a new query is a new question.
+func (p *Publisher) NewJiraJob(ctx context.Context, userID, triggerID string) error {
 	if err := p.mayOperateJobs(userID, "create"); err != nil {
 		return err
 	}
-	return p.deps.Modals.OpenView(ctx, p.deps.BotToken, triggerID, blockkit.JobModal{
-		// Sensible starting points rather than an empty form. Both are what the
-		// jobs Riggs took over from Murtaugh actually use, so the common case
-		// is one field of typing.
-		Schedule: "3m",
-		Timeout:  schedule.DefaultTimeout.String(),
+	return p.deps.Modals.OpenView(ctx, p.deps.BotToken, triggerID, blockkit.JiraJobModal{
+		Schedule: defaultSchedule,
 	}.View())
 }
 
-// EditJob opens the editor for an existing job.
+// EditJob opens the editor for an existing job — whichever editor that is.
+//
+// The row's Edit option is one control over two forms, dispatched on the job's
+// kind. It has to be: the row is where somebody looks when they want to change
+// something, and asking them to remember whether this one is configured from
+// the GitHub option or the Jira one is asking them to hold the implementation
+// in their head.
+//
+// A job whose kind this build does not know opens NOTHING, and says so. There
+// is no form for it, and the two alternatives — guessing at a form, or opening
+// an empty one — both end with a save that rewrites a job into something it was
+// not.
 func (p *Publisher) EditJob(ctx context.Context, userID, name, triggerID string) error {
 	if err := p.mayOperateJobs(userID, "edit"); err != nil {
 		return err
@@ -205,43 +282,123 @@ func (p *Publisher) EditJob(ctx context.Context, userID, name, triggerID string)
 		// A Home tab published before somebody deleted the job.
 		return fmt.Errorf("there is no job called %q any more", name)
 	}
-	return p.deps.Modals.OpenView(ctx, p.deps.BotToken, triggerID, blockkit.JobModal{
-		Name:     job.Name,
-		Command:  schedule.Command(job),
-		Schedule: job.Spec,
-		Timeout:  job.Timeout.String(),
-	}.View())
+	switch schedule.KindOf(job) {
+	case schedule.KindGitHubReviews:
+		return p.deps.Modals.OpenView(ctx, p.deps.BotToken, triggerID, blockkit.GitHubJobModal{
+			Name:     job.Name,
+			Login:    schedule.Param(job, schedule.ParamLogin),
+			Schedule: job.Spec,
+			Enabled:  true,
+		}.View())
+	case schedule.KindJiraTickets:
+		return p.deps.Modals.OpenView(ctx, p.deps.BotToken, triggerID, blockkit.JiraJobModal{
+			Name:     job.Name,
+			JQL:      schedule.Param(job, schedule.ParamJQL),
+			Schedule: job.Spec,
+		}.View())
+	}
+	return fmt.Errorf("%s is a %q job, which this build of Riggs cannot edit — update Riggs, or delete it",
+		job.Name, job.Type)
 }
 
-// SaveJob records a submitted job, creating or updating it.
+// SaveGitHubJob records the pull-request digest, creating, updating or deleting
+// it.
+//
+// enabled is the checkbox, and it is the control that decides which of the
+// three this call is — because the question the form asks is whether Riggs
+// watches the review queue at all, and "no" has to be expressible.
+//
+// It takes no job identity, unlike every other save on this surface. There is
+// nothing for the caller to name: the digest is a singleton, and which row that
+// is at this moment is a question only the ledger can answer.
+//
+// Unticked DELETES rather than disables, which is the harsher reading and the
+// deliberate one. Disable already exists, on the row, one click away, and it
+// keeps the definition and the history; a checkbox that quietly did the same
+// thing would leave the admin with two controls that look different and are not.
+// The field says so in its own hint, at the moment of ticking.
+// The job it acts on is RE-RESOLVED here rather than taken from the form's
+// private_metadata. The modal was opened against whatever existed then, and a
+// modal can sit on somebody's screen for a long time; a digest created or
+// deleted since — from a terminal, or from a second Slack client — would
+// otherwise be joined by a second one under Riggs' own name, and the two would
+// race to write the same message. This re-read is what makes "there is at most
+// one" true rather than hoped for.
+func (p *Publisher) SaveGitHubJob(ctx context.Context, userID, login, spec string, enabled bool) error {
+	if err := p.mayOperateJobs(userID, "save"); err != nil {
+		return err
+	}
+	existing, found, err := p.githubJob(ctx)
+	if err != nil {
+		return err
+	}
+
+	if !enabled {
+		if !found {
+			// Unticked a job that is not there. Nothing to do, and no error:
+			// the admin's intent and the state of the world agree.
+			return nil
+		}
+		return p.DeleteJob(ctx, userID, existing.Name)
+	}
+
+	// A job that already exists keeps its own name, whatever it is: one adopted
+	// from an older ledger is called what the operator called it, and renaming a
+	// row on an edit would break every log line about it.
+	name := schedule.GitHubJobName
+	original := ""
+	if found {
+		name, original = existing.Name, existing.Name
+	}
+	job, err := schedule.NewGitHubJob(name, login, spec)
+	if err != nil {
+		return err
+	}
+	return p.saveJob(ctx, userID, original, job)
+}
+
+// SaveJiraJob records a submitted ticket digest, creating or updating it.
 //
 // original is the private_metadata: the job being edited, or empty for a new
 // one. A new job's name comes from the form; an existing job's does not, which
 // is why "rename" is not an operation here.
-func (p *Publisher) SaveJob(ctx context.Context, userID, original, name, command, spec, timeout string) error {
+//
+// The query is checked against Jira BEFORE it is stored, when there is anything
+// to check it with. A JQL that does not parse is not a job that fails once —
+// it is a job that fails every three minutes, for good, into a log, and the
+// admin who typed it has already closed the modal and moved on. One search
+// against the real tenant is the difference between finding out now and finding
+// out never.
+func (p *Publisher) SaveJiraJob(ctx context.Context, userID, original, name, jql, spec string) error {
 	if err := p.mayOperateJobs(userID, "save"); err != nil {
 		return err
 	}
 	if original != "" {
 		name = original
 	}
-	d, err := parseTimeout(timeout)
+	job, err := schedule.NewJiraJob(name, jql, spec)
 	if err != nil {
 		return err
 	}
-	// The modal is one text field, so unlike `riggs jobs add` there is no shell
-	// upstream to have worked the quoting out already. SplitArgs does it here,
-	// and an unterminated quote is reported rather than guessed at — the form
-	// comes back with the message, which is the only chance to say so before a
-	// wrong query starts running every three minutes.
-	argv, err := schedule.SplitArgs(command)
-	if err != nil {
-		return err
+	if p.deps.JQL != nil {
+		if err := p.deps.JQL.CheckJQL(ctx, schedule.Param(job, schedule.ParamJQL)); err != nil {
+			p.deps.Logger.Warn("refused a job whose JQL Jira would not run",
+				"job", job.Name, "user", userID, "error", err)
+			return fmt.Errorf("Jira would not run that query, so the job was not saved: %w", err)
+		}
 	}
-	job, err := schedule.NewJob(strings.TrimSpace(name), argv, spec, d, true)
-	if err != nil {
-		return err
-	}
+	return p.saveJob(ctx, userID, original, job)
+}
+
+// saveJob is the half both editors share: the create-or-update rules, the
+// write, and the redraw.
+//
+// It is shared rather than duplicated because these rules are about a job's
+// IDENTITY — a name already in use, a row deleted from another window, the
+// enabled flag that is a menu control and not a form field — and none of that
+// depends on which kind of job it is. The parts that do differ are already
+// decided by the time this is called: the caller built the job.
+func (p *Publisher) saveJob(ctx context.Context, userID, original string, job notify.Job) error {
 	if original == "" {
 		// Creating. A name already in use would silently replace somebody
 		// else's job, and the two would be indistinguishable afterwards.
@@ -267,9 +424,43 @@ func (p *Publisher) SaveJob(ctx context.Context, userID, original, name, command
 	if err := p.deps.Jobs.SaveJob(ctx, job); err != nil {
 		return err
 	}
-	p.deps.Logger.Info("job saved", "job", job.Name, "spec", job.Spec, "user", userID)
+	p.deps.Logger.Info("job saved", "job", job.Name, "type", job.Type, "spec", job.Spec, "user", userID)
 	p.republish(ctx, userID)
 	return nil
+}
+
+// githubJob finds the pull-request digest, of which there is at most one.
+//
+// Found by KIND rather than by name. The name is Riggs' own for a job it
+// created, but a ledger that has been through the migration keeps whatever the
+// operator called theirs — and looking up schedule.GitHubJobName would then
+// find nothing, offer an empty form, and create a SECOND digest racing the
+// first to write the same message.
+//
+// Two of them is not a state this can be in — every door that creates one comes
+// through here first — so the first is returned and the rest are logged. A
+// hand-edited ledger is not worth an error the admin cannot act on.
+func (p *Publisher) githubJob(ctx context.Context) (notify.Job, bool, error) {
+	jobs, err := p.deps.Jobs.Jobs(ctx)
+	if err != nil {
+		return notify.Job{}, false, err
+	}
+	var found notify.Job
+	seen := 0
+	for _, job := range jobs {
+		if schedule.KindOf(job) != schedule.KindGitHubReviews {
+			continue
+		}
+		seen++
+		if seen == 1 {
+			found = job
+		}
+	}
+	if seen > 1 {
+		p.deps.Logger.Warn("more than one pull-request digest is scheduled; configuring the first",
+			"count", seen, "job", found.Name)
+	}
+	return found, seen > 0, nil
 }
 
 // ToggleJob pauses or resumes a job.
@@ -386,17 +577,4 @@ func (p *Publisher) mayOperateJobs(userID, verb string) error {
 		return fmt.Errorf("apphome: the schedule is not wired up in this build")
 	}
 	return nil
-}
-
-// parseTimeout reads the modal's timeout field. Empty takes the default.
-func parseTimeout(raw string) (time.Duration, error) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return 0, nil
-	}
-	d, err := time.ParseDuration(raw)
-	if err != nil {
-		return 0, fmt.Errorf("%q is not a duration (e.g. 2m, 30s)", raw)
-	}
-	return d, nil
 }
