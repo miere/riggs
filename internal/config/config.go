@@ -53,6 +53,13 @@ type Config struct {
 	ReviewRequest ReviewRequest `yaml:"review-request"`
 	SMEAssistance SMEAssistance `yaml:"sme-assistance"`
 	AI            AI            `yaml:"ai"`
+	// Reactions is the emoji Riggs answers a click with (§7f).
+	Reactions Reactions `yaml:"reactions"`
+	// HomeTab is the App Home tab's appearance. The field is not called `Home`
+	// because blockkit.Home is the view and config.Home is the settings, and a
+	// reader holding both in one file should not have to work out which `Home`
+	// a line means.
+	HomeTab Home `yaml:"home"`
 
 	// LegacyAIAssistance is the old spelling of SMEAssistance, kept only so an
 	// existing config still loads.
@@ -451,6 +458,17 @@ func (c *Config) validate() error {
 			fmt.Sprintf("jira.base-url %q is not an absolute http(s) URL (e.g. https://example.atlassian.net)", url))
 	}
 	problems = append(problems, c.validateAI()...)
+	// A hand-edited emoji is refused at LOAD, not at the moment somebody
+	// approves a pull request. The modal validates what it is given, but the
+	// file is also editable by hand, and the symptom of a bad name there is one
+	// `invalid_name` per click in a log nobody is reading — while the button
+	// itself appears to work.
+	for _, spec := range reactions {
+		if err := ValidateEmojiName(spec.get(c)); err != nil {
+			problems = append(problems,
+				fmt.Sprintf("reactions.%s: %v", spec.ID, err))
+		}
+	}
 	if len(problems) == 0 {
 		return nil
 	}
