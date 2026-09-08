@@ -61,14 +61,18 @@ func TestTheControlsMenuIsAdminOnly(t *testing.T) {
 	}
 
 	options := menu["options"].([]any)
-	// Restart first, then the job editor directly below it — the order the
-	// menu is specified in, and the order somebody reaching for either expects.
-	if len(options) != 2 {
+	// Restart first, then the two job editors directly below it — the order the
+	// menu is specified in, and the order somebody reaching for any of them
+	// expects.
+	if len(options) != 3 {
 		t.Fatalf("menu options = %v", options)
 	}
 	restart := options[0].(map[string]any)
-	if newJob := options[1].(map[string]any); newJob["value"] != HomeNewJobIntent {
-		t.Fatalf("second option = %v, want the job editor", newJob)
+	if github := options[1].(map[string]any); github["value"] != HomeGitHubJobIntent {
+		t.Fatalf("second option = %v, want the GitHub job editor", github)
+	}
+	if jira := options[2].(map[string]any); jira["value"] != HomeNewJiraJobIntent {
+		t.Fatalf("third option = %v, want the Jira job editor", jira)
 	}
 	if restart["value"] != HomeRestartIntent {
 		t.Fatalf("restart value = %v, want the bare token the router matches", restart["value"])

@@ -204,3 +204,60 @@ func TestViewSelectAndViewInputReadDifferentFields(t *testing.T) {
 		t.Errorf("ViewSelect on a missing block = %q", got)
 	}
 }
+
+// A checkbox is a THIRD shape again: `selected_options`, a list, and an
+// unticked group reports an empty one.
+//
+// That last part is the whole reason it cannot be folded into ViewSelect. For a
+// select, empty means "not answered"; for a checkbox it means "answered, no" —
+// which on the GitHub job form is the admin asking for the job to be deleted.
+// Reading it through ViewInput would come back empty on EVERY submission, which
+// is that same instruction, every time.
+func TestViewCheckedReadsACheckbox(t *testing.T) {
+	ticked := slackgo.InteractionCallback{
+		Type: slackgo.InteractionTypeViewSubmission,
+		View: slackgo.View{
+			CallbackID: "github_job",
+			State: &slackgo.ViewState{
+				Values: map[string]map[string]slackgo.BlockAction{
+					"github_enabled": {"value": {SelectedOptions: []slackgo.OptionBlockObject{
+						{Value: "enabled"},
+					}}},
+					"github_login": {"value": {Value: "miere"}},
+				},
+			},
+		},
+	}
+	if !ViewChecked(ticked, "github_enabled", "value", "enabled") {
+		t.Error("a ticked checkbox read as unticked")
+	}
+	// The option's own value is matched rather than "is anything selected", so a
+	// group that grows a second option later does not read as the first one.
+	if ViewChecked(ticked, "github_enabled", "value", "something_else") {
+		t.Error("a different option's value read as ticked")
+	}
+	// The trap, stated: through ViewInput it is indistinguishable from unticked.
+	if got := ViewInput(ticked, "github_enabled", "value"); got != "" {
+		t.Errorf("ViewInput on a checkbox = %q; if this ever stops being empty the "+
+			"readers could be merged", got)
+	}
+
+	unticked := slackgo.InteractionCallback{
+		Type: slackgo.InteractionTypeViewSubmission,
+		View: slackgo.View{
+			CallbackID: "github_job",
+			State: &slackgo.ViewState{
+				Values: map[string]map[string]slackgo.BlockAction{
+					"github_enabled": {"value": {SelectedOptions: nil}},
+				},
+			},
+		},
+	}
+	if ViewChecked(unticked, "github_enabled", "value", "enabled") {
+		t.Error("an unticked checkbox read as ticked")
+	}
+	// And a block the submission never carried is false rather than a panic.
+	if ViewChecked(unticked, "gone", "value", "enabled") {
+		t.Error("a missing block read as ticked")
+	}
+}

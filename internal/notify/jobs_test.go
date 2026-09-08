@@ -21,9 +21,9 @@ func jobStore(t *testing.T) *Store {
 func sampleJob() Job {
 	return Job{
 		Name:    "github-review-queue",
-		Args:    []string{"git", "pr", "--bulk", "miere"},
+		Type:    "github-reviews",
+		Params:  map[string]string{"login": "miere"},
 		Spec:    "3m",
-		Timeout: 2 * time.Minute,
 		Enabled: true,
 	}
 }
@@ -39,14 +39,14 @@ func TestJobRoundTrip(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("Job: %v found=%v", err, found)
 	}
-	if got.Name != want.Name || got.Spec != want.Spec || got.Timeout != want.Timeout || !got.Enabled {
+	if got.Name != want.Name || got.Type != want.Type || got.Spec != want.Spec || !got.Enabled {
 		t.Fatalf("job = %+v", got)
 	}
-	// The argument list is the whole point of the row: a job that came back
-	// with no arguments would invoke the binary with none and print the usage
-	// line every three minutes.
-	if len(got.Args) != 4 || got.Args[3] != "miere" {
-		t.Fatalf("args = %v", got.Args)
+	// The parameters are the whole point of the row: a ticket digest that came
+	// back without its query is not a smaller version of the job, it is a
+	// different one.
+	if got.Params["login"] != "miere" {
+		t.Fatalf("params = %v", got.Params)
 	}
 	if got.Ran() {
 		t.Fatal("a job that has never run reports a last run")
@@ -132,7 +132,7 @@ func TestDisablingKeepsTheDefinition(t *testing.T) {
 	if got.Enabled {
 		t.Fatal("the job is still enabled")
 	}
-	if len(got.Args) != 4 {
+	if got.Type == "" || got.Params["login"] != "miere" {
 		t.Fatalf("disabling lost the definition: %+v", got)
 	}
 
@@ -196,5 +196,51 @@ func TestAnExistingLedgerGainsTheJobsTable(t *testing.T) {
 	defer second.Close()
 	if err := second.SaveJob(context.Background(), sampleJob()); err != nil {
 		t.Fatalf("SaveJob on a reopened ledger: %v", err)
+	}
+}
+
+// A row written by a build before jobs were typed still loads, and brings its
+// argument list with it. That is the migration's whole input: if this row
+// refused to scan, the daemon would fail to read the schedule at all and every
+// job on the machine would stop.
+func TestALegacyRowLoadsWithItsArguments(t *testing.T) {
+	ctx, s := context.Background(), jobStore(t)
+	// Written the way the old SaveJob wrote it: no type, no params, an argv in
+	// `args` and a timeout in its own column.
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO jobs (name, args, spec, timeout_ms, enabled, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, 1, ?, ?)`,
+		"quick-coding-tasks-poll", `["jira","tickets","--bulk","project = NYX"]`, "3m",
+		120000, "2026-09-01T00:00:00Z", "2026-09-01T00:00:00Z"); err != nil {
+		t.Fatalf("inserting a legacy row: %v", err)
+	}
+
+	got, found, err := s.Job(ctx, "quick-coding-tasks-poll")
+	if err != nil || !found {
+		t.Fatalf("Job: %v found=%v", err, found)
+	}
+	if got.Type != "" {
+		t.Fatalf("type = %q, want a row that has not been migrated yet", got.Type)
+	}
+	if len(got.LegacyArgs) != 4 || got.LegacyArgs[3] != "project = NYX" {
+		t.Fatalf("legacy args = %q", got.LegacyArgs)
+	}
+
+	// And once it is saved back as a typed job, the legacy column is cleared —
+	// so the next start's migration pass leaves it alone.
+	got.Type = "jira-tickets"
+	got.Params = map[string]string{"jql": "project = NYX"}
+	if err := s.SaveJob(ctx, got); err != nil {
+		t.Fatalf("SaveJob: %v", err)
+	}
+	again, _, err := s.Job(ctx, got.Name)
+	if err != nil {
+		t.Fatalf("Job: %v", err)
+	}
+	if len(again.LegacyArgs) != 0 {
+		t.Fatalf("legacy args survived the save: %q", again.LegacyArgs)
+	}
+	if again.Params["jql"] != "project = NYX" {
+		t.Fatalf("params = %v", again.Params)
 	}
 }

@@ -55,6 +55,10 @@ type Config struct {
 	AI            AI            `yaml:"ai"`
 	// Reactions is the emoji Riggs answers a click with (§7f).
 	Reactions Reactions `yaml:"reactions"`
+	// Jobs is what the SCHEDULE's settings are, as opposed to the schedule
+	// itself: the jobs live in the ledger (§9c), because half of every one of
+	// them is what happened, and only the per-kind bounds are configuration.
+	Jobs Jobs `yaml:"jobs"`
 	// HomeTab is the App Home tab's appearance. The field is not called `Home`
 	// because blockkit.Home is the view and config.Home is the settings, and a
 	// reader holding both in one file should not have to work out which `Home`

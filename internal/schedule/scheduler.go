@@ -52,12 +52,31 @@ const (
 	outputTailChars = 1200
 )
 
+// Timeouts is how long a run of each kind of job may take.
+//
+// A seam rather than a field on the job, because the answer moved: a timeout
+// used to be typed into the job editor beside the command, and it is now one
+// setting per KIND, edited once from the Home tab's Configuration modal (§9d).
+// That is the right shape for it — "how long may a ticket digest take" is a
+// property of ticket digests, not of the particular query one of them runs —
+// and it means this package does not have to know what a config file is.
+//
+// Nil selects DefaultTimeout for everything, which is what a build with no
+// config does and what every test that does not care about timeouts gets.
+type Timeouts interface {
+	// JobTimeout is the bound for one kind. A zero or negative answer is read
+	// as "no opinion" and takes DefaultTimeout, so a config that names one kind
+	// does not accidentally give the other one no time at all.
+	JobTimeout(kind Kind) time.Duration
+}
+
 // Scheduler runs jobs on their cadence.
 type Scheduler struct {
-	store  Store
-	exec   Exec
-	logger *slog.Logger
-	now    func() time.Time
+	store    Store
+	exec     Exec
+	timeouts Timeouts
+	logger   *slog.Logger
+	now      func() time.Time
 
 	// mu guards next and running.
 	mu sync.Mutex
@@ -92,6 +111,27 @@ func New(store Store, exec Exec, logger *slog.Logger) *Scheduler {
 func (s *Scheduler) WithClock(now func() time.Time) *Scheduler {
 	s.now = now
 	return s
+}
+
+// WithTimeouts supplies the per-kind bounds.
+//
+// Read on every run rather than captured once, so a timeout changed on the Home
+// tab reaches the next run instead of the next restart — the rule the prompts
+// and the emojis already follow.
+func (s *Scheduler) WithTimeouts(t Timeouts) *Scheduler {
+	s.timeouts = t
+	return s
+}
+
+// timeoutFor is the bound one job's run gets.
+func (s *Scheduler) timeoutFor(job Job) time.Duration {
+	if s.timeouts == nil {
+		return DefaultTimeout
+	}
+	if d := s.timeouts.JobTimeout(KindOf(job)); d > 0 {
+		return d
+	}
+	return DefaultTimeout
 }
 
 // Run ticks until ctx is cancelled.
@@ -289,15 +329,26 @@ func (s *Scheduler) finish(name string) {
 // run and a scheduled one are the same code — a "Run now" that took a different
 // path would be a way to prove the wrong thing works.
 func (s *Scheduler) RunNow(ctx context.Context, job Job, at time.Time) (Result, error) {
-	timeout := job.Timeout
-	if timeout <= 0 {
-		timeout = DefaultTimeout
+	// The argument list is derived from the job's kind, here, at the moment of
+	// running it. A job whose kind this build cannot render arguments for is a
+	// FAILED run rather than a skipped one: it is recorded, so the Home tab's
+	// row says what is wrong with it, where a silent skip would leave a job
+	// that simply never runs and never explains itself.
+	args, err := Args(job)
+	if err != nil {
+		s.logger.Error("job cannot be run", "job", job.Name, "type", job.Type, "error", err)
+		if recErr := s.store.RecordJobRun(ctx, job.Name, at, 0, err, ""); recErr != nil {
+			s.logger.Error("could not record a job run", "job", job.Name, "error", recErr)
+		}
+		return Result{Err: err}, err
 	}
+
+	timeout := s.timeoutFor(job)
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	started := s.now()
-	out, err := s.exec(ctx, job.Args)
+	out, err := s.exec(ctx, args)
 	took := s.now().Sub(started)
 
 	result := Result{Output: string(out), Duration: took}

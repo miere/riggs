@@ -144,8 +144,17 @@ CREATE INDEX IF NOT EXISTS items_stream ON items(stream);
 -- whether it worked — and that has no business in a hand-edited file that a
 -- human is expected to read. The definition and its outcome are one record
 -- because the Home tab shows them as one line.
+--
+-- The args and timeout_ms columns are vestigial, and kept for the reason
+-- latches is: dropping a column needs a migration on every existing ledger and
+-- buys nothing. A job's arguments are now derived from its type and its
+-- parameters (schedule.Args) and its timeout comes from the config, per type —
+-- so args is read only by the migration that adopts an untyped row, and written
+-- empty afterwards, and timeout_ms is written zero and never read.
 CREATE TABLE IF NOT EXISTS jobs (
 	name        TEXT PRIMARY KEY,
+	type        TEXT NOT NULL DEFAULT '',
+	params      TEXT NOT NULL DEFAULT '',
 	args        TEXT NOT NULL,
 	spec        TEXT NOT NULL,
 	timeout_ms  INTEGER NOT NULL,
@@ -175,6 +184,18 @@ func (s *Store) migrate(ctx context.Context) error {
 		`ALTER TABLE items ADD COLUMN title TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE items ADD COLUMN author TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE items ADD COLUMN url TEXT NOT NULL DEFAULT ''`,
+		// A job is TYPED (§9c). It used to be a name and an argument list, which
+		// meant the Home tab could only offer a free-text command box and the
+		// one argument that needs care — the ticket digest's JQL — was typed
+		// into it by hand. These two columns are what replaced it: what kind of
+		// job this is, and the parameters that kind declares.
+		//
+		// Both default to empty rather than to a plausible value. An existing
+		// row genuinely has no type, and schedule.Migrate is what turns that
+		// into one on the next start; a default of "github-reviews" here would
+		// have the ledger silently answering a question only the old argv can.
+		`ALTER TABLE jobs ADD COLUMN type TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE jobs ADD COLUMN params TEXT NOT NULL DEFAULT ''`,
 	} {
 		if _, err := s.db.ExecContext(ctx, alter); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			return fmt.Errorf("notify: %s: %w", alter, err)
