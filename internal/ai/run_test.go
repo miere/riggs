@@ -146,30 +146,41 @@ func TestTheTailIsBounded(t *testing.T) {
 
 // A double-click is the case this exists for: the second run is pure waste and
 // would also race the first to comment.
+//
+// The handshake is the whole test, and it used to be wrong. It launched a
+// goroutine, closed a channel BEFORE calling Run in it, and then tried up to a
+// hundred times to catch the claim — which meant that whenever the main
+// goroutine won the race, each of those hundred attempts took the claim itself,
+// held it for the fake process's 50ms, and succeeded. Five seconds of work, and
+// then a failure reporting the opposite of what had happened. It went red on CI
+// perhaps one run in fifty.
+//
+// So the fake process signals when it has STARTED — which the runner only
+// reaches after claiming — and holds there until this test lets it go. No
+// polling, no duration to be wrong about.
 func TestTheSameItemCannotRunTwiceAtOnce(t *testing.T) {
-	rec := &recorder{block: 50 * time.Millisecond}
+	rec := &recorder{
+		entered: make(chan struct{}, 1),
+		release: make(chan struct{}),
+	}
 	p := &poster{}
 	r := runner(t, rec, p)
 	item := Item{Ref: "o/r#7", URL: "u"}
 
-	started := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
-		close(started)
 		_, err := r.Run(context.Background(), item, digest, "1700.1")
 		done <- err
 	}()
-	<-started
+	// The claim is held from here until close(rec.release) below.
+	<-rec.entered
 
-	var second error
-	for i := 0; i < 100; i++ {
-		if _, second = r.Run(context.Background(), item, digest, "1700.1"); second != nil {
-			break
-		}
-	}
+	_, second := r.Run(context.Background(), item, digest, "1700.1")
 	if second == nil || !strings.Contains(second.Error(), "already running") {
 		t.Fatalf("second run = %v, want it refused", second)
 	}
+
+	close(rec.release)
 	if err := <-done; err != nil {
 		t.Fatalf("first run: %v", err)
 	}

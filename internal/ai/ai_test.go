@@ -23,6 +23,21 @@ type recorder struct {
 	// block holds the fake process open, so a timeout can be exercised without
 	// a real one.
 	block time.Duration
+	// entered receives once as each fake process starts — which is AFTER the
+	// runner has claimed the item.
+	//
+	// A test that needs to catch a run in flight has to wait for this rather
+	// than for the goroutine that launched it. `close(started)` before calling
+	// Run says only that a goroutine exists; it has not necessarily reached the
+	// claim, and racing it is a coin toss the test loses on a loaded machine.
+	//
+	// Buffered and sent to without blocking, so a recorder wired for one test's
+	// handshake does not deadlock every other run through it.
+	entered chan struct{}
+	// release holds the fake process open until the test lets it go. It is the
+	// deterministic half of `block`: a duration is a guess at how long the test
+	// will need, and the guess is wrong exactly when the machine is busy.
+	release chan struct{}
 }
 
 // lastArgv is the argv of the most recent run.
@@ -45,7 +60,22 @@ func (r *recorder) exec(ctx context.Context, dir string, argv []string) ([]byte,
 	r.mu.Lock()
 	r.dir, r.argv = dir, argv
 	out, err, block := r.out, r.err, r.block
+	entered, release := r.entered, r.release
 	r.mu.Unlock()
+
+	if entered != nil {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+	}
+	if release != nil {
+		select {
+		case <-ctx.Done():
+			return []byte(out), ctx.Err()
+		case <-release:
+		}
+	}
 	if block > 0 {
 		select {
 		case <-ctx.Done():
