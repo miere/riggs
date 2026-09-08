@@ -179,6 +179,20 @@ func (i *Installer) gather(ctx context.Context) (*config.Config, error) {
 	i.p.Say("Slack credentials for the \"default\" profile — Riggs' OWN app.")
 	i.p.Say("Not a shared one: clicks are delivered to whichever app posted the")
 	i.p.Say("message, so the daemon can only answer buttons on its own messages.")
+	i.p.Say("")
+	// Named here because none of them can be checked from a token alone, and
+	// every one of them fails QUIETLY: the daemon connects, the digest posts,
+	// and the missing piece surfaces as a button that does nothing, a tab that
+	// stays empty, or a message nobody decorates. The smoke test below catches
+	// chat:write and nothing else.
+	i.p.Say("Bot scopes it needs, none of which can be verified from here:")
+	i.p.Say("  chat:write        posting and updating the digests")
+	i.p.Say("  reactions:write   answering a click (without it, nothing is marked)")
+	i.p.Say("  views:publish     the App Home tab")
+	i.p.Say("  users:read        resolving an @handle in the config")
+	i.p.Say("  channels:history and its groups/im/mpim siblings — an emptied")
+	i.p.Say("                    digest checks its own thread before deleting it")
+	i.p.Say("")
 	i.p.Say("Paste a token, or ${ENV_VAR} to reference the environment instead.")
 	bot, err := i.secret("  Bot token (xoxb-)", "SLACK_BOT_TOKEN")
 	if err != nil {

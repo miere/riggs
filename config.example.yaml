@@ -113,6 +113,47 @@ admin:
 #   # is watching, and a hung harness is indistinguishable from a thinking one.
 #   timeout: 15m
 
+# How Riggs answers a click: a reaction on the message it came from, replaced as
+# the work moves along. Threads carry failures only.
+#
+# Every one of these is OPTIONAL and every one has a built-in, so an
+# unconfigured install reacts correctly and this section can stay commented out.
+# All four are editable from Customisation… on the App Home tab, which is the
+# easier way to change them — an emoji typed there that matches the built-in is
+# stored as a reset, so a later change to the default still reaches you.
+#
+# Values are shortcode NAMES, not the emoji itself: `reactions.add` takes
+# `tada`, never the character. Surrounding colons are absorbed, so `:tada:` and
+# `tada` are the same setting. A name Slack cannot parse is refused at LOAD —
+# the alternative is one invalid_name per click in a log nobody is reading,
+# while the button appears to work.
+#
+# REQUIRES the `reactions:write` OAuth scope. An app installed before this
+# existed does not have it: the daemon runs, every button works, and nothing is
+# decorated. Add the scope at api.slack.com and re-install the app.
+# reactions:
+#   # Riggs picked the task up. The only non-terminal state — whatever happens
+#   # next replaces it.
+#   acknowledgement: saluting_face
+#   # Riggs was handed something it does not answer. Terminal.
+#   disregard: zipper_mouth_face
+#   # The task finished. Terminal.
+#   success: white_check_mark
+#   # The task failed or finished with a warning, and the reason is in the
+#   # thread. Terminal.
+#   warning: warning
+
+# The App Home tab's own appearance.
+# home:
+#   # The portrait at the top of the tab. On by default: it is the one thing
+#   # there that says what this app is, and a colleague opening it for the first
+#   # time is exactly who needs telling. Unlike everything else on that surface
+#   # this is not admin-only in effect — it is what the app LOOKS like, not
+#   # something it lets you do.
+#   #
+#   # A boolean, unquoted. Also a switch on the Customisation modal.
+#   show-banner: true
+
 # The Slack accounts Riggs may deliver through. A tool picks one with
 # --slack-profile; with none given, the profile named "default" is used, and a
 # missing "default" is an error rather than a silent no-op.
@@ -130,6 +171,10 @@ slack:
     # Riggs' own Slack app: what the bulk digest is posted as, and what the
     # daemon listens as. Clicks on a message land in the app that posted it, so
     # the digest and the daemon must share one profile.
+    #
+    # Bot scopes it needs: chat:write, reactions:write, views:publish, plus the
+    # four history scopes (channels/groups/im/mpim:history) that let an emptied
+    # digest check its own thread before being deleted.
     #
     #   riggs daemon --slack-profile riggs
     #
