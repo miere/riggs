@@ -1,0 +1,146 @@
+{
+  "source": [
+    "p5-async-subagent/background-task-attempt1"
+  ],
+  "turns": [
+    [
+      {
+        "hook": {
+          "id": "toolu_01A9fheT3Ap9PkvRrLGvQwNs",
+          "name": "Agent",
+          "input": {
+            "description": "Run background sleep and file write task",
+            "prompt": "Run this bash command: `echo sub > sub.txt`. Then reply 'sub done'.",
+            "run_in_background": true
+          },
+          "allow": [
+            {
+              "emit": {
+                "type": "system",
+                "subtype": "background_tasks_changed",
+                "tasks": [
+                  {
+                    "task_id": "a7939e1d20337a577",
+                    "task_type": "local_agent",
+                    "description": "Run background sleep and file write task"
+                  }
+                ],
+                "uuid": "e73ce2e9-d7f1-4652-8bfb-fcf186735d3f",
+                "session_id": "{{session_id}}"
+              }
+            },
+            {
+              "emit": {
+                "type": "system",
+                "subtype": "task_started",
+                "task_id": "a7939e1d20337a577",
+                "tool_use_id": "toolu_01A9fheT3Ap9PkvRrLGvQwNs",
+                "description": "Run background sleep and file write task",
+                "subagent_type": "general-purpose",
+                "is_backgrounded": true,
+                "spawn_depth": 1,
+                "task_type": "local_agent",
+                "prompt": "Run this bash command: `echo sub > sub.txt`. Then reply 'sub done'.",
+                "uuid": "577b6d45-ca20-4ea7-993a-448eb42176d1",
+                "session_id": "{{session_id}}"
+              }
+            },
+            {
+              "tool_result": {
+                "id": "toolu_01A9fheT3Ap9PkvRrLGvQwNs",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Async agent launched successfully.\nagentId: a7939e1d20337a577"
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      {
+        "say": "launched"
+      },
+      {
+        "result": {
+          "text": "launched",
+          "num_turns": 3
+        }
+      },
+      {
+        "emit": {
+          "type": "assistant",
+          "message": {
+            "model": "claude-haiku-4-5-20251001",
+            "id": "msg_011Cf93LcPQoEKy3sXULiTH7",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "sub-agent chatter that is not a reply"
+              }
+            ],
+            "container": null,
+            "stop_reason": null,
+            "stop_sequence": null,
+            "stop_details": null
+          },
+          "parent_tool_use_id": "toolu_01A9fheT3Ap9PkvRrLGvQwNs",
+          "session_id": "{{session_id}}",
+          "uuid": "1c99deb5-bb2b-48cd-9585-483149edb5a2",
+          "subagent_type": "general-purpose",
+          "task_description": "Run background sleep and file write task"
+        }
+      },
+      {
+        "hook": {
+          "id": "toolu_01CNnYcU1S8btC7xyxETGamL",
+          "name": "Bash",
+          "agent_id": "a7939e1d20337a577",
+          "parent": "toolu_01A9fheT3Ap9PkvRrLGvQwNs",
+          "input": {
+            "command": "echo sub > sub.txt",
+            "description": "Write 'sub' to sub.txt"
+          },
+          "allow": [
+            {
+              "touch": "sub.txt"
+            },
+            {
+              "tool_result": {
+                "id": "toolu_01CNnYcU1S8btC7xyxETGamL",
+                "parent": "toolu_01A9fheT3Ap9PkvRrLGvQwNs",
+                "content": "(Bash completed with no output)"
+              }
+            }
+          ],
+          "deny": []
+        }
+      },
+      {
+        "emit": {
+          "type": "system",
+          "subtype": "task_notification",
+          "task_id": "a7939e1d20337a577",
+          "tool_use_id": "toolu_01A9fheT3Ap9PkvRrLGvQwNs",
+          "status": "completed",
+          "output_file": "/private/tmp/claude-501/fake/tasks/a7939e1d20337a577.output",
+          "summary": "sub done",
+          "uuid": "9ac92b98-4ac3-4ffa-b9dc-338e73a22498",
+          "session_id": "{{session_id}}"
+        }
+      },
+      {
+        "say": "Background agent completed. The subagent replied \"sub done\"."
+      },
+      {
+        "result": {
+          "text": "Background agent completed.",
+          "num_turns": 1
+        }
+      }
+    ]
+  ]
+}

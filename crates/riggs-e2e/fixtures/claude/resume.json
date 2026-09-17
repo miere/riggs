@@ -1,0 +1,27 @@
+{
+  "source": [
+    "p4-resume/resume-existing-other-cwd"
+  ],
+  "turns": [
+    [
+      {
+        "say": "noted"
+      },
+      {
+        "result": {
+          "text": "noted"
+        }
+      }
+    ],
+    [
+      {
+        "say": "recalled: {{history}}"
+      },
+      {
+        "result": {
+          "text": "recalled: {{history}}"
+        }
+      }
+    ]
+  ]
+}

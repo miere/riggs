@@ -1,0 +1,31 @@
+[package]
+name = "riggs-e2e"
+description = "End-to-end tests for Riggs against the RAX gateway simulator, with scripted fake agents"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+repository.workspace = true
+
+[[bin]]
+name = "fake-claude"
+path = "src/bin/fake-claude/main.rs"
+test = false
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["io-std", "process", "rt-multi-thread"] }
+
+[dev-dependencies]
+nix.workspace = true
+rax.workspace = true
+rax-sim.workspace = true
+rax-tokio.workspace = true
+riggs-claude-code.workspace = true
+riggs-node.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["net", "rt-multi-thread"] }
+
+[lints]
+workspace = true

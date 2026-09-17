@@ -1,0 +1,56 @@
+{
+  "source": [
+    "p0-hook-gate/allow-all-default-mode",
+    "p0-hook-gate/deny-all-default-mode",
+    "p6-interrupt/interrupt-during-held-hook"
+  ],
+  "turns": [
+    [
+      {
+        "hook": {
+          "id": "toolu_01SBH4LLZqjynw3M6EsJcdnL",
+          "name": "Bash",
+          "input": {
+            "command": "touch ran.txt",
+            "description": "Create ran.txt"
+          },
+          "allow": [
+            {
+              "touch": "ran.txt"
+            },
+            {
+              "tool_result": {
+                "id": "toolu_01SBH4LLZqjynw3M6EsJcdnL",
+                "content": "(Bash completed with no output)"
+              }
+            },
+            {
+              "say": "done"
+            }
+          ],
+          "deny": [
+            {
+              "say": "I was told: {{deny_reason}}"
+            }
+          ]
+        }
+      },
+      {
+        "result": {
+          "text": "done",
+          "num_turns": 2
+        }
+      }
+    ],
+    [
+      {
+        "say": "pong"
+      },
+      {
+        "result": {
+          "text": "pong"
+        }
+      }
+    ]
+  ]
+}

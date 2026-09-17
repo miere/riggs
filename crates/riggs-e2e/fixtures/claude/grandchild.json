@@ -1,0 +1,33 @@
+{
+  "source": [
+    "p0-hook-gate/allow-all-default-mode"
+  ],
+  "turns": [
+    [
+      {
+        "spawn_grandchild": "{{state}}/pids"
+      },
+      {
+        "hook": {
+          "id": "toolu_01SBH4LLZqjynw3M6EsJcdnL",
+          "name": "Bash",
+          "input": {
+            "command": "touch ran.txt",
+            "description": "Create ran.txt"
+          },
+          "allow": [
+            {
+              "touch": "ran.txt"
+            }
+          ],
+          "deny": []
+        }
+      },
+      {
+        "result": {
+          "text": "done"
+        }
+      }
+    ]
+  ]
+}

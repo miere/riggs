@@ -1,0 +1,55 @@
+{
+  "source": [
+    "p0-hook-gate/deny-all-default-mode"
+  ],
+  "turns": [
+    [
+      {
+        "hook": {
+          "id": "toolu_01SBH4LLZqjynw3M6EsJcdnL",
+          "name": "Bash",
+          "input": {
+            "command": "touch ran.txt",
+            "description": "Create ran.txt"
+          },
+          "allow": [
+            {
+              "touch": "ran.txt"
+            }
+          ],
+          "deny": [
+            {
+              "say": "First I was told: {{deny_reason}}"
+            }
+          ]
+        }
+      },
+      {
+        "hook": {
+          "id": "toolu_013Fzok4ZA6xc7hsBCMW5BCR",
+          "name": "Write",
+          "input": {
+            "file_path": "{{cwd}}/c.txt",
+            "content": "x"
+          },
+          "allow": [
+            {
+              "touch": "c.txt"
+            }
+          ],
+          "deny": [
+            {
+              "say": "Then I was told: {{deny_reason}}"
+            }
+          ]
+        }
+      },
+      {
+        "result": {
+          "text": "done",
+          "num_turns": 3
+        }
+      }
+    ]
+  ]
+}

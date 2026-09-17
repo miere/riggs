@@ -1,0 +1,73 @@
+{
+  "source": [
+    "p3-sdk-mcp/roundtrip-dontask-hook-allow"
+  ],
+  "turns": [
+    [
+      {
+        "hook": {
+          "id": "toolu_01ATTACHaaaaaaaaaaaaaaaa",
+          "name": "mcp__riggs__attach",
+          "input": {
+            "path": "report.bin",
+            "title": "Report"
+          },
+          "allow": [
+            {
+              "call_tool": {
+                "id": "toolu_01ATTACHaaaaaaaaaaaaaaaa",
+                "name": "attach",
+                "arguments": {
+                  "path": "report.bin",
+                  "title": "Report"
+                },
+                "as": "attached"
+              }
+            },
+            {
+              "say": "{{attached}}"
+            }
+          ]
+        }
+      },
+      {
+        "result": {
+          "text": "{{attached}}",
+          "num_turns": 2
+        }
+      }
+    ],
+    [
+      {
+        "hook": {
+          "id": "toolu_01ATTACHbbbbbbbbbbbbbbbb",
+          "name": "mcp__riggs__attach",
+          "input": {
+            "path": "../outside.txt"
+          },
+          "allow": [
+            {
+              "call_tool": {
+                "id": "toolu_01ATTACHbbbbbbbbbbbbbbbb",
+                "name": "attach",
+                "arguments": {
+                  "path": "../outside.txt"
+                },
+                "as": "refused"
+              }
+            },
+            {
+              "say": "{{refused}}"
+            }
+          ]
+        }
+      },
+      {
+        "result": {
+          "text": "{{refused}}",
+          "num_turns": 2
+        }
+      }
+    ]
+  ]
+}

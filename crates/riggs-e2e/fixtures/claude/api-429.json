@@ -1,0 +1,90 @@
+{
+  "source": [
+    "p7-api-errors/api-429-retries2"
+  ],
+  "turns": [
+    [
+      {
+        "emit": {
+          "type": "system",
+          "subtype": "api_retry",
+          "attempt": 1,
+          "max_retries": 2,
+          "retry_delay_ms": 1000,
+          "error_status": 429,
+          "error": "rate_limit",
+          "session_id": "{{session_id}}",
+          "uuid": "09cbfef2-3f96-48d2-b7da-920d25dea281"
+        }
+      },
+      {
+        "emit": {
+          "type": "system",
+          "subtype": "api_retry",
+          "attempt": 2,
+          "max_retries": 2,
+          "retry_delay_ms": 1000,
+          "error_status": 429,
+          "error": "rate_limit",
+          "session_id": "{{session_id}}",
+          "uuid": "e5461633-ecb7-4463-95ba-fc946b51a7e0"
+        }
+      },
+      {
+        "emit": {
+          "type": "assistant",
+          "message": {
+            "id": "ff30649f-35f2-419b-98b8-67882fc07ddc",
+            "container": null,
+            "model": "<synthetic>",
+            "role": "assistant",
+            "stop_details": null,
+            "stop_reason": "stop_sequence",
+            "stop_sequence": "",
+            "type": "message",
+            "content": [
+              {
+                "type": "text",
+                "text": "API Error: Request rejected (429) · Number of request tokens has exceeded your per-minute rate limit"
+              }
+            ]
+          },
+          "parent_tool_use_id": null,
+          "session_id": "{{session_id}}",
+          "uuid": "e3609d87-fb1d-41e1-b800-269e7715c8a4",
+          "error": "rate_limit",
+          "request_id": "req_stub",
+          "is_api_error_message": true
+        }
+      },
+      {
+        "emit": {
+          "type": "result",
+          "subtype": "success",
+          "is_error": true,
+          "num_turns": 1,
+          "stop_reason": "stop_sequence",
+          "terminal_reason": "api_error",
+          "session_id": "{{session_id}}",
+          "total_cost_usd": 0,
+          "permission_denials": [],
+          "api_error_status": 429,
+          "result": "API Error: Request rejected (429) · Number of request tokens has exceeded your per-minute rate limit",
+          "queued_turn_count": 0,
+          "result_index": 0,
+          "uuid": "9fa8291b-dab3-4ca3-af05-85359983e390"
+        }
+      }
+    ],
+    [
+      {
+        "say": "pong"
+      },
+      {
+        "result": {
+          "text": "pong"
+        }
+      }
+    ]
+  ]
+}

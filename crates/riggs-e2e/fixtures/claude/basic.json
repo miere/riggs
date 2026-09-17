@@ -1,0 +1,17 @@
+{
+  "source": [
+    "basic/normal-turn-and-eof"
+  ],
+  "turns": [
+    [
+      {
+        "say": "pong"
+      },
+      {
+        "result": {
+          "text": "pong"
+        }
+      }
+    ]
+  ]
+}

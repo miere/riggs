@@ -1,0 +1,33 @@
+{
+  "source": [
+    "basic/normal-turn-and-eof"
+  ],
+  "turns": [
+    [
+      {
+        "say": "about to flood"
+      },
+      {
+        "big_line": 2097152
+      },
+      {
+        "say": "never delivered"
+      },
+      {
+        "result": {
+          "text": "never"
+        }
+      }
+    ],
+    [
+      {
+        "say": "fresh: {{history}}"
+      },
+      {
+        "result": {
+          "text": "fresh"
+        }
+      }
+    ]
+  ]
+}
