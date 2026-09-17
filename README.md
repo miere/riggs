@@ -64,6 +64,19 @@ It never replaces an existing plist unless you pass `--update-existing`. Logs go
 `~/Library/Logs/riggs/`. `riggs version --check` tells you whether a newer release exists; it
 never downloads anything.
 
+## Benchmarks
+
+```sh
+cargo test -p riggs-e2e --test benchmark -- --ignored --nocapture
+```
+
+The benchmark runs the real `riggs` binary against the RAX gateway simulator and times a fixed
+set of turns for each agent kind: plain text, held tool calls, a question, a 10 MiB attachment, a
+turn whose socket is cut twice, and a restart that resumes a saved session. It repeats each one
+twenty times, or `RIGGS_BENCH_RUNS` times, prints a table and writes the numbers to
+`target/riggs-bench/`. The agents are the scripted fakes, so what it measures is the time Riggs
+and RAX add, never how fast a model answers.
+
 ## Crates
 
 - `riggs`: the daemon. It loads the config, reads the node token, dials the gateway and serves
