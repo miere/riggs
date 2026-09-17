@@ -4,11 +4,12 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use async_trait::async_trait;
 use rax::content::ContentBlock;
+use rax::credential::CredentialRenewal;
 use rax::session::{PromptCapabilities, SessionDurability, ToolGate as GateMode};
 use rax::{ErrorKind, Open, Unhandled};
 use riggs_node::{
     Backend, BackendError, BackendInfo, BackendRecord, HostHandles, NewSession, Opened, Restore,
-    SessionKey, TurnHandle,
+    SessionKey, TurnFailed, TurnHandle,
 };
 use serde::{Deserialize, Serialize};
 
@@ -16,7 +17,9 @@ use crate::args::Launch;
 use crate::config::ClaudeCodeConfig;
 use crate::content;
 use crate::error::{self, ClaudeCodeError};
+use crate::health::{self, Health};
 use crate::process::{self, Ctx, Proc};
+use crate::repair::Repair;
 
 /// Stored with every session record, so a node moved to another agent never resumes these.
 pub const BACKEND_NAME: &str = "claude-code";
@@ -41,6 +44,8 @@ struct Slot {
 pub struct ClaudeCode {
     ctx: Arc<Ctx>,
     slots: Mutex<HashMap<SessionKey, Arc<Slot>>>,
+    repair: Arc<Repair>,
+    probe: Mutex<Option<tokio::task::AbortHandle>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -49,13 +54,31 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 impl ClaudeCode {
     pub fn new(config: ClaudeCodeConfig) -> Self {
+        let ctx = Arc::new(Ctx {
+            health: Health::new(&config),
+            config,
+            host: OnceLock::new(),
+        });
         Self {
-            ctx: Arc::new(Ctx {
-                config,
-                host: OnceLock::new(),
-            }),
+            repair: Arc::new(Repair::new(ctx.clone())),
+            ctx,
             slots: Mutex::new(HashMap::new()),
+            probe: Mutex::new(None),
         }
+    }
+
+    /// For `ServerConfig::turn_failed` of the node serving this backend: the gateway hears `credential`
+    /// only once a sign-in is in front of the owner. On any other node it logs the misuse instead.
+    pub fn turn_failed(&self) -> TurnFailed {
+        let repair = self.repair.clone();
+        Arc::new(move |error| Box::pin(repair.clone().failed(error)))
+    }
+
+    fn failed(&self, err: ClaudeCodeError) -> BackendError {
+        if err.is_credential() {
+            self.ctx.health.degraded(&err.to_string());
+        }
+        BackendError::new(err)
     }
 
     fn slot(&self, key: &SessionKey) -> Option<Arc<Slot>> {
@@ -109,7 +132,15 @@ impl Backend for ClaudeCode {
                 }));
             }
         }
-        let _ = self.ctx.host.set(host);
+        if self.ctx.host.set(host.clone()).is_ok() {
+            self.ctx.health.start(host.credentials);
+            let ctx = self.ctx.clone();
+            let probe = tokio::spawn(async move {
+                let result = health::probe(&ctx.config).await;
+                ctx.health.probed(result);
+            });
+            *lock(&self.probe) = Some(probe.abort_handle());
+        }
         Ok(BackendInfo {
             name: BACKEND_NAME.to_owned(),
             interruptible: true,
@@ -164,7 +195,7 @@ impl Backend for ClaudeCode {
             }
             Err(err) => {
                 lock(&self.slots).remove(key);
-                Err(BackendError::new(err))
+                Err(self.failed(err))
             }
         }
     }
@@ -178,7 +209,10 @@ impl Backend for ClaudeCode {
         let slot = self
             .slot(key)
             .ok_or_else(|| ClaudeCodeError::UnknownSession(key.to_string()))?;
-        let proc = self.running(key, &slot).await?;
+        let proc = self
+            .running(key, &slot)
+            .await
+            .map_err(|err| self.failed(err))?;
         if turn.cancelled.is_cancelled() {
             return Err(BackendError::new(ClaudeCodeError::Cancelled));
         }
@@ -215,11 +249,19 @@ impl Backend for ClaudeCode {
         }
     }
 
+    async fn renew_credential(&self) -> CredentialRenewal {
+        self.repair.clone().renew().await
+    }
+
     fn classify(&self, err: &BackendError) -> ErrorKind {
         error::classify(err)
     }
 
     async fn shutdown(&self) {
+        if let Some(probe) = lock(&self.probe).take() {
+            probe.abort();
+        }
+        self.repair.stop().await;
         let slots: Vec<Arc<Slot>> = lock(&self.slots).drain().map(|(_, slot)| slot).collect();
         let procs: Vec<Arc<Proc>> = slots
             .iter()

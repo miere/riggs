@@ -1,9 +1,13 @@
-use rax::event::BackgroundEvent;
+use std::sync::Arc;
+
+use rax::ErrorKind;
+use rax::event::{BackgroundEvent, StopReason};
 use rax::id::RequestId;
 use riggs_node::{BackendEvent, HostHandles, SessionKey, TurnSink};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::error::classify;
+use crate::process::Ctx;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Route {
@@ -35,13 +39,13 @@ struct Current {
     sink: Option<TurnSink>,
 }
 
-pub(crate) async fn run(
-    host: Option<HostHandles>,
-    key: SessionKey,
-    mut queue: mpsc::UnboundedReceiver<Emit>,
-) {
+pub(crate) async fn run(ctx: Arc<Ctx>, key: SessionKey, mut queue: mpsc::UnboundedReceiver<Emit>) {
+    let host = ctx.host.get();
     let mut current: Option<Current> = None;
     while let Some(item) = queue.recv().await {
+        if let Emit::Event { event, .. } | Emit::End { event, .. } = &item {
+            observe(&ctx, event);
+        }
         match item {
             Emit::Begin { stream, sink } => {
                 current = Some(Current {
@@ -62,7 +66,7 @@ pub(crate) async fn run(
                             open.sink = None;
                         }
                     }
-                    None => background(host.as_ref(), &key, event).await,
+                    None => background(host, &key, event).await,
                 }
             }
             Emit::End { stream, event } => match current.take() {
@@ -82,6 +86,18 @@ pub(crate) async fn run(
                 let _ = done.send(());
             }
         }
+    }
+}
+
+fn observe(ctx: &Ctx, event: &BackendEvent) {
+    match event {
+        BackendEvent::Error(err) if classify(err) == ErrorKind::Credential => {
+            ctx.health.degraded(&err.to_string());
+        }
+        BackendEvent::Complete(Some(stop)) if *stop != StopReason::Cancelled => {
+            ctx.health.recovered();
+        }
+        _ => {}
     }
 }
 

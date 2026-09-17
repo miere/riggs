@@ -10,7 +10,7 @@ use nix::unistd::Pid;
 use rax::content::ContentBlock;
 use rax::session::{GatewayCapabilities, Initialized};
 use rax::{Event, Open};
-use rax_sim::{SimConfig, SimError, SimNode, Simulator};
+use rax_sim::{NodeOptions, SimConfig, SimError, SimNode, Simulator};
 use rax_tokio::gateway::GatewayConfig;
 use rax_tokio::node::{NodeConfig, NodeLink};
 use riggs_claude_code::{ClaudeCode, ClaudeCodeConfig};
@@ -77,6 +77,9 @@ struct Running {
 pub struct World {
     pub sim: Simulator,
     pub config: ClaudeCodeConfig,
+    /// Installs the backend's credential repair as the node's `turn_failed`, as the binary does.
+    pub repair: bool,
+    pub call_timeout: Option<Duration>,
     dir: TempDir,
     node: Option<Running>,
 }
@@ -87,6 +90,14 @@ impl World {
     }
 
     pub async fn with(script: &str, tweak: impl FnOnce(&mut ClaudeCodeConfig)) -> Self {
+        Self::build(script, tweak, NodeOptions::default()).await
+    }
+
+    pub async fn build(
+        script: &str,
+        tweak: impl FnOnce(&mut ClaudeCodeConfig),
+        node: NodeOptions,
+    ) -> Self {
         let dir = tempfile::Builder::new()
             .prefix("claude-code-")
             .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
@@ -110,6 +121,7 @@ impl World {
         );
         config.handshake_timeout = Duration::from_secs(20);
         config.interrupt_grace = Duration::from_secs(20);
+        config.sign_in.scratch_dir = dir.path().to_path_buf();
         tweak(&mut config);
         let sim_config = SimConfig {
             gateway: GatewayConfig {
@@ -117,6 +129,7 @@ impl World {
                 handshake_timeout: Duration::from_secs(5),
                 ..Default::default()
             },
+            node,
             wait: WAIT,
             ..Default::default()
         };
@@ -126,6 +139,8 @@ impl World {
         Self {
             sim,
             config,
+            repair: false,
+            call_timeout: None,
             dir,
             node: None,
         }
@@ -154,10 +169,16 @@ impl World {
     pub async fn start_node_initialized(&mut self) -> (SimNode, Initialized) {
         assert!(self.node.is_none(), "a node is already running");
         let backend = Arc::new(ClaudeCode::new(self.config.clone()));
-        let config = ServerConfig::new(SessionsConfig::Durable {
+        let mut config = ServerConfig::new(SessionsConfig::Durable {
             dir: self.store(),
             retain: SESSION_RETENTION,
         });
+        if self.repair {
+            config.turn_failed = Some(backend.turn_failed());
+        }
+        if let Some(call_timeout) = self.call_timeout {
+            config.call_timeout = call_timeout;
+        }
         let server = NodeServer::new(backend, config).unwrap();
         let (handle, events) = NodeLink::start(NodeConfig {
             endpoint: self.sim.url(),
