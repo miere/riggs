@@ -23,12 +23,19 @@ rax-tokio = { git = "https://github.com/miere/rax-rs", branch = "main" }
 rax-sim = { git = "https://github.com/miere/rax-rs", branch = "main" }
 agent-client-protocol = "=2.1.0"
 async-trait = "0.1"
+clap = { version = "4", features = ["derive"] }
+dotenvy = "0.15"
+escargot = "0.5"
+humantime = "2"
 base64 = "0.22"
 futures = { version = "0.3", default-features = false, features = ["std"] }
 riggs-acp = { path = "crates/riggs-acp" }
 riggs-claude-code = { path = "crates/riggs-claude-code" }
 riggs-node = { path = "crates/riggs-node" }
 riggs-process = { path = "crates/riggs-process" }
+rand = "0.10"
+semver = "1"
+sha2 = "0.10"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 nix = { version = "0.30", default-features = false, features = ["process", "signal"] }
 serde = { version = "1", features = ["derive"] }
@@ -36,10 +43,12 @@ serde_json = "1"
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 tempfile = "3"
 thiserror = "2"
+toml = "1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "json", "std"] }
+ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
 time = { version = "0.3", features = ["serde-well-known"] }
 tokio = { version = "1", features = ["fs", "io-util", "macros", "rt", "sync", "time"] }
 tokio-tungstenite = "0.30"
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
 uuid = { version = "1", features = ["v4"] }
