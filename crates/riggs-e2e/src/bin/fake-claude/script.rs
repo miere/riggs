@@ -13,7 +13,38 @@ pub struct Script {
     pub ready_file: Option<String>,
     /// Indexed by every prompt the session has ever had, across processes, so a resumed process
     /// continues the story; the last list repeats.
+    #[serde(default)]
     pub turns: Vec<Vec<Step>>,
+    #[serde(default)]
+    pub auth: Auth,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Auth {
+    /// Printed by `auth status`, which exits 1 unless it says `loggedIn: true`. Signed in when unset.
+    #[serde(default)]
+    pub status: Option<Value>,
+    /// One list per `auth login` run in the state directory; the last repeats.
+    #[serde(default)]
+    pub logins: Vec<Vec<LoginStep>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum LoginStep {
+    Say(String),
+    /// Written without a newline, as the real CLI writes its code prompt.
+    Prompt(String),
+    Stderr(String),
+    /// Reads lines like the real CLI: one without `#` is refused and read again, `accept` signs
+    /// in and exits 0, anything else fails with exit 1.
+    AwaitCode {
+        accept: String,
+    },
+    SpawnGrandchild(String),
+    Hang,
+    Exit(i32),
 }
 
 #[derive(Debug, Clone, Deserialize)]

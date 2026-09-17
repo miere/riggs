@@ -1,0 +1,112 @@
+{
+  "source": [
+    "p7-api-errors/api-401-retries2",
+    "murtaugh cmd/murtaugh-runtime/repair_test.go failingAgent (login marker text)",
+    "claude 2.1.271 binary: authLogin and authStatus output"
+  ],
+  "turns": [
+    [
+      {
+        "emit": {
+          "type": "system",
+          "subtype": "api_retry",
+          "attempt": 1,
+          "max_retries": 2,
+          "retry_delay_ms": 616,
+          "error_status": 401,
+          "error": "authentication_failed",
+          "session_id": "{{session_id}}",
+          "uuid": "09cbfef2-3f96-48d2-b7da-920d25dea281"
+        }
+      },
+      {
+        "emit": {
+          "type": "system",
+          "subtype": "api_retry",
+          "attempt": 2,
+          "max_retries": 2,
+          "retry_delay_ms": 616,
+          "error_status": 401,
+          "error": "authentication_failed",
+          "session_id": "{{session_id}}",
+          "uuid": "e5461633-ecb7-4463-95ba-fc946b51a7e0"
+        }
+      },
+      {
+        "emit": {
+          "type": "assistant",
+          "message": {
+            "id": "ff30649f-35f2-419b-98b8-67882fc07ddc",
+            "container": null,
+            "model": "<synthetic>",
+            "role": "assistant",
+            "stop_details": null,
+            "stop_reason": "stop_sequence",
+            "stop_sequence": "",
+            "type": "message",
+            "content": [
+              {
+                "type": "text",
+                "text": "API Error: 401 Invalid API key · Please run /login"
+              }
+            ]
+          },
+          "parent_tool_use_id": null,
+          "session_id": "{{session_id}}",
+          "uuid": "e3609d87-fb1d-41e1-b800-269e7715c8a4",
+          "error": "authentication_failed",
+          "request_id": "req_stub",
+          "is_api_error_message": true
+        }
+      },
+      {
+        "emit": {
+          "type": "result",
+          "subtype": "success",
+          "is_error": true,
+          "num_turns": 1,
+          "stop_reason": "stop_sequence",
+          "terminal_reason": "api_error",
+          "session_id": "{{session_id}}",
+          "total_cost_usd": 0,
+          "permission_denials": [],
+          "api_error_status": 401,
+          "result": "API Error: 401 Invalid API key · Please run /login",
+          "queued_turn_count": 0,
+          "result_index": 0,
+          "uuid": "9fa8291b-dab3-4ca3-af05-85359983e390"
+        }
+      }
+    ],
+    [
+      {
+        "say": "pong"
+      },
+      {
+        "result": {
+          "text": "pong"
+        }
+      }
+    ]
+  ],
+  "auth": {
+    "logins": [
+      [
+        {
+          "say": "Opening browser to sign in…"
+        },
+        {
+          "say": "If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=org%3Acreate_api_key+user%3Aprofile+user%3Ainference&code_challenge=fake-challenge&code_challenge_method=S256&state=fake-state"
+        },
+        {
+          "prompt": "Paste code here if prompted > "
+        },
+        {
+          "await_code": {
+            "accept": "GOOD#fake-state"
+          }
+        }
+      ]
+    ]
+  }
+}

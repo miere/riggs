@@ -8,6 +8,7 @@
     clippy::zombie_processes
 )]
 
+mod auth;
 mod script;
 mod shapes;
 
@@ -51,10 +52,17 @@ struct Fake {
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args == ["--version"] {
+        println!("{}", auth::VERSION);
+        return;
+    }
     let state = PathBuf::from(std::env::var("FAKE_CLAUDE_STATE").expect("FAKE_CLAUDE_STATE"));
     let script_path = std::env::var("FAKE_CLAUDE_SCRIPT").expect("FAKE_CLAUDE_SCRIPT");
     let script: Script = serde_json::from_slice(&fs::read(&script_path).expect("read the script"))
         .expect("parse the script");
+    if args.first().map(String::as_str) == Some("auth") {
+        std::process::exit(auth::run(&args, &script.auth, &state));
+    }
     let flag = |name: &str| {
         args.iter()
             .position(|arg| arg == name)

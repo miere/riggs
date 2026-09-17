@@ -1,0 +1,25 @@
+{
+  "source": [
+    "claude 2.1.271 binary: authStatus output when signed out"
+  ],
+  "turns": [
+    [
+      {
+        "say": "pong"
+      },
+      {
+        "result": {
+          "text": "pong"
+        }
+      }
+    ]
+  ],
+  "auth": {
+    "status": {
+      "loggedIn": false,
+      "authMethod": "none",
+      "apiProvider": "firstParty",
+      "analyticsDisabled": false
+    }
+  }
+}

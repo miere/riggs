@@ -25,6 +25,7 @@ use crate::args::{self, Launch};
 use crate::config::ClaudeCodeConfig;
 use crate::emit::{self, Emit, Route};
 use crate::error::{ClaudeCodeError, StderrTail};
+use crate::health::Health;
 use crate::outcome::{self, Outcome};
 use crate::wire::{self, GATE_CALLBACK, RESUME_MISS, ResultFrame, id_of, text_of};
 use crate::{mcp, tool};
@@ -36,6 +37,7 @@ const INTERRUPT_WAIT: Duration = Duration::from_secs(5);
 pub(crate) struct Ctx {
     pub(crate) config: ClaudeCodeConfig,
     pub(crate) host: OnceLock<HostHandles>,
+    pub(crate) health: Health,
 }
 
 #[derive(Clone)]
@@ -147,7 +149,7 @@ pub(crate) async fn spawn(
     });
     tracing::debug!(session_id = %key, pid = leader.pid(), ?launch, "Claude Code started");
     tokio::spawn(write(stdin, lines));
-    tokio::spawn(emit::run(ctx.host.get().cloned(), key, queue));
+    tokio::spawn(emit::run(ctx.clone(), key, queue));
     tokio::spawn(reap(proc.clone(), leader, kills));
     tokio::spawn(read(proc.clone(), stdout));
     match proc.handshake().await {
