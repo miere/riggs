@@ -14,6 +14,8 @@ use std::io::{BufRead, Write};
 use std::os::unix::process::CommandExt;
 use std::sync::mpsc;
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -222,6 +224,18 @@ impl Agent {
                 "crash" => {
                     eprintln!("{}", arg["stderr"].as_str().unwrap_or_default());
                     std::process::exit(i32::try_from(arg["code"].as_i64().unwrap_or(1)).unwrap());
+                }
+                "blob" => {
+                    let size = usize::try_from(arg.as_u64().unwrap()).unwrap();
+                    let bytes: Vec<u8> = (0..size).map(|byte| (byte % 251) as u8).collect();
+                    self.update(json!({
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "resource", "resource": {
+                            "uri": "file:///report.bin",
+                            "blob": BASE64.encode(&bytes),
+                            "mimeType": "application/octet-stream",
+                        }},
+                    }));
                 }
                 "oversize" => {
                     let size = usize::try_from(arg.as_u64().unwrap()).unwrap();

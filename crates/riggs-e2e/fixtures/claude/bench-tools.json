@@ -1,0 +1,96 @@
+{
+  "source": [
+    "p0-hook-gate/allow-all-default-mode"
+  ],
+  "turns": [
+    [
+      {
+        "hook": {
+          "id": "toolu_01BENCHaaaaaaaaaaaaaaaa",
+          "name": "Bash",
+          "input": {
+            "command": "touch step1.txt",
+            "description": "Step 1"
+          },
+          "allow": [
+            {
+              "touch": "step1.txt"
+            },
+            {
+              "tool_result": {
+                "id": "toolu_01BENCHaaaaaaaaaaaaaaaa",
+                "content": "(Bash completed with no output)"
+              }
+            }
+          ],
+          "deny": [
+            {
+              "say": "I was told: {{deny_reason}}"
+            }
+          ]
+        }
+      },
+      {
+        "hook": {
+          "id": "toolu_01BENCHbbbbbbbbbbbbbbbb",
+          "name": "Bash",
+          "input": {
+            "command": "touch step2.txt",
+            "description": "Step 2"
+          },
+          "allow": [
+            {
+              "touch": "step2.txt"
+            },
+            {
+              "tool_result": {
+                "id": "toolu_01BENCHbbbbbbbbbbbbbbbb",
+                "content": "(Bash completed with no output)"
+              }
+            }
+          ],
+          "deny": [
+            {
+              "say": "I was told: {{deny_reason}}"
+            }
+          ]
+        }
+      },
+      {
+        "hook": {
+          "id": "toolu_01BENCHcccccccccccccccc",
+          "name": "Bash",
+          "input": {
+            "command": "touch step3.txt",
+            "description": "Step 3"
+          },
+          "allow": [
+            {
+              "touch": "step3.txt"
+            },
+            {
+              "tool_result": {
+                "id": "toolu_01BENCHcccccccccccccccc",
+                "content": "(Bash completed with no output)"
+              }
+            }
+          ],
+          "deny": [
+            {
+              "say": "I was told: {{deny_reason}}"
+            }
+          ]
+        }
+      },
+      {
+        "say": "done"
+      },
+      {
+        "result": {
+          "text": "done",
+          "num_turns": 4
+        }
+      }
+    ]
+  ]
+}
