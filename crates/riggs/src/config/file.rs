@@ -1,0 +1,62 @@
+use std::collections::BTreeMap;
+
+use serde::Deserialize;
+
+/// The TOML as written. Every value is optional here so validation can name every missing field
+/// at once instead of stopping at the first.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct File {
+    #[serde(default)]
+    pub gateway: Gateway,
+    #[serde(default)]
+    pub agent: Agent,
+    #[serde(default)]
+    pub sessions: Sessions,
+    #[serde(default)]
+    pub log: Log,
+    pub env_file: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Gateway {
+    pub url: Option<String>,
+    pub token_file: Option<String>,
+    pub insecure_skip_verify: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Agent {
+    pub kind: Option<String>,
+    pub command: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    pub workdir: Option<String>,
+    pub model: Option<String>,
+    pub hook_timeout: Option<String>,
+    pub handshake_timeout: Option<String>,
+    pub interrupt_grace: Option<String>,
+    pub interruptible: Option<bool>,
+    pub startup_timeout: Option<String>,
+    pub cancel_grace_period: Option<String>,
+    pub permission_timeout: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Sessions {
+    pub durable: Option<bool>,
+    pub dir: Option<String>,
+    pub retain: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Log {
+    pub level: Option<String>,
+    pub format: Option<String>,
+}
