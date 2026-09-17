@@ -1,0 +1,17 @@
+{
+  "source": [
+    "p8-image/user-content-array-with-image"
+  ],
+  "turns": [
+    [
+      {
+        "say": "I read: {{prompt}}"
+      },
+      {
+        "result": {
+          "text": "I read: {{prompt}}"
+        }
+      }
+    ]
+  ]
+}

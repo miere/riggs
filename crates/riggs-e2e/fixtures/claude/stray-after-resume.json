@@ -1,0 +1,55 @@
+{
+  "source": [
+    "basic/second-user-message-mid-turn",
+    "p4-resume/resume-existing-other-cwd"
+  ],
+  "turns": [
+    [
+      {
+        "say": "noted"
+      },
+      {
+        "result": {
+          "text": "noted"
+        }
+      }
+    ],
+    [
+      {
+        "emit": {
+          "type": "system",
+          "subtype": "task_notification",
+          "task_id": "bu0b2ajny",
+          "status": "stopped",
+          "summary": "No completion record was found for this background shell command from the previous session.",
+          "session_id": "{{session_id}}",
+          "uuid": "d7fbf02e-ea21-4d84-b5ab-7cba4f799e6b"
+        }
+      },
+      {
+        "emit": {
+          "type": "result",
+          "subtype": "success",
+          "is_error": false,
+          "num_turns": 0,
+          "stop_reason": null,
+          "result": "",
+          "session_id": "{{session_id}}",
+          "total_cost_usd": 0,
+          "permission_denials": [],
+          "queued_turn_count": 0,
+          "result_index": 0,
+          "uuid": "3f499deb-7d7c-4bde-be75-9ff5dff74a8c"
+        }
+      },
+      {
+        "say": "recalled: {{history}}"
+      },
+      {
+        "result": {
+          "text": "recalled: {{history}}"
+        }
+      }
+    ]
+  ]
+}

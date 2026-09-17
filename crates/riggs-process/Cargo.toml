@@ -1,0 +1,21 @@
+[package]
+name = "riggs-process"
+description = "Starts agent processes in their own group and kills them with everything they spawned"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+repository.workspace = true
+
+[dependencies]
+nix.workspace = true
+sysinfo.workspace = true
+tokio = { workspace = true, features = ["process"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["process", "rt-multi-thread"] }
+
+[lints]
+workspace = true

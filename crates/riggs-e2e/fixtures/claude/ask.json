@@ -1,0 +1,77 @@
+{
+  "source": [
+    "p3-sdk-mcp/ask-person-held-330s-hook-allow"
+  ],
+  "turns": [
+    [
+      {
+        "hook": {
+          "id": "toolu_01GfE4ME2GDmLHggsxHxTgc3",
+          "name": "mcp__riggs__ask",
+          "input": {
+            "questions": [
+              {
+                "header": "Colour",
+                "question": "Favourite colour?",
+                "options": [
+                  {
+                    "label": "Red"
+                  },
+                  {
+                    "label": "Blue",
+                    "description": "Like the sky"
+                  }
+                ]
+              }
+            ]
+          },
+          "allow": [
+            {
+              "call_tool": {
+                "id": "toolu_01GfE4ME2GDmLHggsxHxTgc3",
+                "name": "ask",
+                "arguments": {
+                  "questions": [
+                    {
+                      "header": "Colour",
+                      "question": "Favourite colour?",
+                      "options": [
+                        {
+                          "label": "Red"
+                        },
+                        {
+                          "label": "Blue",
+                          "description": "Like the sky"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                "as": "answer"
+              }
+            },
+            {
+              "say": "The person said: {{answer}}"
+            }
+          ]
+        }
+      },
+      {
+        "result": {
+          "text": "The person said: {{answer}}",
+          "num_turns": 2
+        }
+      }
+    ],
+    [
+      {
+        "say": "pong"
+      },
+      {
+        "result": {
+          "text": "pong"
+        }
+      }
+    ]
+  ]
+}

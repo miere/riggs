@@ -1,0 +1,41 @@
+{
+  "source": [
+    "p3-sdk-mcp/ask-person-held-330s-hook-allow"
+  ],
+  "turns": [
+    [
+      {
+        "hook": {
+          "id": "toolu_01PLANaaaaaaaaaaaaaaaaaa",
+          "name": "mcp__riggs__present_plan",
+          "input": {
+            "plan": "1. Read the logs\n2. Fix the bug",
+            "title": "Fix the flaky test"
+          },
+          "allow": [
+            {
+              "call_tool": {
+                "id": "toolu_01PLANaaaaaaaaaaaaaaaaaa",
+                "name": "present_plan",
+                "arguments": {
+                  "plan": "1. Read the logs\n2. Fix the bug",
+                  "title": "Fix the flaky test"
+                },
+                "as": "verdict"
+              }
+            },
+            {
+              "say": "Plan answer: {{verdict}}"
+            }
+          ]
+        }
+      },
+      {
+        "result": {
+          "text": "Plan answer: {{verdict}}",
+          "num_turns": 2
+        }
+      }
+    ]
+  ]
+}

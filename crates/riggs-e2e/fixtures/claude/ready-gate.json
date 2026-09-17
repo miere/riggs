@@ -1,0 +1,18 @@
+{
+  "source": [
+    "basic/normal-turn-and-eof"
+  ],
+  "ready_file": "{{state}}/ready",
+  "turns": [
+    [
+      {
+        "say": "pong"
+      },
+      {
+        "result": {
+          "text": "pong"
+        }
+      }
+    ]
+  ]
+}
