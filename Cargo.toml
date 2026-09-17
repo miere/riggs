@@ -21,12 +21,16 @@ panic = "deny"
 rax = { git = "https://github.com/miere/rax-rs", branch = "main" }
 rax-tokio = { git = "https://github.com/miere/rax-rs", branch = "main" }
 rax-sim = { git = "https://github.com/miere/rax-rs", branch = "main" }
+agent-client-protocol = "=2.1.0"
+async-trait = "0.1"
+base64 = "0.22"
+futures = { version = "0.3", default-features = false, features = ["std"] }
+riggs-acp = { path = "crates/riggs-acp" }
 riggs-claude-code = { path = "crates/riggs-claude-code" }
 riggs-node = { path = "crates/riggs-node" }
 riggs-process = { path = "crates/riggs-process" }
-async-trait = "0.1"
-nix = { version = "0.30", default-features = false, features = ["process", "signal"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+nix = { version = "0.30", default-features = false, features = ["process", "signal"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }
