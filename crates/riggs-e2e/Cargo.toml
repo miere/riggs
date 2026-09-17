@@ -12,20 +12,26 @@ name = "fake-claude"
 path = "src/bin/fake-claude/main.rs"
 test = false
 
+[[bin]]
+name = "fake-acp"
+path = "src/bin/fake_acp.rs"
+test = false
+
 [dependencies]
+nix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["io-std", "process", "rt-multi-thread"] }
 
 [dev-dependencies]
-nix.workspace = true
 rax.workspace = true
 rax-sim.workspace = true
 rax-tokio.workspace = true
+riggs-acp.workspace = true
 riggs-claude-code.workspace = true
 riggs-node.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["net", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["net", "process", "rt-multi-thread"] }
 
 [lints]
 workspace = true
