@@ -53,7 +53,7 @@ fn run(flag: Option<PathBuf>, args: RunArgs) -> Result<(), String> {
         .build()
         .map_err(|err| format!("cannot start the async runtime: {err}"))?;
     runtime.block_on(async move {
-        let server = agent::server(&config.agent, config.sessions.clone())
+        let server = agent::server(&config.agent, config.sessions.clone(), config.dir.join("files"))
             .map_err(|err| err.to_string())?;
         signals::install(server.shutdown_token())
             .map_err(|err| format!("cannot install signal handlers: {err}"))?;

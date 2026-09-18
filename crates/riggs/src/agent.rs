@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use riggs_acp::AcpBackend;
@@ -7,7 +8,11 @@ use riggs_node::{Backend, NodeServer, ServerConfig, ServerError, SessionsConfig,
 use crate::config::AgentConfig;
 
 /// Turn failure hooks are chosen per backend, because only Claude Code has a sign-in to repair.
-pub fn server(agent: &AgentConfig, sessions: SessionsConfig) -> Result<NodeServer, ServerError> {
+pub fn server(
+    agent: &AgentConfig,
+    sessions: SessionsConfig,
+    files_dir: PathBuf,
+) -> Result<NodeServer, ServerError> {
     let (backend, turn_failed): (Arc<dyn Backend>, Option<TurnFailed>) = match agent {
         AgentConfig::ClaudeCode(config) => {
             let claude = Arc::new(ClaudeCode::new(config.clone()));
@@ -18,5 +23,6 @@ pub fn server(agent: &AgentConfig, sessions: SessionsConfig) -> Result<NodeServe
     };
     let mut config = ServerConfig::new(sessions);
     config.turn_failed = turn_failed;
+    config.files_dir = Some(files_dir);
     NodeServer::new(backend, config)
 }

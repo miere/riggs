@@ -2,6 +2,7 @@
 //! dialling; this crate owns everything that happens on a link once it is up.
 
 mod backend;
+mod files;
 mod host;
 mod server;
 mod sessions;
