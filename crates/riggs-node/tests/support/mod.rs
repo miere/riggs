@@ -86,6 +86,7 @@ pub struct Fake {
     block_prompt: Mutex<bool>,
     health: Mutex<Option<CredentialHealth>>,
     cancelled: Notify,
+    last_prompt: Mutex<Vec<Open<ContentBlock>>>,
 }
 
 impl Fake {
@@ -114,6 +115,7 @@ impl Fake {
             block_prompt: Mutex::new(false),
             health: Mutex::new(None),
             cancelled: Notify::new(),
+            last_prompt: Mutex::new(Vec::new()),
         })
     }
 
@@ -126,6 +128,10 @@ impl Fake {
                 .take()
                 .expect("seen taken twice"),
         }
+    }
+
+    pub fn last_prompt(&self) -> Vec<Open<ContentBlock>> {
+        self.last_prompt.lock().unwrap().clone()
     }
 
     pub fn on_prompt(&self, script: Script) {
@@ -246,6 +252,7 @@ impl Backend for Fake {
             })
             .collect::<Vec<_>>()
             .join("\n");
+        *self.last_prompt.lock().unwrap() = content.clone();
         let _ = self.seen.send(Seen::Prompt(*key, text.clone()));
         let block = *self.block_prompt.lock().unwrap();
         if block {

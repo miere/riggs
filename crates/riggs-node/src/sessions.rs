@@ -60,6 +60,16 @@ impl Sessions {
         lock(&self.slots).contains_key(key)
     }
 
+    pub(crate) async fn exists(&self, key: &SessionKey) -> bool {
+        if self.is_known(key) {
+            return true;
+        }
+        match &self.store {
+            Some(store) => !matches!(store.load(*key).await, Ok(None)),
+            None => false,
+        }
+    }
+
     pub(crate) async fn create(
         &self,
         key: SessionKey,

@@ -18,6 +18,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use crate::backend::{self, Backend, BackendInfo, HostHandles, SessionKey, TurnHandle};
+use crate::files::Files;
 use crate::host::push_health_snapshot;
 use crate::sessions::{OpenError, Sessions};
 use crate::state::{Reserve, Reset, ResetReason, Shared};
@@ -52,6 +53,9 @@ pub struct ServerConfig {
     /// never heard of that turn, so it cannot be told `session_busy` about it straight away.
     pub drain_timeout: Duration,
     pub turn_failed: Option<TurnFailed>,
+    /// Where files the gateway links are saved for the agent to read. Unset means a folder in the
+    /// system temp dir, emptied at start like any ephemeral state.
+    pub files_dir: Option<PathBuf>,
 }
 
 impl ServerConfig {
@@ -64,6 +68,7 @@ impl ServerConfig {
             shutdown_grace: SHUTDOWN_GRACE,
             drain_timeout: DRAIN_TIMEOUT,
             turn_failed: None,
+            files_dir: None,
         }
     }
 }
@@ -98,6 +103,7 @@ struct Inner {
     backend: Arc<dyn Backend>,
     shared: Arc<Shared>,
     sessions: Sessions,
+    files: Files,
     config: ServerConfig,
     failures: Failures,
     info: OnceCell<BackendInfo>,
@@ -112,6 +118,13 @@ impl NodeServer {
             SessionsConfig::Durable { dir, retain } => Some(SessionStore::open(dir, *retain)?),
             SessionsConfig::Ephemeral => None,
         };
+        let files = {
+            let dir = config.files_dir.clone().unwrap_or_else(|| {
+                std::env::temp_dir().join(format!("riggs-files-{}", uuid::Uuid::new_v4()))
+            });
+            let ephemeral = matches!(config.sessions, SessionsConfig::Ephemeral);
+            Files::new(dir, ephemeral)
+        };
         let failures = Failures {
             backend: backend.clone(),
             hook: config.turn_failed.clone(),
@@ -120,6 +133,7 @@ impl NodeServer {
             inner: Arc::new(Inner {
                 shared: Arc::new(Shared::new(config.call_timeout)),
                 sessions: Sessions::new(store),
+                files,
                 backend,
                 config,
                 failures,
@@ -169,7 +183,14 @@ impl NodeServer {
                 }
                 _ = prune.tick() => {
                     let pruning = inner.clone();
-                    inner.tasks.spawn(async move { pruning.sessions.prune().await });
+                    inner.tasks.spawn(async move {
+                        pruning.sessions.prune().await;
+                        for key in pruning.files.sessions() {
+                            if !pruning.sessions.exists(&key).await {
+                                pruning.files.discard(&key);
+                            }
+                        }
+                    });
                 }
                 event = events.recv() => {
                     let Some(event) = event else {
@@ -354,7 +375,7 @@ impl Inner {
                 .await
                 .map(GatewayReply::Initialize),
             GatewayCall::NewSession(request) => self
-                .new_session(request)
+                .new_session(&handle, epoch, request)
                 .await
                 .map(GatewayReply::NewSession),
             GatewayCall::Prompt(prompt) => return self.prompt(handle, epoch, id, prompt).await,
@@ -408,43 +429,77 @@ impl Inner {
 
     async fn initialize(&self, epoch: u64, offer: Initialize) -> Result<Initialized, rax::Error> {
         let info = self.started().await?;
+        let mut resource_schemes = info.resource_schemes.clone();
+        for scheme in &offer.capabilities.readable_schemes {
+            if !resource_schemes.contains(scheme) {
+                resource_schemes.push(scheme.clone());
+            }
+        }
         self.shared.set_caps(epoch, offer.capabilities);
         Ok(Initialized {
             protocol_version: PROTOCOL_VERSION,
             capabilities: NodeCapabilities {
                 interruptible: Some(info.interruptible),
                 prompt: info.prompt.clone(),
-                resource_schemes: info.resource_schemes.clone(),
+                resource_schemes,
                 tool_gate: info.tool_gate,
                 sessions: self.sessions.durability(&info),
             },
         })
     }
 
-    async fn new_session(&self, request: NewSession) -> Result<SessionCreated, rax::Error> {
+    fn readable_schemes(&self, epoch: u64) -> Vec<String> {
+        self.shared
+            .live()
+            .filter(|live| live.id == epoch)
+            .and_then(|live| live.caps)
+            .map(|caps| caps.readable_schemes)
+            .unwrap_or_default()
+    }
+
+    async fn new_session(
+        &self,
+        handle: &NodeHandle,
+        epoch: u64,
+        request: NewSession,
+    ) -> Result<SessionCreated, rax::Error> {
         let info = self.started().await?;
         let key = SessionKey::mint();
+        let readable = self.readable_schemes(epoch);
+        let fetched = self
+            .files
+            .fetch(
+                handle,
+                &readable,
+                &key,
+                request.context,
+                &CancellationToken::new(),
+            )
+            .await;
         let opening = backend::NewSession {
             key: &key,
-            context: &request.context,
+            context: &fetched.content,
         };
         let opened = self
             .backend
             .new_session(opening)
             .await
             .map_err(|err| rax::Error::new(self.backend.classify(&err), err.to_string()))?;
-        let record = Record::new(&key, info.name.clone(), opened.record, request.context);
+        let record = Record::new(&key, info.name.clone(), opened.record, fetched.content);
         if let Err(err) = self.sessions.create(key, record, &info).await {
             self.backend.close_session(&key).await;
+            self.files.discard(&key);
             return Err(rax::Error::new(
                 ErrorKind::Unknown,
                 format!("this node could not save the new session: {err}"),
             ));
         }
         tracing::debug!(session_id = %key, "session created");
+        let mut unhandled = fetched.unhandled;
+        unhandled.extend(opened.unhandled);
         Ok(SessionCreated {
             session_id: key.session_id(),
-            unhandled: opened.unhandled,
+            unhandled,
         })
     }
 
@@ -524,10 +579,21 @@ impl Inner {
             },
         };
         drop(sender);
-        let accepted = self.backend.prompt(&key, content, turn_handle).await;
+        let readable = self.readable_schemes(epoch);
+        let fetched = self
+            .files
+            .fetch(&handle, &readable, &key, content, &turn.cancel)
+            .await;
+        let accepted = self
+            .backend
+            .prompt(&key, fetched.content, turn_handle)
+            .await;
         drop(slot);
         let unhandled = match accepted {
-            Ok(unhandled) => unhandled,
+            Ok(mut unhandled) => {
+                unhandled.extend(fetched.unhandled);
+                unhandled
+            }
             Err(err) => {
                 drop(items);
                 self.shared.finish_turn(&key, &id);
@@ -570,6 +636,7 @@ impl Inner {
             self.cancel_at_backend(&key).await;
         }
         self.sessions.close(key, &*self.backend).await;
+        self.files.discard(&key);
         tracing::debug!(session_id = %key, "session closed");
     }
 }

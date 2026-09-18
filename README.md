@@ -30,6 +30,10 @@ level = "info"              # trace, debug, info, warn or error
 format = "text"             # or "json"
 ```
 
+Files a person shares in the conversation are fetched from the gateway when the prompt arrives and
+saved under `files/` beside the config, one folder per session. The agent gets the local path.
+They are deleted with their session, including when an unused session is pruned.
+
 An ACP agent uses `kind = "acp"` and may also set `interruptible`, `startup_timeout`,
 `cancel_grace_period` and `permission_timeout`. An optional top-level `env_file = ".env"` adds
 variables to the agent's environment. Unknown keys are an error, so typos never pass silently.
