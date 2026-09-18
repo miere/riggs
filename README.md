@@ -66,7 +66,8 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/riggs.default.plist
 
 It never replaces an existing plist unless you pass `--update-existing`. Logs go to
 `~/Library/Logs/riggs/`. `riggs version --check` tells you whether a newer release exists; it
-never downloads anything.
+never downloads anything. The repository is private, so set `GH_TOKEN` (for example
+`GH_TOKEN=$(gh auth token)`).
 
 ## Benchmarks
 
