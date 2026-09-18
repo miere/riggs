@@ -27,7 +27,7 @@ pub enum DialError {
 
 pub struct Dialer {
     pub server: NodeServer,
-    pub endpoint: String,
+    pub endpoints: Vec<String>,
     pub token_file: PathBuf,
 }
 
@@ -50,7 +50,7 @@ impl Dialer {
                 },
             };
             let (handle, events) = NodeLink::start(NodeConfig {
-                endpoint: self.endpoint.clone(),
+                endpoints: self.endpoints.clone(),
                 token: token.expose().to_owned(),
                 backoff_min: BACKOFF_FLOOR,
                 backoff_max: BACKOFF_CEILING,
@@ -61,7 +61,7 @@ impl Dialer {
                 Stopped::Shutdown => return Ok(()),
                 Stopped::CredentialRejected => {
                     tracing::error!(
-                        gateway = %self.endpoint,
+                        gateways = ?self.endpoints,
                         token_file = %self.token_file.display(),
                         "the gateway rejected this node's credential: it is unknown, revoked or expired. Write a new token to the token file; riggs picks it up without a restart"
                     );
@@ -69,16 +69,16 @@ impl Dialer {
                     continue;
                 }
                 Stopped::Refused { status } if (500..600).contains(&status) => {
-                    tracing::warn!(gateway = %self.endpoint, status, "the gateway is not serving nodes right now; dialling again");
+                    tracing::warn!(gateways = ?self.endpoints, status, "the gateway is not serving nodes right now; dialling again");
                 }
                 Stopped::Refused { status } => {
-                    tracing::error!(gateway = %self.endpoint, status, "the gateway refused this node; not dialling again");
+                    tracing::error!(gateways = ?self.endpoints, status, "the gateway refused this node; not dialling again");
                     self.server.stop().await;
                     return Err(DialError::Refused { status });
                 }
                 Stopped::Closed => {}
                 Stopped::LinkEnded => {
-                    tracing::warn!(gateway = %self.endpoint, "the gateway link ended; dialling again");
+                    tracing::warn!(gateways = ?self.endpoints, "the gateway link ended; dialling again");
                 }
             }
             if started.elapsed() >= HEALTHY_LINK {

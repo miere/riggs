@@ -266,6 +266,7 @@ async fn push(shared: &Shared, epoch: &Epoch, call: NodeCall) {
         NodeCall::SignIn(_) => "sign_in",
         NodeCall::SignInSettled(_) => "sign_in.settled",
         NodeCall::CredentialHealth(_) => "credential.health",
+        NodeCall::ReadResource(_) => "resource.read",
     };
     let answered = tokio::select! {
         answered = timeout(shared.call_timeout, epoch.handle.call(call)) => answered,

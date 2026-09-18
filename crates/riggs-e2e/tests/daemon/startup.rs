@@ -19,7 +19,7 @@ async fn a_config_without_a_gateway_fails_naming_the_field_and_never_dials() {
     rig.write_token(TOKEN, 0o600);
     let run = rig.with_config("run").await;
     assert_eq!(run.status.code(), Some(1), "{}", run.stderr);
-    assert!(run.stderr.contains("gateway.url"), "{}", run.stderr);
+    assert!(run.stderr.contains("gateway.urls"), "{}", run.stderr);
     assert!(run.stdout.is_empty(), "the banner printed: {}", run.stdout);
 
     let missing = rig
@@ -51,7 +51,7 @@ async fn a_config_without_a_gateway_fails_naming_the_field_and_never_dials() {
 async fn a_placeholder_command_counts_as_unset() {
     let rig = Rig::new().await;
     rig.write_config(&format!(
-        "[gateway]\nurl = \"{}\"\n[agent]\nkind = \"claude_code\"\ncommand = \"claude-replace-me\"\n",
+        "[gateway]\nurls = [\"{}\"]\n[agent]\nkind = \"claude_code\"\ncommand = \"claude-replace-me\"\n",
         rig.sim.url()
     ));
     rig.write_token(TOKEN, 0o600);
@@ -73,14 +73,20 @@ async fn plain_ws_is_only_accepted_for_loopback() {
     let agent = rig.agent_config(Agent::Claude("basic"));
     rig.write_token(TOKEN, 0o600);
     rig.write_config(&format!(
-        "[gateway]\nurl = \"ws://gateway.example.com\"\n{agent}"
+        "[gateway]\nurls = [\"ws://gateway.example.com\"]\n{agent}"
     ));
     let refused = rig.with_config("run").await;
     assert_eq!(refused.status.code(), Some(1));
-    assert!(refused.stderr.contains("gateway.url"), "{}", refused.stderr);
+    assert!(
+        refused.stderr.contains("gateway.urls"),
+        "{}",
+        refused.stderr
+    );
     assert!(refused.stderr.contains("wss://"), "{}", refused.stderr);
 
-    rig.write_config(&format!("[gateway]\nurl = \"ws://127.0.0.1:9\"\n{agent}"));
+    rig.write_config(&format!(
+        "[gateway]\nurls = [\"ws://127.0.0.1:9\"]\n{agent}"
+    ));
     let accepted = rig.with_config("validate").await;
     assert_eq!(accepted.status.code(), Some(0), "{}", accepted.stderr);
 }
@@ -136,7 +142,7 @@ async fn validate_reports_every_problem_together_and_passes_a_good_config_withou
     let bad = rig.with_config("validate").await;
     assert_eq!(bad.status.code(), Some(1));
     for field in [
-        "gateway.url",
+        "gateway.urls",
         "agent.kind",
         "agent.command",
         "log.level",

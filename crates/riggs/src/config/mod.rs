@@ -75,7 +75,7 @@ impl fmt::Display for Problems {
 /// Command-line values that replace the file's, applied before validation.
 #[derive(Debug, Default, Clone)]
 pub struct Overrides {
-    pub gateway: Option<String>,
+    pub gateway: Vec<String>,
     pub token_file: Option<PathBuf>,
     pub insecure_skip_verify: bool,
 }
@@ -119,7 +119,8 @@ pub struct Config {
     pub path: PathBuf,
     pub dir: PathBuf,
     /// Already checked by `resolve_endpoint`, so a bad scheme fails at startup, not in a redial loop.
-    pub gateway: String,
+    /// Tried in order: a node stays on whichever answered last and moves on when it stops.
+    pub gateways: Vec<String>,
     pub token_file: PathBuf,
     pub agent: AgentConfig,
     pub sessions: SessionsConfig,
@@ -205,7 +206,7 @@ fn build(
     Some(Config {
         path: path.to_path_buf(),
         dir: dir.to_path_buf(),
-        gateway: gateway?,
+        gateways: gateway?,
         token_file,
         agent: agent?,
         sessions: sessions?,
@@ -217,32 +218,43 @@ fn gateway(
     section: &file::Gateway,
     overrides: &Overrides,
     problems: &mut Problems,
-) -> Option<String> {
+) -> Option<Vec<String>> {
     if overrides.insecure_skip_verify || section.insecure_skip_verify == Some(true) {
         problems.add(
             "gateway.insecure_skip_verify",
             "is not supported: the RAX dialler always verifies the gateway's TLS certificate",
         );
     }
-    let url = overrides.gateway.as_ref().or(section.url.as_ref());
-    match url {
-        Some(url) if is_configured(url) => match rax::transport::resolve_endpoint(url) {
-            Ok(resolved) => Some(resolved.to_string()),
+    let urls = match (&overrides.gateway, &section.urls) {
+        (flags, _) if !flags.is_empty() => flags.clone(),
+        (_, Some(urls)) => urls.clone(),
+        (_, None) => Vec::new(),
+    };
+    let urls: Vec<&String> = urls.iter().filter(|url| is_configured(url)).collect();
+    if urls.is_empty() {
+        problems.add(
+            "gateway.urls",
+            "is not set; give the gateway address, such as [\"wss://gateway.example.com\"]",
+        );
+        return None;
+    }
+    let mut resolved = Some(Vec::new());
+    for (index, url) in urls.into_iter().enumerate() {
+        match rax::transport::resolve_endpoint(url) {
+            Ok(endpoint) => {
+                if let Some(resolved) = &mut resolved {
+                    resolved.push(endpoint.to_string());
+                }
+            }
             Err(err) => {
                 let reason = err.to_string();
                 let reason = reason.strip_prefix("rax: ").unwrap_or(&reason);
-                problems.add("gateway.url", reason);
-                None
+                problems.add(&format!("gateway.urls[{index}]"), reason);
+                resolved = None;
             }
-        },
-        _ => {
-            problems.add(
-                "gateway.url",
-                "is not set; give the gateway address, such as wss://gateway.example.com",
-            );
-            None
         }
     }
+    resolved
 }
 
 enum Kind {

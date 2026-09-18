@@ -137,7 +137,7 @@ impl Rig {
     /// A complete config: the simulator's address, the scratch session store, and the agent.
     pub fn configure(&self, agent: Agent, extra: &str) {
         self.write_config(&format!(
-            "[gateway]\nurl = \"{url}\"\n\n{agent}\n{extra}",
+            "[gateway]\nurls = [\"{url}\"]\n\n{agent}\n{extra}",
             url = self.sim.url(),
             agent = self.agent_config(agent),
         ));

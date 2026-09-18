@@ -1,7 +1,7 @@
 use nix::sys::signal::Signal;
 use rax::event::StopReason;
 use rax::session::{SessionDurability, ToolGate};
-use rax_sim::Match;
+use rax_sim::{Match, SimConfig, Simulator};
 use serde_json::json;
 
 use crate::harness::{Agent, OTHER_SECRET, OTHER_TOKEN, Rig, SECRET, warnings_and_errors};
@@ -222,4 +222,33 @@ async fn an_acp_agent_is_served_under_permission_prompts() {
     riggs.signal(Signal::SIGTERM);
     assert_eq!(riggs.exited().await.code(), Some(0), "{}", riggs.stderr());
     assert!(riggs.stdout().contains("tool_gate: permission_prompts"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_daemon_skips_a_standby_gateway_and_serves_the_one_that_answers() {
+    let rig = Rig::new().await;
+    let standby = Simulator::start(SimConfig::default().with_token(TOKEN, "node-1"))
+        .await
+        .unwrap();
+    standby.refuse_upgrades(503);
+    rig.write_config(&format!(
+        "[gateway]\nurls = [\"{}\", \"{}\"]\n\n{}",
+        standby.url(),
+        rig.sim.url(),
+        rig.agent_config(Agent::Claude("basic")),
+    ));
+    rig.write_token(TOKEN, 0o600);
+    let mut riggs = rig.start();
+    let node = rig.attached().await;
+    let session = node.new_session(vec![]).await.unwrap().session_id;
+    let mut turn = node.prompt(session, text("say pong")).await.unwrap();
+    turn.expect(Match::complete(StopReason::EndTurn))
+        .await
+        .unwrap();
+
+    let tried = standby.handshakes();
+    assert!(!tried.is_empty());
+    assert!(tried.iter().all(|handshake| handshake.status == Some(503)));
+    riggs.signal(Signal::SIGTERM);
+    assert_eq!(riggs.exited().await.code(), Some(0));
 }

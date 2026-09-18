@@ -10,7 +10,7 @@ Riggs reads one TOML file. By default it lives at `~/.config/riggs/default/riggs
 
 ```toml
 [gateway]
-url = "wss://gateway.example.com"
+urls = ["wss://gateway.example.com"]   # more addresses are fallbacks, tried in order
 token_file = "node-token"   # the default; must be mode 0600
 
 [agent]

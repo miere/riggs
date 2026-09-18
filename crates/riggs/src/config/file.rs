@@ -21,7 +21,7 @@ pub struct File {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Gateway {
-    pub url: Option<String>,
+    pub urls: Option<Vec<String>>,
     pub token_file: Option<String>,
     pub insecure_skip_verify: Option<bool>,
 }
