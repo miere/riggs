@@ -1,0 +1,65 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*", "[0-9]*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  BINARY: riggs
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-14
+          - target: x86_64-apple-darwin
+            runner: macos-14
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Let Cargo fetch the private RAX crates
+        env:
+          RAX_READ_TOKEN: ${{ secrets.RAX_READ_TOKEN }}
+        run: |
+          test -n "$RAX_READ_TOKEN" || { echo "::error::Set the RAX_READ_TOKEN secret: a token that can read miere/rax-rs"; exit 1; }
+          git config --global url."https://x-access-token:${RAX_READ_TOKEN}@github.com/miere/".insteadOf "https://github.com/miere/"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build
+        run: |
+          export RIGGS_VERSION="${GITHUB_REF_NAME#v}"
+          cargo build --release --locked --target ${{ matrix.target }} -p "$BINARY"
+      - name: Package
+        run: |
+          name="$BINARY-$GITHUB_REF_NAME-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp "target/${{ matrix.target }}/release/$BINARY" README.md "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*.tar.gz*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes

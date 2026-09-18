@@ -1,6 +1,3 @@
-use std::fs::Permissions;
-use std::os::unix::fs::PermissionsExt;
-
 use crate::harness::{Agent, Rig, SECRET};
 use crate::support::TOKEN;
 
@@ -164,8 +161,21 @@ async fn validate_reports_every_problem_together_and_passes_a_good_config_withou
     assert_no_dial(&rig);
 }
 
+#[cfg(not(target_os = "macos"))]
+#[tokio::test(flavor = "multi_thread")]
+async fn launchd_refuses_off_macos_naming_the_platform() {
+    let rig = Rig::new().await;
+    let refused = rig.exits(&["launchd", "--alias", "work"]).await;
+    assert_eq!(refused.status.code(), Some(1), "{}", refused.stderr);
+    assert!(refused.stderr.contains("macOS only"), "{}", refused.stderr);
+    assert!(!rig.home().join("Library/LaunchAgents").exists());
+}
+
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread")]
 async fn launchd_writes_a_plist_and_never_overwrites_one_by_accident() {
+    use std::os::unix::fs::PermissionsExt;
+
     let rig = Rig::new().await;
     let config = rig.config_path();
     let args = [
@@ -206,7 +216,7 @@ async fn launchd_writes_a_plist_and_never_overwrites_one_by_accident() {
         first.stdout
     );
 
-    std::fs::set_permissions(&plist, Permissions::from_mode(0o644)).unwrap();
+    std::fs::set_permissions(&plist, std::fs::Permissions::from_mode(0o644)).unwrap();
     let refused = rig.exits(&args).await;
     assert_eq!(refused.status.code(), Some(1));
     assert!(
