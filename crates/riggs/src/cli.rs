@@ -60,7 +60,7 @@ pub struct LaunchdArgs {
 
 #[derive(Debug, Args)]
 pub struct VersionArgs {
-    /// Ask GitHub whether a newer release exists; never downloads anything
+    /// Ask GitHub whether a newer release exists; set GH_TOKEN, as the repository is private
     #[arg(long)]
     pub check: bool,
 }

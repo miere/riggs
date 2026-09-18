@@ -39,15 +39,41 @@ impl Releases for GitHub {
             .timeout_global(Some(TIMEOUT))
             .build()
             .new_agent();
-        agent
+        let token = github_token();
+        let mut request = agent
             .get(LATEST_RELEASE)
             .header("Accept", "application/vnd.github+json")
-            .header("User-Agent", format!("riggs/{VERSION}"))
+            .header("User-Agent", format!("riggs/{VERSION}"));
+        if let Some(token) = &token {
+            request = request.header("Authorization", format!("Bearer {token}"));
+        }
+        request
             .call()
-            .map_err(|err| VersionError::Fetch(err.to_string()))?
+            .map_err(|err| VersionError::Fetch(explain(err, token.is_some())))?
             .body_mut()
             .read_json::<Release>()
             .map_err(|err| VersionError::Fetch(err.to_string()))
+    }
+}
+
+/// The repository is private, so an anonymous request only ever sees a 404.
+fn github_token() -> Option<String> {
+    ["GH_TOKEN", "GITHUB_TOKEN"]
+        .iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .map(|token| token.trim().to_owned())
+        .find(|token| !token.is_empty())
+}
+
+fn explain(err: ureq::Error, authenticated: bool) -> String {
+    match err {
+        ureq::Error::StatusCode(404) if authenticated => {
+            "GitHub has no Riggs release yet, or this token cannot read the repository".to_owned()
+        }
+        ureq::Error::StatusCode(404) => {
+            "GitHub answered 404: the repository is private, so set GH_TOKEN, for example GH_TOKEN=$(gh auth token)".to_owned()
+        }
+        other => other.to_string(),
     }
 }
 
