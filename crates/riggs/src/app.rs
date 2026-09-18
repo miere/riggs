@@ -57,10 +57,10 @@ fn run(flag: Option<PathBuf>, args: RunArgs) -> Result<(), String> {
             .map_err(|err| err.to_string())?;
         signals::install(server.shutdown_token())
             .map_err(|err| format!("cannot install signal handlers: {err}"))?;
-        tracing::info!(gateway = %config.gateway, agent = %config.agent.describe(), "riggs {VERSION} starting");
+        tracing::info!(gateways = ?config.gateways, agent = %config.agent.describe(), "riggs {VERSION} starting");
         let dialer = Dialer {
             server,
-            endpoint: config.gateway.clone(),
+            endpoints: config.gateways.clone(),
             token_file: config.token_file.clone(),
         };
         dialer.run(token).await.map_err(|err| err.to_string())?;
@@ -77,7 +77,7 @@ fn print_banner(config: &Config) {
     println!("riggs {VERSION}");
     println!("config: {}", config.path.display());
     println!("node credential: {}", config.token_file.display());
-    println!("gateway: {}", config.gateway);
+    println!("gateway: {}", config.gateways.join(", then "));
     println!("agent: {}", config.agent.describe());
     println!("sessions: {sessions}");
     println!("tool_gate: {}", config.agent.tool_gate());

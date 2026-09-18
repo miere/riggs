@@ -34,9 +34,9 @@ pub enum Command {
 
 #[derive(Debug, Args)]
 pub struct RunArgs {
-    /// Gateway address, replacing gateway.url
+    /// Gateway address, replacing gateway.urls; repeat it to give fallbacks in order
     #[arg(long, value_name = "URL")]
-    pub gateway: Option<String>,
+    pub gateway: Vec<String>,
     /// Node token file, replacing gateway.token_file
     #[arg(long, value_name = "PATH")]
     pub token_file: Option<PathBuf>,
@@ -104,6 +104,8 @@ mod tests {
             "/tmp/r.toml",
             "--gateway",
             "wss://g",
+            "--gateway",
+            "wss://h",
             "--token-file",
             "t",
         ])
@@ -112,7 +114,7 @@ mod tests {
         let Command::Run(run) = cli.command else {
             panic!("expected run")
         };
-        assert_eq!(run.gateway.as_deref(), Some("wss://g"));
+        assert_eq!(run.gateway, ["wss://g", "wss://h"]);
         assert_eq!(run.token_file, Some(PathBuf::from("t")));
         assert!(!run.insecure_skip_verify);
     }

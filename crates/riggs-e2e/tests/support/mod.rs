@@ -38,6 +38,7 @@ pub fn all_caps() -> GatewayCapabilities {
         plan: true,
         sign_in: true,
         resource_schemes: vec![],
+        readable_schemes: vec![],
     }
 }
 
@@ -181,7 +182,7 @@ impl World {
         }
         let server = NodeServer::new(backend, config).unwrap();
         let (handle, events) = NodeLink::start(NodeConfig {
-            endpoint: self.sim.url(),
+            endpoints: vec![self.sim.url()],
             token: TOKEN.to_owned(),
             keepalive: Duration::from_secs(1),
             backoff_min: Duration::from_millis(5),
