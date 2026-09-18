@@ -3,6 +3,23 @@
 Riggs runs an AI agent on your machine and connects it to a chat gateway over
 [RAX](https://github.com/miere/rax-protocol). It supports Claude Code and ACP agents.
 
+## Installing
+
+Releases carry a `riggs` binary for Apple silicon (`aarch64-apple-darwin`), Intel Macs
+(`x86_64-apple-darwin`) and Linux (`x86_64-unknown-linux-gnu`). The repository is private, so
+download with `gh`:
+
+```sh
+target=aarch64-apple-darwin
+gh release download --repo miere/riggs --pattern "*-$target.tar.gz*"
+shasum -a 256 -c riggs-*-$target.tar.gz.sha256
+tar -xzf riggs-*-$target.tar.gz
+install -m 0755 riggs-*-$target/riggs ~/.local/bin/
+```
+
+`~/.local/bin` is on the PATH of the LaunchAgent that `riggs launchd` writes. To build from source
+instead: `cargo install --locked --git ssh://git@github.com/miere/riggs riggs`.
+
 ## Running Riggs
 
 Riggs reads one TOML file. By default it lives at `~/.config/riggs/default/riggs.toml`, and
@@ -68,6 +85,13 @@ It never replaces an existing plist unless you pass `--update-existing`. Logs go
 `~/Library/Logs/riggs/`. `riggs version --check` tells you whether a newer release exists; it
 never downloads anything. The repository is private, so set `GH_TOKEN` (for example
 `GH_TOKEN=$(gh auth token)`).
+
+## Releasing
+
+Push a tag such as `v0.1.0`. The release workflow builds every target, stamps the version from the
+tag, and publishes the archives with their SHA-256 sums. Both workflows need a `RAX_READ_TOKEN`
+secret that can read `miere/rax-rs`, since Cargo fetches the RAX crates from that private
+repository.
 
 ## Benchmarks
 
