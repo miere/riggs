@@ -108,10 +108,16 @@ impl SandboxConfig {
     }
 }
 
+/// The kernel checks the path a write actually resolves to, so a rule naming a symlink matches
+/// nothing: `~/Development` pointing at another volume would leave the workspace unwritable.
+fn real(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 /// Both filter forms, which SBPL reads as a union, so a rule covers a directory or a plain file
 /// without the caller having to know which one it was given.
 fn both(path: &Path) -> String {
-    let rendered = sbpl(&path.display().to_string());
+    let rendered = sbpl(&real(path).display().to_string());
     format!("(subpath {rendered}) (literal {rendered})")
 }
 
@@ -158,7 +164,15 @@ mod tests {
             .find(r#"(allow file-write* (subpath "/work/here")"#)
             .unwrap();
         assert!(deny < allow, "a carve-out before the deny is dead text");
-        assert!(profile.contains(r#"(allow file-write* (subpath "/tmp")"#));
+        // /tmp is itself a symlink on macOS, so the rule names what it resolves to.
+        let tmp = real(Path::new("/tmp"));
+        assert!(
+            profile.contains(&format!(
+                "(allow file-write* (subpath \"{}\")",
+                tmp.display()
+            )),
+            "{profile}"
+        );
         assert!(profile.contains(r#"(allow file-write* (subpath "/dev"))"#));
     }
 
@@ -204,6 +218,22 @@ mod tests {
             .find("(allow file-write* (subpath \"/work\")")
             .unwrap();
         assert!(writes < token, "the token deny must win over the workspace");
+    }
+
+    #[test]
+    fn a_rule_names_the_path_a_write_really_lands_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let real_dir = dir.path().join("real");
+        let link = dir.path().join("link");
+        std::fs::create_dir(&real_dir).unwrap();
+        std::os::unix::fs::symlink(&real_dir, &link).unwrap();
+        let profile = seatbelt().profile(&link);
+        let resolved = std::fs::canonicalize(&real_dir).unwrap();
+        assert!(
+            profile.contains(&format!("(subpath \"{}\")", resolved.display())),
+            "{profile}"
+        );
+        assert!(!profile.contains(&format!("(subpath \"{}\")", link.display())));
     }
 
     #[test]
