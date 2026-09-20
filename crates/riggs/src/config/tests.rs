@@ -192,6 +192,63 @@ fn the_env_file_reaches_the_agent_without_overriding_the_config() {
 }
 
 #[test]
+fn a_config_value_reads_its_secret_from_the_env_file() {
+    let (dir, path) = write(&format!(
+        "env_file = \"agent.env\"\n{GOOD}env = {{ GH_TOKEN = \"${{RIGGS_TEST_SECRET}}\", GH_HOST = \"github.com\" }}\n"
+    ));
+    std::fs::write(dir.path().join("agent.env"), "RIGGS_TEST_SECRET=ghp_real\n").unwrap();
+    let config = load(&path, &Overrides::default()).unwrap();
+    let AgentConfig::ClaudeCode(agent) = &config.agent else {
+        panic!("expected claude_code")
+    };
+    assert_eq!(agent.env["GH_TOKEN"], "ghp_real");
+    assert_eq!(agent.env["GH_HOST"], "github.com");
+}
+
+#[test]
+fn a_reference_reads_riggs_own_environment_before_the_env_file() {
+    let (dir, path) = write(&format!(
+        "env_file = \"agent.env\"\n{GOOD}env = {{ WHERE = \"under ${{PATH}} here\" }}\n"
+    ));
+    std::fs::write(dir.path().join("agent.env"), "PATH=/nowhere\n").unwrap();
+    let config = load(&path, &Overrides::default()).unwrap();
+    let AgentConfig::ClaudeCode(agent) = &config.agent else {
+        panic!("expected claude_code")
+    };
+    assert_eq!(
+        agent.env["WHERE"],
+        format!("under {} here", std::env::var("PATH").unwrap())
+    );
+}
+
+#[test]
+fn a_dollar_that_opens_no_reference_stays_in_the_value() {
+    let (_dir, path) = write(&format!(
+        "{GOOD}env = {{ PASSPHRASE = \"a$b and ${{ never closed\" }}\n"
+    ));
+    let config = load(&path, &Overrides::default()).unwrap();
+    let AgentConfig::ClaudeCode(agent) = &config.agent else {
+        panic!("expected claude_code")
+    };
+    assert_eq!(agent.env["PASSPHRASE"], "a$b and ${ never closed");
+}
+
+#[test]
+fn a_reference_nothing_sets_is_named_rather_than_left_empty() {
+    let problems = problems(&format!(
+        "{GOOD}env = {{ GH_TOKEN = \"${{RIGGS_TEST_ABSENT}}\" }}\n"
+    ));
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert_eq!(problems[0].field, "agent.env");
+    assert!(
+        problems[0].message.contains("GH_TOKEN")
+            && problems[0].message.contains("${RIGGS_TEST_ABSENT}"),
+        "{:?}",
+        problems[0].message
+    );
+}
+
+#[test]
 fn a_missing_env_file_is_named() {
     assert_eq!(
         fields(&format!("env_file = \"absent.env\"\n{GOOD}")),
