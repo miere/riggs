@@ -234,13 +234,16 @@ fn a_seatbelt_box_resolves_its_paths_and_always_denies_the_node_credential() {
         "{GOOD}\n[agent.sandbox]\nmode = \"seatbelt\"\nwrite = [\"scratch\"]\ndeny_read = [\"/secrets\"]\n"
     );
     let (dir, path) = write(&toml);
+    if !cfg!(target_os = "macos") {
+        // Everywhere else the box cannot be built, and saying so beats pretending it is on.
+        assert_eq!(fields(&toml), ["agent.sandbox.mode"]);
+        return;
+    }
     let config = load(&path, &Overrides::default()).unwrap();
     let AgentConfig::ClaudeCode(agent) = config.agent else {
         panic!("expected a claude_code agent");
     };
-    if cfg!(target_os = "macos") {
-        assert_eq!(agent.sandbox.mode, SandboxMode::Seatbelt);
-    }
+    assert_eq!(agent.sandbox.mode, SandboxMode::Seatbelt);
     assert_eq!(agent.sandbox.write, [dir.path().join("scratch")]);
     assert_eq!(
         agent.sandbox.deny_read.as_deref(),
