@@ -1,0 +1,62 @@
+{
+ "source": [
+  "claude 2.1.271 binary: authLogin output",
+  "the auth tool's built-in claude-code profile"
+ ],
+ "turns": [
+  [
+   {
+    "hook": {
+     "id": "toolu_auth01",
+     "name": "mcp__riggs__auth",
+     "input": {
+      "tool": "gcp-mcp",
+      "profile": "claude-code"
+     },
+     "allow": [
+      {
+       "call_tool": {
+        "id": "toolu_auth01",
+        "name": "auth",
+        "arguments": {
+         "tool": "gcp-mcp",
+         "profile": "claude-code"
+        },
+        "as": "outcome"
+       }
+      },
+      {
+       "say": "auth said: {{outcome}}"
+      }
+     ]
+    }
+   },
+   {
+    "result": {
+     "text": "auth said: {{outcome}}",
+     "num_turns": 2
+    }
+   }
+  ]
+ ],
+ "auth": {
+  "logins": [
+   [
+    {
+     "say": "Opening browser to sign in\u2026"
+    },
+    {
+     "say": "If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=org%3Acreate_api_key+user%3Aprofile+user%3Ainference&code_challenge=fake-challenge&code_challenge_method=S256&state=fake-state"
+    },
+    {
+     "prompt": "Paste code here if prompted > "
+    },
+    {
+     "await_code": {
+      "accept": "GOOD#fake-state"
+     }
+    }
+   ]
+  ]
+ }
+}

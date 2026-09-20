@@ -98,7 +98,7 @@ async fn a_prompt_is_accepted_before_its_events_and_completes() {
     assert_eq!(initialize["request"]["sdkMcpServers"], json!(["riggs"]));
     assert_eq!(
         world.events("mcp_tools")[0]["tools"],
-        json!(["ask", "present_plan", "attach"])
+        json!(["auth", "ask", "present_plan", "attach"])
     );
     assert_eq!(
         world.user_frames()[0]["message"]["content"],
