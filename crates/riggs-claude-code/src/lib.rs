@@ -13,6 +13,7 @@ mod login;
 mod mcp;
 mod outcome;
 mod process;
+mod profile;
 mod repair;
 mod sign_in;
 mod tool;
