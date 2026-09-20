@@ -58,9 +58,12 @@ impl ClaudeCode {
             health: Health::new(&config),
             config,
             host: OnceLock::new(),
+            repair: OnceLock::new(),
         });
+        let repair = Arc::new(Repair::new(ctx.clone()));
+        let _ = ctx.repair.set(Arc::downgrade(&repair));
         Self {
-            repair: Arc::new(Repair::new(ctx.clone())),
+            repair,
             ctx,
             slots: Mutex::new(HashMap::new()),
             probe: Mutex::new(None),

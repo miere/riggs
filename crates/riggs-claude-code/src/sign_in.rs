@@ -10,8 +10,9 @@ use tokio_util::sync::CancellationToken;
 use crate::config::ClaudeCodeConfig;
 use crate::interaction::prompt_id;
 use crate::login::{Exit, Login, LoginError};
+use crate::profile::Profile;
 
-const TOOL: &str = "Claude Code";
+pub(crate) const CLAUDE_TOOL: &str = "Claude Code";
 const EXPIRED: &str = "the sign-in expired before it was completed";
 const LOST_ACCESS: &str = "the owner of this machine lost access before the sign-in finished";
 const UNCONFIRMED: &str = "nobody confirmed the owner could still use the gateway";
@@ -52,28 +53,58 @@ struct Settler<'a> {
 
 impl Settler<'_> {
     async fn settle(&self, state: SignInState, reason: Option<&str>) {
+        self.settle_with(state, reason, None).await;
+    }
+
+    async fn settle_with(&self, state: SignInState, reason: Option<&str>, url: Option<String>) {
         let settled = SignInSettled {
             id: self.id.clone(),
             state,
             reason: reason.map(str::to_owned),
-            url: None,
+            url,
         };
         self.host.sign_ins.settle(settled).await;
+    }
+}
+
+/// One sign-in to run: which workflow, and what to call it in front of the owner.
+#[derive(Debug, Clone)]
+pub(crate) struct Ask {
+    pub profile: Profile,
+    /// The capability the owner recognises, such as `gcp-mcp`, not the binary underneath.
+    pub tool: String,
+    /// Put the command to the owner before it runs. Set for a command the agent supplied.
+    pub approve_first: bool,
+}
+
+impl Ask {
+    pub(crate) fn claude_code(config: &ClaudeCodeConfig) -> Ask {
+        let profile = Profile::builtin(crate::profile::CLAUDE_CODE, config)
+            .unwrap_or_else(|| unreachable!("the claude-code profile is a built-in"));
+        Ask {
+            profile,
+            tool: CLAUDE_TOOL.to_owned(),
+            approve_first: false,
+        }
     }
 }
 
 pub(crate) async fn run(
     config: &ClaudeCodeConfig,
     host: &HostHandles,
+    ask: &Ask,
     stop: &CancellationToken,
     phase: &watch::Sender<Phase>,
 ) -> Result<(), SignInError> {
-    let (login, url) = Login::start(config, stop).await?;
+    if ask.approve_first {
+        return approved_then_run(config, host, ask, stop, phase).await;
+    }
+    let (login, url) = Login::start(config, &ask.profile, stop).await?;
     let request = SignInRequest {
         id: prompt_id(),
-        tool: TOOL.to_owned(),
+        tool: ask.tool.clone(),
         url: Some(url),
-        needs_code: true,
+        needs_code: ask.profile.needs_code,
         command: None,
     };
     let prompt = match host.sign_ins.raise(request).await {
@@ -87,6 +118,68 @@ pub(crate) async fn run(
     let settler = Settler {
         host,
         id: prompt.id.clone(),
+    };
+    let finished = drive(config, &login, prompt, &settler, stop).await;
+    login.stop().await;
+    finished
+}
+
+/// A command the agent supplied runs only once the owner has seen it and approved it.
+async fn approved_then_run(
+    config: &ClaudeCodeConfig,
+    host: &HostHandles,
+    ask: &Ask,
+    stop: &CancellationToken,
+    phase: &watch::Sender<Phase>,
+) -> Result<(), SignInError> {
+    let request = SignInRequest {
+        id: prompt_id(),
+        tool: ask.tool.clone(),
+        url: None,
+        needs_code: ask.profile.needs_code,
+        command: Some(ask.profile.command_line()),
+    };
+    let mut prompt = host
+        .sign_ins
+        .raise(request)
+        .await
+        .map_err(SignInError::NotShown)?;
+    phase.send_replace(Phase::Shown);
+    let settler = Settler {
+        host,
+        id: prompt.id.clone(),
+    };
+    let approval = tokio::select! {
+        () = stop.cancelled() => None,
+        answer = prompt.answers.recv() => answer.map(|answer| answer.outcome),
+        () = sleep(config.sign_in.expiry) => Some(DisplayOutcome::TimedOut),
+    };
+    match approval {
+        Some(DisplayOutcome::Approved) => {}
+        Some(DisplayOutcome::TimedOut) => {
+            settler.settle(SignInState::TimedOut, Some(EXPIRED)).await;
+            return Err(SignInError::Expired);
+        }
+        outcome => {
+            settler.settle(SignInState::Cancelled, None).await;
+            return Err(SignInError::Stopped(
+                outcome.unwrap_or(DisplayOutcome::Dismissed),
+            ));
+        }
+    }
+    let login = match Login::start(config, &ask.profile, stop).await {
+        Ok((login, url)) => {
+            settler
+                .settle_with(SignInState::Ready, None, Some(url))
+                .await;
+            login
+        }
+        Err(err) => {
+            settler
+                .settle(SignInState::Failed, Some(&err.to_string()))
+                .await;
+            return Err(err.into());
+        }
     };
     let finished = drive(config, &login, prompt, &settler, stop).await;
     login.stop().await;

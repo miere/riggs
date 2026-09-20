@@ -100,10 +100,15 @@ async fn main() {
         "event": "start", "argv": args, "cwd": cwd,
         "claudecode": std::env::var("CLAUDECODE").ok(), "script": script.source,
     }));
+    let myself = std::env::current_exe()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
     for (key, value) in [
         ("session_id", session.clone()),
         ("cwd", cwd),
         ("state", state.display().to_string()),
+        // Lets a fixture name this binary as a command to run, such as a custom sign-in.
+        ("claude", myself),
     ] {
         fake.set(key, value);
     }

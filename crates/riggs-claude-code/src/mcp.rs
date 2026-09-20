@@ -57,6 +57,24 @@ fn initialize(params: &Value) -> Value {
 fn tools() -> Value {
     json!([
         {
+            "name": "auth",
+            "description": "Ask for credentials you do not have and WAIT until they are granted. Use it when a call failed for missing or expired authentication — never guess, retry blindly, or ask the person to run auth commands themselves. Pass `tool` as the capability DIRECTLY affected, as the person knows it (e.g. `gcp-mcp`, `postgres-mcp`), not the binary it shells out to (e.g. `gcloud`); name the binary only when you are running it yourself. The sign-in runs on this machine, and this machine's owner is sent a direct message to complete it — not whoever you are talking to. It returns an error if they decline, it times out, or it fails: treat any error as a hard stop and do not retry the original call.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["tool", "profile"],
+                "properties": {
+                    "tool": {"type": "string", "description": "The capability that needs authentication, as the person knows it."},
+                    "profile": {
+                        "type": "string",
+                        "enum": crate::profile::NAMES,
+                        "description": "Which sign-in to run: `claude-code` re-authenticates the Claude Code CLI this agent runs on; `gcloud` signs in the user credential; `gcloud-adc` writes the application-default credentials that client libraries and MCP servers read; `custom` runs the command you supply, which the owner must approve first.",
+                    },
+                    "command": {"type": "string", "description": "Only with `custom`: the command line to run. Rejected for the built-in profiles."},
+                    "needs_code": {"type": "boolean", "description": "Only with `custom`: true when the flow ends by pasting a verification code back. Defaults to false."},
+                },
+            },
+        },
+        {
             "name": "ask",
             "description": "Ask the person you are working for one to four multiple-choice questions and wait for their answers. Use it whenever you need a decision from them.",
             "inputSchema": {
@@ -127,11 +145,33 @@ fn render(result: ToolResult) -> Value {
 async fn call(proc: &Proc, params: &Value, turn: Option<TurnCtl>) -> ToolResult {
     let args = params.get("arguments").cloned().unwrap_or(Value::Null);
     match text_of(params, "name") {
+        Some("auth") => auth(proc, &args).await,
         Some("ask") => ask(&args, turn).await,
         Some("present_plan") => plan(&args, turn).await,
         Some("attach") => attach(proc, &args, turn).await,
         Some(other) => ToolResult::error(format!("Error: there is no tool named {other}")),
         None => ToolResult::error("Error: a tool name is required"),
+    }
+}
+
+/// Runs a sign-in on this machine and waits for its owner to finish it.
+async fn auth(proc: &Proc, args: &Value) -> ToolResult {
+    let ctx = proc.ctx();
+    let ask = match interaction::parse_auth(args, &ctx.config) {
+        Ok(ask) => ask,
+        Err(refused) => return refused,
+    };
+    let Some(repair) = ctx.repair.get().and_then(std::sync::Weak::upgrade) else {
+        return ToolResult::error("Error: this machine cannot run a sign-in right now".to_owned());
+    };
+    let tool = ask.tool.clone();
+    match repair.sign_in(ask).await {
+        Ok(()) => ToolResult::text(format!(
+            "The owner of this machine completed the sign-in for {tool}. Try the call again."
+        )),
+        Err(reason) => ToolResult::error(format!(
+            "Error: the sign-in for {tool} did not complete: {reason}"
+        )),
     }
 }
 

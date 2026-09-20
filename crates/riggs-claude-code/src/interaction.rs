@@ -1,3 +1,5 @@
+use crate::profile::Profile;
+use crate::sign_in::Ask as SignIn;
 use rax::id::PromptId;
 use rax::interaction::{
     DisplayAnswer, DisplayOutcome, PlanChoice, PlanRequest, Question, QuestionOption,
@@ -41,6 +43,60 @@ impl ToolResult {
 pub(crate) struct Ask {
     plain: bool,
     questions: Vec<Question>,
+}
+
+/// Reads the `auth` tool's arguments: a capability name plus either a built-in profile or a
+/// command of the caller's own.
+pub(crate) fn parse_auth(
+    args: &Value,
+    config: &crate::config::ClaudeCodeConfig,
+) -> Result<SignIn, ToolResult> {
+    let tool = blank_to_none(args, "tool").ok_or_else(|| {
+        ToolResult::error(
+            "Error: `tool` is required: name the capability that needs authentication",
+        )
+    })?;
+    let profile = blank_to_none(args, "profile").ok_or_else(|| {
+        ToolResult::error(format!(
+            "Error: `profile` is required: one of {}",
+            crate::profile::NAMES.join(", ")
+        ))
+    })?;
+    let command = blank_to_none(args, "command");
+    let needs_code = args
+        .get("needs_code")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if profile == crate::profile::CUSTOM {
+        let command = command.ok_or_else(|| {
+            ToolResult::error("Error: the `custom` profile needs a `command` to run")
+        })?;
+        let mut words = command.split_whitespace().map(str::to_owned);
+        let program = words.next().ok_or_else(|| {
+            ToolResult::error("Error: the `custom` profile needs a `command` to run")
+        })?;
+        return Ok(SignIn {
+            profile: Profile::custom(program.into(), words.collect(), needs_code),
+            tool,
+            approve_first: true,
+        });
+    }
+    if command.is_some() {
+        return Err(ToolResult::error(format!(
+            "Error: `command` belongs to the `custom` profile only; {profile} runs its own"
+        )));
+    }
+    let built = Profile::builtin(&profile, config).ok_or_else(|| {
+        ToolResult::error(format!(
+            "Error: there is no `{profile}` sign-in here; use one of {}",
+            crate::profile::NAMES.join(", ")
+        ))
+    })?;
+    Ok(SignIn {
+        profile: built,
+        tool,
+        approve_first: false,
+    })
 }
 
 pub(crate) fn prompt_id() -> PromptId {
@@ -241,6 +297,55 @@ pub(crate) fn plan_result(answer: DisplayAnswer) -> ToolResult {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::panic)]
+
+    fn auth(args: Value) -> Result<SignIn, String> {
+        super::parse_auth(&args, &crate::config::ClaudeCodeConfig::new("/tmp"))
+            .map_err(|refused| refused.text)
+    }
+
+    #[test]
+    fn a_built_in_sign_in_is_taken_by_name_and_runs_without_approval() {
+        let ask = auth(json!({"tool": "gcp-mcp", "profile": "gcloud-adc"})).unwrap();
+        assert_eq!(ask.tool, "gcp-mcp");
+        assert_eq!(ask.profile.name, "gcloud-adc");
+        assert!(!ask.approve_first);
+    }
+
+    #[test]
+    fn a_custom_command_is_split_and_kept_for_the_owner_to_approve() {
+        let ask = auth(json!({
+            "tool": "widget-mcp",
+            "profile": "custom",
+            "command": " /bin/login --device  now ",
+            "needs_code": true,
+        }))
+        .unwrap();
+        assert_eq!(ask.profile.command_line(), "/bin/login --device now");
+        assert!(ask.approve_first && ask.profile.needs_code);
+    }
+
+    #[test]
+    fn an_auth_request_that_cannot_be_run_is_refused_with_what_to_fix() {
+        for (args, wanted) in [
+            (json!({"profile": "gcloud"}), "`tool` is required"),
+            (json!({"tool": "x"}), "`profile` is required"),
+            (
+                json!({"tool": "x", "profile": "aws"}),
+                "there is no `aws` sign-in",
+            ),
+            (
+                json!({"tool": "x", "profile": "custom"}),
+                "needs a `command`",
+            ),
+            (
+                json!({"tool": "x", "profile": "gcloud", "command": "/bin/login"}),
+                "`command` belongs to the `custom` profile only",
+            ),
+        ] {
+            let refused = auth(args.clone()).unwrap_err();
+            assert!(refused.contains(wanted), "{args}: {refused}");
+        }
+    }
 
     use super::*;
 

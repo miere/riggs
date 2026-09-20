@@ -11,7 +11,7 @@ use rax::credential::{CredentialHealth, CredentialRenewal};
 use rax::id::PromptId;
 use rax::interaction::{DisplayAnswer, DisplayOutcome, SignInRequest, SignInSettled, SignInState};
 use rax::{ErrorKind, Event, NodeCall};
-use rax_sim::{Match, NodeCallRequest, NodeMethod, NodeOptions, SimNode};
+use rax_sim::{Match, NodeCallRequest, NodeMethod, NodeOptions, SimNode, VerdictPolicy};
 use support::*;
 use tracing_subscriber::fmt::MakeWriter;
 
@@ -289,7 +289,8 @@ async fn a_rejected_credential_asks_the_owner_once_and_their_code_signs_claude_c
     for secret in [CODE, "owner@example.com", &TOKEN[TOKEN.len() - 43..]] {
         assert!(!captured.contains(secret), "the logs carry {secret:?}");
     }
-    assert!(captured.contains("asking this node's owner to sign Claude Code in again"));
+    assert!(captured.contains("asking this node's owner to sign in"));
+    assert!(captured.contains("profile=claude-code"));
     world.stop_node().await;
 }
 
@@ -505,5 +506,86 @@ async fn a_login_that_fails_settles_failed_with_its_output() {
             .unwrap()
             .contains("Login failed: the stub refused to sign in")
     );
+    world.stop_node().await;
+}
+
+/// Drives a sign-in the agent asked for: answer the code, approve the confirmation, and report
+/// what the turn finally said.
+async fn agent_sign_in(
+    node: &SimNode,
+    session: &rax::id::SessionId,
+    approve_command: bool,
+) -> String {
+    node.set_verdicts(VerdictPolicy::AllowAll);
+    let mut turn = node
+        .prompt(session.clone(), text("sign me in"))
+        .await
+        .unwrap();
+    let (request, call) = sign_in_call(node).await;
+    assert_eq!(request.tool, "gcp-mcp");
+    call.reply().await.unwrap();
+    if approve_command {
+        assert!(
+            request.url.is_none(),
+            "a command runs only once it is approved"
+        );
+        assert!(
+            request
+                .command
+                .as_deref()
+                .is_some_and(|line| line.contains("auth login")),
+            "{:?}",
+            request.command
+        );
+        node.answer(answer(&request.id, DisplayOutcome::Approved, None))
+            .await
+            .unwrap();
+        let (ready, call) = settled_call(node).await;
+        assert_eq!(ready.state, SignInState::Ready);
+        assert!(
+            ready.url.is_some_and(|url| url.contains("oauth/authorize")),
+            "no link"
+        );
+        call.reply().await.unwrap();
+    } else {
+        assert!(
+            request.url.is_some(),
+            "a built-in flow offers its link up front"
+        );
+        assert!(request.command.is_none());
+    }
+    let states = finish_sign_in(node, &request.id, Duration::ZERO).await;
+    assert_eq!(states.last(), Some(&SignInState::Success), "{states:?}");
+    let said = turn
+        .expect(Match::when("the agent's answer", |event| {
+            matches!(event, Event::Message { .. })
+        }))
+        .await
+        .unwrap();
+    turn.until_end().await.unwrap();
+    match said {
+        Event::Message { content } => format!("{content:?}"),
+        other => panic!("expected a message, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_agent_asks_for_credentials_and_the_owner_signs_in() {
+    let mut world = world("auth-builtin", |_| {}).await;
+    let node = world.start_node().await;
+    let session = node.new_session(vec![]).await.unwrap().session_id;
+    let said = agent_sign_in(&node, &session, false).await;
+    assert!(said.contains("completed the sign-in for gcp-mcp"), "{said}");
+    assert_eq!(sign_ins(&node), 1);
+    world.stop_node().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_command_the_agent_supplied_runs_only_after_the_owner_approves_it() {
+    let mut world = world("auth-custom", |_| {}).await;
+    let node = world.start_node().await;
+    let session = node.new_session(vec![]).await.unwrap().session_id;
+    let said = agent_sign_in(&node, &session, true).await;
+    assert!(said.contains("completed the sign-in for gcp-mcp"), "{said}");
     world.stop_node().await;
 }

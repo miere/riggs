@@ -38,6 +38,8 @@ pub(crate) struct Ctx {
     pub(crate) config: ClaudeCodeConfig,
     pub(crate) host: OnceLock<HostHandles>,
     pub(crate) health: Health,
+    /// Weak, because the coordinator holds this context: the `auth` tool reaches it from a turn.
+    pub(crate) repair: OnceLock<std::sync::Weak<crate::repair::Repair>>,
 }
 
 #[derive(Clone)]
@@ -239,6 +241,10 @@ fn update(id: &str, status: ToolCallStatus, output: Option<Value>) -> BackendEve
 impl Proc {
     fn lock(&self) -> MutexGuard<'_, State> {
         lock(&self.state)
+    }
+
+    pub(crate) fn ctx(&self) -> &Arc<Ctx> {
+        &self.ctx
     }
 
     pub(crate) fn workdir(&self) -> &Path {
