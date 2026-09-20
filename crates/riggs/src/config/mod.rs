@@ -344,9 +344,9 @@ fn agent(
         }
     };
     let mut env = BTreeMap::new();
-    for (key, value) in dotenv {
-        if std::env::var_os(&key).is_none() {
-            env.insert(key, value);
+    for (key, value) in &dotenv {
+        if std::env::var_os(key).is_none() {
+            env.insert(key.clone(), value.clone());
         }
     }
     for (key, value) in section.env {
@@ -354,7 +354,11 @@ fn agent(
             problems.add("agent.env", format!("{key:?} is not a valid variable name"));
             continue;
         }
-        env.insert(key, value);
+        // Against the dotenv rather than the map above: a `${NAME}` reference reads the same
+        // sources whether or not Riggs' own environment already carries NAME.
+        if let Some(value) = expand(&value, &key, &dotenv, problems) {
+            env.insert(key, value);
+        }
     }
     let workdir = section
         .workdir
@@ -575,6 +579,55 @@ fn dotenv(path: &Path, problems: &mut Problems) -> Option<BTreeMap<String, Strin
         }
     }
     Some(values)
+}
+
+/// Resolves the `${NAME}` references in an `agent.env` value, reading Riggs' own environment
+/// first and then `env_file`, so a secret never has to sit in the TOML. Only the braced form is a
+/// reference — a lone `$`, or a `${` that is never closed, is literal, so a value that happens to
+/// contain one survives intact.
+///
+/// A name nothing sets is a problem rather than the empty string the gateway substitutes: there
+/// the token's prefix is checked straight afterwards, while an `agent.env` value is opaque here
+/// and an empty one would only surface much later, inside the sandbox, as the tool it feeds
+/// failing to authenticate.
+fn expand(
+    raw: &str,
+    key: &str,
+    dotenv: &BTreeMap<String, String>,
+    problems: &mut Problems,
+) -> Option<String> {
+    let mut out = String::with_capacity(raw.len());
+    let mut rest = raw;
+    let mut resolved = true;
+    while let Some(start) = rest.find("${") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let Some(end) = after.find('}') else {
+            out.push_str(&rest[start..]);
+            rest = "";
+            break;
+        };
+        let name = &after[..end];
+        match std::env::var(name)
+            .ok()
+            .filter(|value| !value.is_empty())
+            .or_else(|| dotenv.get(name).cloned())
+        {
+            Some(value) => out.push_str(&value),
+            None => {
+                problems.add(
+                    "agent.env",
+                    format!(
+                        "{key} reads ${{{name}}}, which is set neither in Riggs' environment nor in env_file"
+                    ),
+                );
+                resolved = false;
+            }
+        }
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    resolved.then_some(out)
 }
 
 fn expand_home(raw: &Path) -> PathBuf {
