@@ -15,17 +15,14 @@ use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::ClaudeCodeConfig;
+use crate::profile::Profile;
 
-const LOGIN_ARGS: &[&str] = &["auth", "login", "--claudeai"];
-const VERIFIED_VERSION: &str = "2.1.271";
 const LAUNCHERS: &[&str] = &["open", "xdg-open"];
 const LAUNCHER_SCRIPT: &[u8] = b"#!/bin/sh\nexit 0\n";
 const OUTPUT_BYTES: usize = 16 << 10;
 const DETAIL_CHARS: usize = 400;
 const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 const STOP_WAIT: Duration = Duration::from_secs(5);
-const TIGHT: &str = "https://claude.com/";
-const CONSENT_PATH: &str = "oauth/authorize";
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum LoginError {
@@ -72,8 +69,11 @@ pub(crate) struct Login {
 }
 
 impl Login {
+    /// Runs `profile` and returns once it offers a link, because a sign-in with nothing to open
+    /// cannot be finished by anyone.
     pub(crate) async fn start(
         config: &ClaudeCodeConfig,
+        profile: &Profile,
         stop: &CancellationToken,
     ) -> Result<(Self, String), LoginError> {
         let guard = guard(&config.sign_in.scratch_dir).map_err(LoginError::Guard)?;
@@ -86,14 +86,17 @@ impl Login {
             Some(path) => format!("{}:{path}", guard.path().display()),
             None => guard.path().display().to_string(),
         };
-        let mut command = Command::new(&config.command);
+        let mut command = Command::new(&profile.command);
         command
-            .args(LOGIN_ARGS)
+            .args(&profile.args)
             .current_dir(&config.workdir)
             .env_remove("CLAUDECODE")
-            .envs(&config.env)
-            .env("PATH", path)
-            .env("BROWSER", guard.path().join("open"));
+            .envs(&config.env);
+        if profile.suppress_browser {
+            command
+                .env("PATH", path)
+                .env("BROWSER", guard.path().join("open"));
+        }
         let (
             leader,
             Pipes {
@@ -108,7 +111,7 @@ impl Login {
         let (scan, mut scanned) = watch::channel(Scan::Searching);
         let output = Arc::new(Mutex::new(VecDeque::new()));
         tokio::spawn(reap(leader, kills, exit));
-        tokio::spawn(read(stdout, output.clone(), scan));
+        tokio::spawn(read(stdout, output.clone(), scan, profile.clone()));
         let login = Self {
             stdin: tokio::sync::Mutex::new(stdin),
             kill,
@@ -138,12 +141,12 @@ impl Login {
             Scan::Found(url) => return Ok((login, url)),
             Scan::Ended => LoginError::NoLink {
                 detail: login.detail().await,
-                drift: drift(config).await,
+                drift: drift(config, profile).await,
             },
             Scan::Searching => LoginError::LinkTimeout {
                 secs: config.sign_in.link_wait.as_secs(),
                 detail: login.detail().await,
-                drift: drift(config).await,
+                drift: drift(config, profile).await,
             },
         };
         login.stop().await;
@@ -230,6 +233,7 @@ async fn read(
     mut stdout: ChildStdout,
     output: Arc<Mutex<VecDeque<u8>>>,
     scan: watch::Sender<Scan>,
+    profile: Profile,
 ) {
     let mut buffer = vec![0u8; 8192];
     let mut line = Vec::new();
@@ -255,7 +259,7 @@ async fn read(
                 }
                 continue;
             }
-            if let Some(url) = consent_url(&String::from_utf8_lossy(&line)) {
+            if let Some(url) = profile.link_in(&String::from_utf8_lossy(&line)) {
                 scan.send_replace(Scan::Found(url));
                 searching = false;
                 break;
@@ -264,36 +268,12 @@ async fn read(
         }
     }
     if searching {
-        if let Some(url) = consent_url(&String::from_utf8_lossy(&line)) {
+        if let Some(url) = profile.link_in(&String::from_utf8_lossy(&line)) {
             scan.send_replace(Scan::Found(url));
         } else {
             scan.send_replace(Scan::Ended);
         }
     }
-}
-
-pub(crate) fn consent_url(line: &str) -> Option<String> {
-    let candidates: Vec<&str> = line
-        .match_indices("https://")
-        .filter_map(|(at, _)| line.get(at..))
-        .map(|rest| rest.split(char::is_whitespace).next().unwrap_or_default())
-        .collect();
-    let consent = |candidate: &&str| {
-        candidate
-            .find(CONSENT_PATH)
-            .is_some_and(|at| candidate.len() > at + CONSENT_PATH.len())
-    };
-    let tight = candidates
-        .iter()
-        .copied()
-        .filter(|candidate| candidate.starts_with(TIGHT))
-        .find(consent);
-    let found = tight.or_else(|| candidates.iter().copied().find(consent))?;
-    let trimmed = found.trim_end_matches(['.', ',', ';', ':', '\'', '"', ')', ']', '>']);
-    trimmed
-        .find(CONSENT_PATH)
-        .is_some_and(|at| trimmed.len() > at + CONSENT_PATH.len())
-        .then(|| trimmed.to_owned())
 }
 
 fn one_line(text: &str) -> String {
@@ -306,8 +286,13 @@ fn one_line(text: &str) -> String {
     clipped
 }
 
-async fn drift(config: &ClaudeCodeConfig) -> String {
-    let mut command = Command::new(&config.command);
+/// A CLI that has moved on from the release a profile was read against explains a flow that
+/// suddenly prints nothing we recognise.
+async fn drift(config: &ClaudeCodeConfig, profile: &Profile) -> String {
+    let Some(verified) = profile.verified_version else {
+        return String::new();
+    };
+    let mut command = Command::new(&profile.command);
     command
         .arg("--version")
         .current_dir(&config.workdir)
@@ -320,8 +305,9 @@ async fn drift(config: &ClaudeCodeConfig) -> String {
     };
     let text = String::from_utf8_lossy(&output.stdout);
     match text.split_whitespace().next() {
-        Some(version) if output.status.success() && version != VERIFIED_VERSION => format!(
-            " (Claude Code reports version {version}, but this sign-in was verified against {VERIFIED_VERSION}; its output may have changed)"
+        Some(version) if output.status.success() && version != verified => format!(
+            " ({} reports version {version}, but this sign-in was verified against {verified}; its output may have changed)",
+            profile.command.display()
         ),
         _ => String::new(),
     }
@@ -330,48 +316,6 @@ async fn drift(config: &ClaudeCodeConfig) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const REAL_LINE: &str = "If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=org%3Acreate_api_key+user%3Aprofile+user%3Ainference&code_challenge=mZioQLsnrQWX7owYtUe_kW-JQJc1iItirISM4gUlCpo&code_challenge_method=S256&state=y_pucGhaVzjF97wrrPRD5WeTCoR6vFh6jKV3LFJIRiA";
-
-    #[test]
-    fn the_consent_link_is_taken_from_the_real_login_line() {
-        let url = REAL_LINE.split_once("visit: ").map(|(_, url)| url);
-        assert_eq!(consent_url(REAL_LINE).as_deref(), url);
-    }
-
-    #[test]
-    fn a_moved_consent_page_still_matches_and_trailing_punctuation_is_trimmed() {
-        assert_eq!(
-            consent_url(
-                "visit: https://auth.anthropic.example/cai/oauth/authorize?code=true&state=abc."
-            )
-            .as_deref(),
-            Some("https://auth.anthropic.example/cai/oauth/authorize?code=true&state=abc")
-        );
-        assert_eq!(
-            consent_url(
-                "(https://auth.example/oauth/authorize?x=1) then https://claude.com/cai/oauth/authorize?y=2"
-            )
-            .as_deref(),
-            Some("https://claude.com/cai/oauth/authorize?y=2")
-        );
-    }
-
-    #[test]
-    fn links_that_are_not_a_consent_page_never_match() {
-        for line in [
-            "redirect_uri is https://platform.claude.com/oauth/code/callback for this flow",
-            "See https://code.claude.com/docs/en/overview for help",
-            "report the issue at https://github.com/anthropics/claude-code/issues",
-            "https://accounts.google.com/o/oauth2/auth?client_id=x",
-            "posting to https://api.example.com/v1/oauth/token now",
-            "Opening browser to sign in…",
-            "bare https://claude.com/cai/oauth/authorize",
-            "Paste code here if prompted > ",
-        ] {
-            assert_eq!(consent_url(line), None, "{line}");
-        }
-    }
 
     #[test]
     fn output_is_quoted_on_one_clipped_line() {
