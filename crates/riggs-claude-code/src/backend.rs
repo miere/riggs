@@ -12,6 +12,7 @@ use riggs_node::{
     SessionKey, TurnFailed, TurnHandle,
 };
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
 
 use crate::args::Launch;
 use crate::config::ClaudeCodeConfig;
@@ -46,6 +47,8 @@ pub struct ClaudeCode {
     slots: Mutex<HashMap<SessionKey, Arc<Slot>>>,
     repair: Arc<Repair>,
     probe: Mutex<Option<tokio::task::AbortHandle>>,
+    /// Cancelled on shutdown, which stops the credential warden.
+    stopped: CancellationToken,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -67,6 +70,7 @@ impl ClaudeCode {
             ctx,
             slots: Mutex::new(HashMap::new()),
             probe: Mutex::new(None),
+            stopped: CancellationToken::new(),
         }
     }
 
@@ -143,6 +147,7 @@ impl Backend for ClaudeCode {
                 ctx.health.probed(result);
             });
             *lock(&self.probe) = Some(probe.abort_handle());
+            tokio::spawn(crate::warden::watch(self.ctx.clone(), self.stopped.clone()));
         }
         Ok(BackendInfo {
             name: BACKEND_NAME.to_owned(),
@@ -261,6 +266,7 @@ impl Backend for ClaudeCode {
     }
 
     async fn shutdown(&self) {
+        self.stopped.cancel();
         if let Some(probe) = lock(&self.probe).take() {
             probe.abort();
         }

@@ -15,8 +15,10 @@ mod outcome;
 mod process;
 mod profile;
 mod repair;
+mod sandbox;
 mod sign_in;
 mod tool;
+mod warden;
 mod wire;
 
 pub use backend::{BACKEND_NAME, ClaudeCode, ClaudeCodeRecord};
@@ -26,3 +28,4 @@ pub use config::{
     SIGN_IN_LINK_WAIT, SIGN_IN_SHOW_WAIT, STATUS_TIMEOUT, SignInConfig,
 };
 pub use error::{ClaudeCodeError, StderrTail};
+pub use sandbox::{SandboxConfig, SandboxMode};

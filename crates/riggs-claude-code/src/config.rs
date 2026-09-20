@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+
+use crate::sandbox::SandboxConfig;
 use std::time::Duration;
 
 pub const HOOK_TIMEOUT: Duration = Duration::from_secs(3600);
@@ -40,6 +42,12 @@ pub struct ClaudeCodeConfig {
     /// A longer stdout line fails the turn and restarts the process rather than stalling it.
     pub max_line_bytes: usize,
     pub sign_in: SignInConfig,
+    /// Where Claude Code's credential is kept, when it is not the login keychain or
+    /// `$HOME/.claude/.credentials.json`.
+    pub credential_file: Option<PathBuf>,
+    /// How the agent is confined. Off by default, because a box is a promise about a machine
+    /// this crate cannot check by itself.
+    pub sandbox: SandboxConfig,
 }
 
 /// Timings for putting a `claude auth login` in front of the node's owner when the credential fails.
@@ -89,6 +97,8 @@ impl ClaudeCodeConfig {
             interrupt_grace: INTERRUPT_GRACE,
             max_line_bytes: MAX_LINE_BYTES,
             sign_in: SignInConfig::default(),
+            credential_file: None,
+            sandbox: SandboxConfig::default(),
         }
     }
 }

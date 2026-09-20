@@ -227,3 +227,45 @@ fn the_session_store_cannot_share_the_config_directory() {
         ["sessions.dir"]
     );
 }
+
+#[test]
+fn a_seatbelt_box_resolves_its_paths_and_always_denies_the_node_credential() {
+    let toml = format!(
+        "{GOOD}\n[agent.sandbox]\nmode = \"seatbelt\"\nwrite = [\"scratch\"]\ndeny_read = [\"/secrets\"]\n"
+    );
+    let (dir, path) = write(&toml);
+    let config = load(&path, &Overrides::default()).unwrap();
+    let AgentConfig::ClaudeCode(agent) = config.agent else {
+        panic!("expected a claude_code agent");
+    };
+    if cfg!(target_os = "macos") {
+        assert_eq!(agent.sandbox.mode, SandboxMode::Seatbelt);
+    }
+    assert_eq!(agent.sandbox.write, [dir.path().join("scratch")]);
+    assert_eq!(
+        agent.sandbox.deny_read.as_deref(),
+        Some(&[PathBuf::from("/secrets")][..])
+    );
+    assert_eq!(
+        agent.sandbox.node_token.as_deref(),
+        Some(config.token_file.as_path())
+    );
+}
+
+#[test]
+fn a_box_defaults_to_off_and_an_unknown_one_is_named() {
+    let (_dir, path) = write(GOOD);
+    let config = load(&path, &Overrides::default()).unwrap();
+    let AgentConfig::ClaudeCode(agent) = config.agent else {
+        panic!("expected a claude_code agent");
+    };
+    assert_eq!(agent.sandbox.mode, SandboxMode::Off);
+    assert!(
+        agent.sandbox.deny_read.is_none(),
+        "the credential stores stay blinded"
+    );
+    assert_eq!(
+        fields(&format!("{GOOD}\n[agent.sandbox]\nmode = \"jail\"\n")),
+        ["agent.sandbox.mode"]
+    );
+}

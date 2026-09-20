@@ -118,7 +118,18 @@ pub(crate) async fn spawn(
         command: config.command.display().to_string(),
         source,
     };
-    let mut command = Command::new(&config.command);
+    // Only the agent is boxed. The credential warden and the sign-in commands run outside it.
+    let mut command = if config.sandbox.wraps() {
+        let wrapper = config.sandbox.wrap(&config.command, &config.workdir);
+        let (first, rest) = wrapper
+            .split_first()
+            .unwrap_or_else(|| unreachable!("a wrapper always names its command"));
+        let mut command = Command::new(first);
+        command.args(rest);
+        command
+    } else {
+        Command::new(&config.command)
+    };
     command
         .args(args::argv(config, &key, launch))
         .current_dir(&config.workdir)
