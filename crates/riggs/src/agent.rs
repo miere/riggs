@@ -15,7 +15,7 @@ pub fn server(
 ) -> Result<NodeServer, ServerError> {
     let (backend, turn_failed): (Arc<dyn Backend>, Option<TurnFailed>) = match agent {
         AgentConfig::ClaudeCode(config) => {
-            let claude = Arc::new(ClaudeCode::new(config.clone()));
+            let claude = Arc::new(ClaudeCode::new(*config.clone()));
             let repair = claude.turn_failed();
             (claude, Some(repair))
         }

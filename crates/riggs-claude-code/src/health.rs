@@ -40,9 +40,14 @@ enum Observed {
     Degraded { since: OffsetDateTime },
 }
 
+/// The expiry last read out of the credential, carried on every report from then on.
+#[derive(Default)]
+struct Expiry(Option<OffsetDateTime>);
+
 pub(crate) struct Health {
     credential: String,
     observed: Mutex<Observed>,
+    expiry: Mutex<Expiry>,
     reports: mpsc::UnboundedSender<CredentialHealth>,
     queued: Mutex<Option<mpsc::UnboundedReceiver<CredentialHealth>>>,
 }
@@ -62,6 +67,7 @@ impl Health {
         Self {
             credential,
             observed: Mutex::new(Observed::Unknown),
+            expiry: Mutex::new(Expiry::default()),
             reports,
             queued: Mutex::new(Some(queued)),
         }
@@ -94,6 +100,25 @@ impl Health {
         }
     }
 
+    /// The warden read the credential; a later expiry than the one reported means it was
+    /// refreshed, which is worth telling the owner about.
+    pub(crate) fn expires_at(&self, expiry: OffsetDateTime) {
+        let changed = {
+            let mut last = lock(&self.expiry);
+            let changed = last.0 != Some(expiry);
+            last.0 = Some(expiry);
+            changed
+        };
+        if !changed {
+            return;
+        }
+        let mut observed = lock(&self.observed);
+        if matches!(*observed, Observed::Healthy) {
+            return;
+        }
+        self.become_healthy(&mut observed);
+    }
+
     pub(crate) fn degraded(&self, error: &str) {
         let mut observed = lock(&self.observed);
         if matches!(*observed, Observed::Degraded { .. }) {
@@ -121,7 +146,7 @@ impl Health {
             degraded: false,
             reason: None,
             since,
-            expires_at: None,
+            expires_at: lock(&self.expiry).0,
         });
     }
 
@@ -133,7 +158,7 @@ impl Health {
             degraded: true,
             reason: Some(reason),
             since: Some(since),
-            expires_at: None,
+            expires_at: lock(&self.expiry).0,
         });
         *observed = Observed::Degraded { since };
     }

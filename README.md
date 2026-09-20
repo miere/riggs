@@ -37,6 +37,12 @@ args = []
 workdir = "~/work"          # defaults to the config folder
 env = { ANTHROPIC_MODEL = "claude-opus-4-1" }
 
+[agent.sandbox]
+mode = "seatbelt"           # or "off" (the default); macOS only
+write = ["scratch"]         # writable beyond the workspace, temp dirs and Claude Code's own state
+deny_read = []              # unreadable; unset blinds the agent to ~/.ssh, ~/.aws, ~/.config/gcloud,
+                            # ~/.config/gh and ~/.netrc
+
 [sessions]
 durable = true              # keep sessions across restarts
 dir = "sessions"
@@ -50,6 +56,11 @@ format = "text"             # or "json"
 Files a person shares in the conversation are fetched from the gateway when the prompt arrives and
 saved under `files/` beside the config, one folder per session. The agent gets the local path.
 They are deleted with their session, including when an unused session is pruned.
+
+The sandbox confines the agent alone. Signing in and refreshing the Claude Code credential run
+outside it on purpose: a boxed `claude` can read its credential but cannot write a refreshed one
+back, and because Anthropic rotates refresh tokens, a refresh that cannot be saved destroys the
+credential. The node's own token is always denied to the agent, whatever `deny_read` lists.
 
 An ACP agent uses `kind = "acp"` and may also set `interruptible`, `startup_timeout`,
 `cancel_grace_period` and `permission_timeout`. An optional top-level `env_file = ".env"` adds

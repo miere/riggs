@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use riggs_acp::AcpConfig;
-use riggs_claude_code::ClaudeCodeConfig;
+use riggs_claude_code::{ClaudeCodeConfig, SandboxConfig, SandboxMode};
 use riggs_node::{SESSION_RETENTION, SessionsConfig};
 
 use crate::token::is_configured;
@@ -82,7 +82,8 @@ pub struct Overrides {
 
 #[derive(Debug, Clone)]
 pub enum AgentConfig {
-    ClaudeCode(ClaudeCodeConfig),
+    /// Boxed: it carries the sandbox policy and dwarfs the ACP config beside it.
+    ClaudeCode(Box<ClaudeCodeConfig>),
     Acp(AcpConfig),
 }
 
@@ -200,7 +201,13 @@ fn build(
         .env_file
         .as_deref()
         .and_then(|raw| dotenv(&resolve(dir, raw), problems));
-    let agent = agent(dir, file.agent, dotenv.unwrap_or_default(), problems);
+    let agent = agent(
+        dir,
+        file.agent,
+        dotenv.unwrap_or_default(),
+        &token_file,
+        problems,
+    );
     let sessions = sessions(dir, &file.sessions, problems);
     let log = log(&file.log, problems);
     Some(Config {
@@ -262,6 +269,45 @@ enum Kind {
     Acp,
 }
 
+/// The box the agent runs in. Its own credential is always denied, whatever the profile lists,
+/// because a node that can read its token can pretend to be this machine.
+fn sandbox(
+    dir: &Path,
+    section: file::Sandbox,
+    token_file: &Path,
+    problems: &mut Problems,
+) -> SandboxConfig {
+    let mode = match section.mode.as_deref().map(str::trim) {
+        None | Some("off") => SandboxMode::Off,
+        Some("seatbelt") if cfg!(target_os = "macos") => SandboxMode::Seatbelt,
+        Some("seatbelt") => {
+            problems.add(
+                "agent.sandbox.mode",
+                "\"seatbelt\" only works on macOS; use \"off\" here",
+            );
+            SandboxMode::Off
+        }
+        Some(other) => {
+            problems.add(
+                "agent.sandbox.mode",
+                format!("{other:?} is not a sandbox; use \"seatbelt\" or \"off\""),
+            );
+            SandboxMode::Off
+        }
+    };
+    let paths = |raw: Vec<String>| -> Vec<PathBuf> {
+        raw.iter()
+            .map(|path| resolve(dir, path))
+            .collect::<Vec<_>>()
+    };
+    SandboxConfig {
+        mode,
+        write: paths(section.write),
+        deny_read: section.deny_read.map(paths),
+        node_token: Some(token_file.to_path_buf()),
+    }
+}
+
 const CLAUDE_CODE_ONLY: &str = "only applies when agent.kind is \"claude_code\"";
 const ACP_ONLY: &str = "only applies when agent.kind is \"acp\"";
 
@@ -269,6 +315,7 @@ fn agent(
     dir: &Path,
     section: file::Agent,
     dotenv: BTreeMap<String, String>,
+    token_file: &Path,
     problems: &mut Problems,
 ) -> Option<AgentConfig> {
     let kind = match section.kind.as_deref().map(str::trim) {
@@ -367,7 +414,8 @@ fn agent(
                 &mut config.interrupt_grace,
             );
             config.command = command?;
-            AgentConfig::ClaudeCode(config)
+            config.sandbox = sandbox(dir, section.sandbox, token_file, problems);
+            AgentConfig::ClaudeCode(Box::new(config))
         }
         Kind::Acp => {
             for (field, set) in [

@@ -44,6 +44,47 @@ async fn initialize_declares_every_call_durable_sessions_and_images() {
     world.stop_node().await;
 }
 
+/// A boxed agent must still be able to work: the policy is only useful if the CLI runs under it.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_boxed_agent_still_answers() {
+    // A machine already inside someone else's box cannot nest another, and says so here.
+    let probe = std::process::Command::new("/usr/bin/sandbox-exec")
+        .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
+        .output()
+        .unwrap();
+    if !probe.status.success() {
+        return;
+    }
+    let mut world = World::with("basic", |config| {
+        // The fake CLI keeps its state beside the binary rather than in the workspace.
+        let state = config
+            .env
+            .get("FAKE_CLAUDE_STATE")
+            .cloned()
+            .unwrap_or_default();
+        config.sandbox = riggs_claude_code::SandboxConfig {
+            mode: riggs_claude_code::SandboxMode::Seatbelt,
+            write: vec![
+                std::path::PathBuf::from(state),
+                std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")),
+            ],
+            ..Default::default()
+        };
+    })
+    .await;
+    let node = world.start_node().await;
+    let session = node.new_session(vec![]).await.unwrap().session_id;
+    let mut turn = node.prompt(session, text("say pong")).await.unwrap();
+    turn.expect(Match::when("an answer", |event| {
+        matches!(event, Event::Message { .. })
+    }))
+    .await
+    .unwrap();
+    turn.until_end().await.unwrap();
+    world.stop_node().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_prompt_is_accepted_before_its_events_and_completes() {
     let mut world = World::new("basic").await;
