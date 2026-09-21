@@ -11,11 +11,15 @@ download with `gh`:
 
 ```sh
 target=aarch64-apple-darwin
-gh release download --repo miere/riggs --pattern "*-$target.tar.gz*"
-shasum -a 256 -c riggs-*-$target.tar.gz.sha256
-tar -xzf riggs-*-$target.tar.gz
-install -m 0755 riggs-*-$target/riggs ~/.local/bin/
+tmp=$(mktemp -d)
+gh release download --repo miere/riggs --pattern "*-$target.tar.gz*" --dir "$tmp"
+(cd "$tmp" && shasum -a 256 -c riggs-*-$target.tar.gz.sha256 && tar -xzf riggs-*-$target.tar.gz)
+install -m 0755 "$tmp"/riggs-*-$target/riggs ~/.local/bin/
+rm -rf "$tmp"
 ```
+
+The empty directory matters: the globs above match every version they find, so a tarball left over
+from an earlier install would make `tar` and `install` pick the wrong one.
 
 `~/.local/bin` is on the PATH of the LaunchAgent that `riggs launchd` writes. To build from source
 instead: `cargo install --locked --git ssh://git@github.com/miere/riggs riggs`.
