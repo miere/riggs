@@ -1,22 +1,23 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use riggs_node::SessionsConfig;
 
-use crate::cli::{Cli, Command, LaunchdArgs, RunArgs, VersionArgs};
-use crate::config::{self, Config, ConfigError, DEFAULT_ALIAS, Overrides};
+use crate::cli::{Cli, Command, InstallArgs, LaunchdCommand, RunArgs, VersionArgs};
+use crate::config::{self, Config, ConfigError, Overrides};
 use crate::dial::Dialer;
-use crate::launchd::{self, Plan};
+use crate::launchd::{self, Job, Launchctl, Plan};
 use crate::logging::redact;
 use crate::version::{self, GitHub, VERSION};
 use crate::{agent, lock, logging, signals, token};
 
 pub fn dispatch(cli: Cli) -> ExitCode {
     let config = cli.config;
+    let alias = cli.alias;
     let result = match cli.command {
-        Command::Run(args) => run(config, args),
-        Command::Validate => validate(config),
-        Command::Launchd(args) => install_launchd(config, args),
+        Command::Run(args) => run(config, &alias, args),
+        Command::Validate => validate(config, &alias),
+        Command::Launchd(command) => launchd_command(config, &alias, command),
         Command::Version(args) => print_version(args),
     };
     match result {
@@ -35,8 +36,8 @@ fn config_path(flag: Option<PathBuf>, alias: &str) -> Result<PathBuf, String> {
     }
 }
 
-fn run(flag: Option<PathBuf>, args: RunArgs) -> Result<(), String> {
-    let path = config_path(flag, DEFAULT_ALIAS)?;
+fn run(flag: Option<PathBuf>, alias: &str, args: RunArgs) -> Result<(), String> {
+    let path = config_path(flag, alias)?;
     let overrides = Overrides {
         gateway: args.gateway,
         token_file: args.token_file,
@@ -83,8 +84,8 @@ fn print_banner(config: &Config) {
     println!("tool_gate: {}", config.agent.tool_gate());
 }
 
-fn validate(flag: Option<PathBuf>) -> Result<(), String> {
-    let path = config_path(flag, DEFAULT_ALIAS)?;
+fn validate(flag: Option<PathBuf>, alias: &str) -> Result<(), String> {
+    let path = config_path(flag, alias)?;
     match config::load(&path, &Overrides::default()) {
         Ok(config) => {
             token::read(&config.token_file).map_err(|err| {
@@ -117,21 +118,53 @@ fn validate(flag: Option<PathBuf>) -> Result<(), String> {
     }
 }
 
-fn install_launchd(flag: Option<PathBuf>, args: LaunchdArgs) -> Result<(), String> {
+fn launchd_command(
+    flag: Option<PathBuf>,
+    alias: &str,
+    command: LaunchdCommand,
+) -> Result<(), String> {
     launchd::ensure_macos().map_err(|err| err.to_string())?;
-    let config = config_path(flag, &args.alias)?;
     let home =
         config::home().ok_or("HOME is not set, so there is no LaunchAgents folder to write to")?;
+    let job = Job::new(alias, home).map_err(|err| err.to_string())?;
+    if let LaunchdCommand::Install(args) = command {
+        return install_launchd(flag, job, args);
+    }
+    // Only install reads the configuration; the rest address the job --alias names.
+    if flag.is_some() {
+        return Err(format!(
+            "--config only applies to `riggs launchd install`; {} acts on the job --alias names",
+            job.label()
+        ));
+    }
+    if let LaunchdCommand::Status = command {
+        let status = launchd::status(&job, &Launchctl).map_err(|err| err.to_string())?;
+        println!("{status}");
+        return Ok(());
+    }
+    let outcome = match command {
+        LaunchdCommand::Install(_) | LaunchdCommand::Status => unreachable!("handled above"),
+        LaunchdCommand::Uninstall => launchd::uninstall(&job, &Launchctl),
+        LaunchdCommand::Start => launchd::start(&job, &Launchctl),
+        LaunchdCommand::Stop => launchd::stop(&job, &Launchctl),
+        LaunchdCommand::Restart(args) => launchd::restart(&job, &Launchctl, args.force),
+    }
+    .map_err(|err| err.to_string())?;
+    println!("{}", outcome.message(&job.label()));
+    Ok(())
+}
+
+fn install_launchd(flag: Option<PathBuf>, job: Job, args: InstallArgs) -> Result<(), String> {
+    let config = config_path(flag, job.alias())?;
     let binary = match args.binary_path {
         Some(path) => config::absolute(&path),
         None => std::env::current_exe()
             .map_err(|err| format!("cannot find this riggs binary; pass --binary-path: {err}"))?,
     };
     let plan = Plan {
-        alias: args.alias,
+        job,
         binary,
         config,
-        home,
     };
     let installed = launchd::install(&plan, args.update_existing).map_err(|err| err.to_string())?;
     let verb = if installed.replaced {
@@ -146,19 +179,23 @@ fn install_launchd(flag: Option<PathBuf>, args: LaunchdArgs) -> Result<(), Strin
     );
     if !plan.config.exists() {
         println!(
-            "Note: {} does not exist yet; create it before loading the job.",
+            "Note: {} does not exist yet; create it before starting the job.",
             plan.config.display()
         );
     }
     println!(
-        "Load it with: launchctl bootstrap gui/$(id -u) {}",
-        quote(&installed.path)
+        "Start it with: riggs launchd start{}",
+        alias_flag(&plan.job)
     );
     Ok(())
 }
 
-fn quote(path: &Path) -> String {
-    format!("'{}'", path.display().to_string().replace('\'', r"'\''"))
+fn alias_flag(job: &Job) -> String {
+    if job.alias() == config::DEFAULT_ALIAS {
+        String::new()
+    } else {
+        format!(" --alias {}", job.alias())
+    }
 }
 
 fn print_version(args: VersionArgs) -> Result<(), String> {

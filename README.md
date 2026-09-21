@@ -87,16 +87,44 @@ rejected the old token, Riggs notices the new file within a few seconds and reco
 not restart, and it keeps its sessions. Agents run as your user, so they can read the token file
 too. Do not copy one token to two machines; the gateway would keep swapping them.
 
-On macOS, `riggs launchd` writes a LaunchAgent that starts Riggs at login and restarts it if it
+On macOS, `riggs launchd` manages a LaunchAgent that starts Riggs at login and restarts it if it
 stops:
 
 ```sh
-riggs launchd --alias default
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/riggs.default.plist
+riggs launchd install     # write the LaunchAgent
+riggs launchd start       # hand it to launchd
+riggs launchd status      # is it loaded, is it running, what did it exit with
+riggs launchd restart     # shut Riggs down cleanly, then start it again
+riggs launchd stop        # take it off launchd
+riggs launchd uninstall   # stop it and delete the LaunchAgent
 ```
 
-It never replaces an existing plist unless you pass `--update-existing`. Logs go to
-`~/Library/Logs/riggs/`. `riggs version --check` tells you whether a newer release exists; it
+`status` is the one to reach for when launchd is being unhelpful — it digs the pid, the last exit
+code and the log paths out of `launchctl print`, and tells "never installed" apart from "installed
+but not loaded":
+
+```
+riggs.default is running (pid 4812).
+  LaunchAgent: /Users/you/Library/LaunchAgents/riggs.default.plist
+  last exit:   0
+  out log:     /Users/you/Library/Logs/riggs/riggs.default.out.log
+  err log:     /Users/you/Library/Logs/riggs/riggs.default.err.log
+```
+
+`--alias NAME` picks which Riggs you mean: it names both the job (`riggs.<alias>`) and the
+configuration at `~/.config/riggs/<alias>/riggs.toml`. It is global, so it goes with `run` and
+`validate` too, and it defaults to `default`.
+
+`install` never replaces an existing plist unless you pass `--update-existing`, and it is the only
+one of the six that reads a configuration — the others act on the job `--alias` names, and refuse
+`--config` rather than quietly ignoring it.
+
+`stop` and a plain `restart` unload the job, which asks Riggs to shut down cleanly: launchd sends
+SIGTERM and waits out `ExitTimeOut` (20 seconds unless you set it in the plist) before killing it.
+A turn that is still running when that clock expires gets killed with it, so pass
+`riggs launchd restart --force` only when you want the process gone now.
+
+Logs go to `~/Library/Logs/riggs/`. `riggs version --check` tells you whether a newer release exists; it
 never downloads anything. The repository is private, so set `GH_TOKEN` (for example
 `GH_TOKEN=$(gh auth token)`).
 

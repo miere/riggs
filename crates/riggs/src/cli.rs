@@ -13,9 +13,12 @@ use crate::config::DEFAULT_ALIAS;
     disable_version_flag = true
 )]
 pub struct Cli {
-    /// Configuration file [default: ~/.config/riggs/default/riggs.toml]
+    /// Configuration file [default: ~/.config/riggs/<alias>/riggs.toml]
     #[arg(long, global = true, value_name = "PATH")]
     pub config: Option<PathBuf>,
+    /// Which riggs to act on: the launchd job riggs.<alias> and ~/.config/riggs/<alias>
+    #[arg(long, global = true, default_value = DEFAULT_ALIAS, value_name = "NAME")]
+    pub alias: String,
     #[command(subcommand)]
     pub command: Command,
 }
@@ -26,10 +29,27 @@ pub enum Command {
     Run(RunArgs),
     /// Check the configuration and the token file without connecting
     Validate,
-    /// Write a macOS LaunchAgent that keeps `riggs run` alive
-    Launchd(LaunchdArgs),
+    /// Manage the macOS LaunchAgent that keeps `riggs run` alive
+    #[command(subcommand)]
+    Launchd(LaunchdCommand),
     /// Print the version, or check GitHub for a newer release
     Version(VersionArgs),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum LaunchdCommand {
+    /// Write the LaunchAgent for this alias
+    Install(InstallArgs),
+    /// Stop the job and delete its LaunchAgent
+    Uninstall,
+    /// Hand the job to launchd, which starts it and keeps it alive
+    Start,
+    /// Take the job off launchd, letting riggs shut down cleanly
+    Stop,
+    /// Shut riggs down cleanly and hand the job back to launchd
+    Restart(RestartArgs),
+    /// Say whether launchd has the job, whether it is running, and where its logs are
+    Status,
 }
 
 #[derive(Debug, Args)]
@@ -46,16 +66,20 @@ pub struct RunArgs {
 }
 
 #[derive(Debug, Args)]
-pub struct LaunchdArgs {
-    /// Names the job riggs.<alias> and picks the default config path
-    #[arg(long, default_value = DEFAULT_ALIAS)]
-    pub alias: String,
+pub struct InstallArgs {
     /// The riggs binary launchd runs [default: this binary]
     #[arg(long, value_name = "PATH")]
     pub binary_path: Option<PathBuf>,
     /// Replace an existing plist
     #[arg(long)]
     pub update_existing: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct RestartArgs {
+    /// Kill riggs instead of waiting for it to shut down cleanly
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Debug, Args)]
@@ -125,12 +149,49 @@ mod tests {
     }
 
     #[test]
-    fn launchd_defaults_the_alias() {
-        let Command::Launchd(args) = parse(&["launchd", "--update-existing"]).unwrap().command
+    fn the_alias_defaults_and_is_global() {
+        assert_eq!(parse(&["validate"]).unwrap().alias, "default");
+        assert_eq!(
+            parse(&["--alias", "work", "validate"]).unwrap().alias,
+            "work"
+        );
+        assert_eq!(
+            parse(&["launchd", "restart", "--alias", "work"])
+                .unwrap()
+                .alias,
+            "work"
+        );
+    }
+
+    #[test]
+    fn launchd_install_takes_its_own_flags() {
+        let Command::Launchd(LaunchdCommand::Install(args)) =
+            parse(&["launchd", "install", "--update-existing"])
+                .unwrap()
+                .command
         else {
-            panic!("expected launchd")
+            panic!("expected launchd install")
         };
-        assert_eq!(args.alias, "default");
         assert!(args.update_existing);
+    }
+
+    #[test]
+    fn a_restart_is_graceful_unless_forced() {
+        for (args, forced) in [
+            (&["launchd", "restart"][..], false),
+            (&["launchd", "restart", "--force"][..], true),
+        ] {
+            let Command::Launchd(LaunchdCommand::Restart(restart)) = parse(args).unwrap().command
+            else {
+                panic!("expected launchd restart")
+            };
+            assert_eq!(restart.force, forced);
+        }
+    }
+
+    #[test]
+    fn launchd_on_its_own_asks_for_a_verb() {
+        let err = parse(&["launchd"]).unwrap_err();
+        assert_eq!(err.exit_code(), 2);
     }
 }
