@@ -165,7 +165,7 @@ async fn validate_reports_every_problem_together_and_passes_a_good_config_withou
 #[tokio::test(flavor = "multi_thread")]
 async fn launchd_refuses_off_macos_naming_the_platform() {
     let rig = Rig::new().await;
-    let refused = rig.exits(&["launchd", "--alias", "work"]).await;
+    let refused = rig.exits(&["launchd", "install", "--alias", "work"]).await;
     assert_eq!(refused.status.code(), Some(1), "{}", refused.stderr);
     assert!(refused.stderr.contains("macOS only"), "{}", refused.stderr);
     assert!(!rig.home().join("Library/LaunchAgents").exists());
@@ -182,6 +182,7 @@ async fn launchd_writes_a_plist_and_never_overwrites_one_by_accident() {
         "--config",
         config.to_str().unwrap(),
         "launchd",
+        "install",
         "--alias",
         "work",
         "--binary-path",
@@ -211,7 +212,7 @@ async fn launchd_writes_a_plist_and_never_overwrites_one_by_accident() {
         0o644
     );
     assert!(
-        first.stdout.contains("launchctl bootstrap"),
+        first.stdout.contains("riggs launchd start"),
         "{}",
         first.stdout
     );
