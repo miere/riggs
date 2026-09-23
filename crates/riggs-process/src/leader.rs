@@ -25,6 +25,17 @@ pub struct Leader {
 
 impl Leader {
     pub fn spawn(command: &mut Command, stderr_bytes: usize) -> io::Result<(Self, Pipes)> {
+        Self::spawn_tapped(command, stderr_bytes, |_| {})
+    }
+
+    /// The same, with the child's stderr also handed to `tap` chunk by chunk. A flow that says
+    /// what it wants on stderr — `gcloud` prints its sign-in link there — cannot be read from the
+    /// tail alone, because the tail is only worth reading once the child has given up.
+    pub fn spawn_tapped(
+        command: &mut Command,
+        stderr_bytes: usize,
+        tap: impl FnMut(&[u8]) + Send + 'static,
+    ) -> io::Result<(Self, Pipes)> {
         let mut child = command
             .process_group(0)
             .kill_on_drop(true)
@@ -45,7 +56,7 @@ impl Leader {
         let pipes = Pipes {
             stdin,
             stdout,
-            stderr: Tail::read(stderr, stderr_bytes, pid),
+            stderr: Tail::read(stderr, stderr_bytes, pid, tap),
         };
         Ok((Self { child, pid }, pipes))
     }

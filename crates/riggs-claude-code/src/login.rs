@@ -11,6 +11,7 @@ use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::{mpsc, watch};
+use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
 
@@ -97,6 +98,13 @@ impl Login {
                 .env("PATH", path)
                 .env("BROWSER", guard.path().join("open"));
         }
+        let (scan, mut scanned) = watch::channel(Scan::Searching);
+        // The link is looked for on stderr as well as stdout, and each stream is scanned by its
+        // own finder: `gcloud` prints its link on stderr and only the prompt that follows it on
+        // stdout, and interleaving the two through one buffer would split a URL across a line
+        // that then matches nothing.
+        let mut errors = Finder::new(profile.clone());
+        let found = scan.clone();
         let (
             leader,
             Pipes {
@@ -104,14 +112,19 @@ impl Login {
                 stdout,
                 stderr,
             },
-        ) = Leader::spawn(&mut command, OUTPUT_BYTES).map_err(LoginError::Spawn)?;
+        ) = Leader::spawn_tapped(&mut command, OUTPUT_BYTES, move |chunk| {
+            if let Some(url) = errors.feed(chunk) {
+                found.send_replace(Scan::Found(url));
+            }
+        })
+        .map_err(LoginError::Spawn)?;
         tracing::debug!(pid = leader.pid(), "Claude Code sign-in started");
         let (kill, kills) = mpsc::channel(1);
         let (exit, exited) = watch::channel(None);
-        let (scan, mut scanned) = watch::channel(Scan::Searching);
         let output = Arc::new(Mutex::new(VecDeque::new()));
         tokio::spawn(reap(leader, kills, exit));
-        tokio::spawn(read(stdout, output.clone(), scan, profile.clone()));
+        let reading = tokio::spawn(read(stdout, output.clone(), scan.clone(), profile.clone()));
+        tokio::spawn(ended(reading, stderr.clone(), scan));
         let login = Self {
             stdin: tokio::sync::Mutex::new(stdin),
             kill,
@@ -229,15 +242,64 @@ async fn reap(
     exit.send_replace(Some(outcome));
 }
 
+/// Reads one stream a line at a time, looking for the link a profile describes. It keeps its own
+/// line buffer, so one of these belongs to each stream rather than to the sign-in.
+struct Finder {
+    profile: Profile,
+    line: Vec<u8>,
+    searching: bool,
+}
+
+impl Finder {
+    fn new(profile: Profile) -> Self {
+        Self {
+            profile,
+            line: Vec::new(),
+            searching: true,
+        }
+    }
+
+    /// The link, the first time a finished line holds one. Later chunks are ignored, because a
+    /// sign-in is offered once.
+    fn feed(&mut self, chunk: &[u8]) -> Option<String> {
+        if !self.searching {
+            return None;
+        }
+        for byte in chunk {
+            if *byte != b'\n' {
+                if self.line.len() < OUTPUT_BYTES {
+                    self.line.push(*byte);
+                }
+                continue;
+            }
+            if let Some(url) = self.link() {
+                return Some(url);
+            }
+            self.line.clear();
+        }
+        None
+    }
+
+    /// The link on a last line the stream ended without terminating.
+    fn flush(&mut self) -> Option<String> {
+        self.searching.then(|| self.link()).flatten()
+    }
+
+    fn link(&mut self) -> Option<String> {
+        let url = self.profile.link_in(&String::from_utf8_lossy(&self.line))?;
+        self.searching = false;
+        Some(url)
+    }
+}
+
 async fn read(
     mut stdout: ChildStdout,
     output: Arc<Mutex<VecDeque<u8>>>,
     scan: watch::Sender<Scan>,
     profile: Profile,
 ) {
+    let mut finder = Finder::new(profile);
     let mut buffer = vec![0u8; 8192];
-    let mut line = Vec::new();
-    let mut searching = true;
     while let Ok(read) = stdout.read(&mut buffer).await {
         if read == 0 {
             break;
@@ -249,31 +311,27 @@ async fn read(
             let excess = tail.len().saturating_sub(OUTPUT_BYTES);
             tail.drain(..excess);
         }
-        if !searching {
-            continue;
-        }
-        for byte in chunk {
-            if *byte != b'\n' {
-                if line.len() < OUTPUT_BYTES {
-                    line.push(*byte);
-                }
-                continue;
-            }
-            if let Some(url) = profile.link_in(&String::from_utf8_lossy(&line)) {
-                scan.send_replace(Scan::Found(url));
-                searching = false;
-                break;
-            }
-            line.clear();
-        }
-    }
-    if searching {
-        if let Some(url) = profile.link_in(&String::from_utf8_lossy(&line)) {
+        if let Some(url) = finder.feed(chunk) {
             scan.send_replace(Scan::Found(url));
-        } else {
-            scan.send_replace(Scan::Ended);
         }
     }
+    if let Some(url) = finder.flush() {
+        scan.send_replace(Scan::Found(url));
+    }
+}
+
+/// Both streams are spent and neither offered a link, so waiting out the rest of the timeout
+/// would only delay the same answer.
+async fn ended(reading: JoinHandle<()>, stderr: Tail, scan: watch::Sender<Scan>) {
+    let _ = reading.await;
+    stderr.closed().await;
+    scan.send_if_modified(|scan| {
+        let searching = matches!(scan, Scan::Searching);
+        if searching {
+            *scan = Scan::Ended;
+        }
+        searching
+    });
 }
 
 fn one_line(text: &str) -> String {
@@ -315,7 +373,80 @@ async fn drift(config: &ClaudeCodeConfig, profile: &Profile) -> String {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::panic)]
+
+    use std::path::PathBuf;
+    use std::time::Instant;
+
     use super::*;
+    use crate::profile::{CLAUDE_CODE, GCLOUD};
+
+    /// What `gcloud auth login --no-launch-browser` prints: the link on stderr, and on stdout
+    /// only the prompt that follows it, which never ends in a newline.
+    const GCLOUD_OUTPUT: &str = "printf 'Go to the following link in your browser:\\n\\n    https://accounts.google.com/o/oauth2/auth?client_id=32555940559\\n\\n' >&2;\
+         printf 'Once finished, enter the verification code provided in your browser: ';\
+         read code";
+    const CLAUDE_OUTPUT: &str =
+        "printf 'visit: https://claude.com/cai/oauth/authorize?code=true\\n'; read code";
+
+    fn config() -> ClaudeCodeConfig {
+        ClaudeCodeConfig::new(std::env::temp_dir())
+    }
+
+    /// A built-in's own link rules, over output a test can produce without the real CLI.
+    fn shell(name: &str, script: &str) -> Profile {
+        Profile {
+            command: PathBuf::from("/bin/sh"),
+            args: vec!["-c".to_owned(), script.to_owned()],
+            ..Profile::builtin(name, &config()).unwrap()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_link_offered_on_stderr_is_found() {
+        let (login, url) = Login::start(
+            &config(),
+            &shell(GCLOUD, GCLOUD_OUTPUT),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            url,
+            "https://accounts.google.com/o/oauth2/auth?client_id=32555940559"
+        );
+        login.stop().await;
+    }
+
+    #[tokio::test]
+    async fn a_link_offered_on_stdout_is_still_found() {
+        let (login, url) = Login::start(
+            &config(),
+            &shell(CLAUDE_CODE, CLAUDE_OUTPUT),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(url, "https://claude.com/cai/oauth/authorize?code=true");
+        login.stop().await;
+    }
+
+    /// Both streams are spent, so the wait ends there rather than at `link_wait`.
+    #[tokio::test]
+    async fn a_flow_that_offers_nothing_on_either_stream_ends_without_waiting() {
+        let started = Instant::now();
+        let failure = Login::start(
+            &config(),
+            &shell(GCLOUD, "echo out; echo err >&2"),
+            &CancellationToken::new(),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(matches!(failure, LoginError::NoLink { .. }), "{failure}");
+        assert!(failure.to_string().contains("out err"), "{failure}");
+        assert!(started.elapsed() < config().sign_in.link_wait);
+    }
 
     #[test]
     fn output_is_quoted_on_one_clipped_line() {
