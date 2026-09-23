@@ -66,6 +66,27 @@ outside it on purpose: a boxed `claude` can read its credential but cannot write
 back, and because Anthropic rotates refresh tokens, a refresh that cannot be saved destroys the
 credential. The node's own token is always denied to the agent, whatever `deny_read` lists.
 
+Four things follow from that, and they are worth stating because the middle two are easy to assume
+backwards:
+
+- **A sign-in runs outside the box.** Whatever a profile runs is spawned unsandboxed, so a flow can
+  save the credential it just earned.
+- **A sign-in takes the environment you gave Riggs.** `agent.env` and `env_file` reach the sign-in
+  command as well as the agent, so a variable a tool reads its own configuration from —
+  `CLOUDSDK_CONFIG`, `GOOGLE_APPLICATION_CREDENTIALS` — puts the credential where you want it
+  rather than where the tool would default to.
+- **A boxed agent may read a credential, never modify one.** Writes outside the workspace are
+  denied by the kernel, so nothing the agent does can corrupt or rotate a store it can see. It
+  cannot see one on the `deny_read` list at all, and `~/.config/gcloud` is on that list by default,
+  so a tool that needs it wants the list replaced. Reading is often not enough on its own: `gcloud`
+  writes a token cache on every call, so it needs either a configuration directory inside the
+  workspace or an access token handed to it in the environment.
+- **Boxing the agent is the admin's call, not Riggs'.** `mode = "off"` is the default, and what
+  Riggs inherits at launch it passes on. Riggs holds no credential of its own but the node token,
+  which the agent is denied whatever the profile says, so there is nothing here that an environment
+  allowlist would be protecting — a gateway that ran the node inside itself would answer that
+  differently.
+
 An ACP agent uses `kind = "acp"` and may also set `interruptible`, `startup_timeout`,
 `cancel_grace_period` and `permission_timeout`. An optional top-level `env_file = ".env"` adds
 variables to the agent's environment. A value in `agent.env` may read one back with `${NAME}`,
