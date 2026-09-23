@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rax::attachment::MAX_ATTACHMENT_BYTES;
+use rax::tool::ToolCatalogue;
 use riggs_node::{AttachmentMeta, AttachmentSource, BackendEvent};
 use serde_json::{Value, json};
 
@@ -24,17 +25,34 @@ pub(crate) async fn serve(
         proc.respond(&request_id, wire::success(&request_id, json!({})));
         return;
     };
-    let reply = if text_of(&request, "server_name") != Some(MCP_SERVER) {
-        Err((-32602, "unknown MCP server".to_owned()))
-    } else {
-        let params = message.get("params").cloned().unwrap_or(Value::Null);
-        match text_of(&message, "method") {
-            Some("initialize") => Ok(initialize(&params)),
-            Some("tools/list") => Ok(json!({"tools": tools()})),
-            Some("tools/call") => Ok(render(call(&proc, &params, turn).await)),
-            Some("ping") => Ok(json!({})),
+    let params = message.get("params").cloned().unwrap_or(Value::Null);
+    let method = text_of(&message, "method").unwrap_or_default().to_owned();
+    let server = text_of(&request, "server_name")
+        .unwrap_or_default()
+        .to_owned();
+    // Read fresh rather than cached at spawn: the catalogue belongs to the link, so a session that
+    // resumed under another gateway must serve that gateway's tools, not the ones it started with.
+    let catalogue = proc
+        .gateway_tools()
+        .filter(|catalogue| catalogue.namespace == server);
+    let reply = if server == MCP_SERVER {
+        match method.as_str() {
+            "initialize" => Ok(initialize(&params, MCP_SERVER)),
+            "tools/list" => Ok(json!({"tools": tools()})),
+            "tools/call" => Ok(render(call(&proc, &params, turn).await)),
+            "ping" => Ok(json!({})),
             _ => Err((-32601, "method not found".to_owned())),
         }
+    } else if let Some(catalogue) = catalogue {
+        match method.as_str() {
+            "initialize" => Ok(initialize(&params, &catalogue.namespace)),
+            "tools/list" => Ok(json!({"tools": published(&catalogue)})),
+            "tools/call" => Ok(render(relay(&proc, &params).await)),
+            "ping" => Ok(json!({})),
+            _ => Err((-32601, "method not found".to_owned())),
+        }
+    } else {
+        Err((-32602, "unknown MCP server".to_owned()))
     };
     let response = match reply {
         Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
@@ -45,12 +63,12 @@ pub(crate) async fn serve(
     proc.respond(&request_id, wire::mcp_answer(&request_id, response));
 }
 
-fn initialize(params: &Value) -> Value {
+fn initialize(params: &Value, server: &str) -> Value {
     let version = text_of(params, "protocolVersion").unwrap_or(PROTOCOL_VERSION);
     json!({
         "protocolVersion": version,
         "capabilities": {"tools": {}},
-        "serverInfo": {"name": MCP_SERVER, "version": env!("CARGO_PKG_VERSION")},
+        "serverInfo": {"name": server, "version": env!("CARGO_PKG_VERSION")},
     })
 }
 
@@ -131,6 +149,47 @@ fn tools() -> Value {
             },
         },
     ])
+}
+
+/// The gateway's tools, as the agent sees them. Names stay bare: Claude Code prefixes them with
+/// the server itself, so they arrive as `mcp__<namespace>__<name>`.
+fn published(catalogue: &ToolCatalogue) -> Value {
+    let tools: Vec<Value> = catalogue
+        .tools
+        .iter()
+        .map(|tool| {
+            json!({
+                "name": tool.name,
+                "description": tool.description,
+                "inputSchema": tool.input_schema.clone().unwrap_or_else(|| json!({"type": "object"})),
+            })
+        })
+        .collect();
+    Value::Array(tools)
+}
+
+/// Hands one call to the gateway and waits. Every way this can fail is a refusal the agent reads,
+/// never silence: a turn must not hang on a gateway that is not coming back.
+async fn relay(proc: &Arc<Proc>, params: &Value) -> ToolResult {
+    let name = text_of(params, "name").unwrap_or_default().to_owned();
+    let arguments = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let Some(host) = proc.ctx().host.get() else {
+        return ToolResult::error(
+            "This node is not attached to a gateway, so that tool cannot be reached. \
+             Do not retry it; say so and ask how to proceed.",
+        );
+    };
+    match host.tools.call(proc.key(), &name, arguments).await {
+        Ok(outcome) if outcome.is_error => ToolResult::error(outcome.content),
+        Ok(outcome) => ToolResult::text(outcome.content),
+        Err(unreachable) => ToolResult::error(format!(
+            "{name} did not run: {unreachable}. Do not retry it blindly — say so and ask how to \
+             proceed."
+        )),
+    }
 }
 
 fn render(result: ToolResult) -> Value {
@@ -291,4 +350,63 @@ fn mimetype(path: &Path) -> Option<&'static str> {
         "txt" | "log" => "text/plain",
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use rax::tool::{ToolDef, ToolKind};
+
+    use super::*;
+
+    fn catalogue() -> ToolCatalogue {
+        ToolCatalogue {
+            namespace: "murtaugh".to_owned(),
+            tools: vec![
+                ToolDef {
+                    name: "slack_read_message".to_owned(),
+                    description: "Read a Slack message.".to_owned(),
+                    input_schema: Some(json!({"type": "object", "required": ["link"]})),
+                    kind: ToolKind::Read,
+                },
+                ToolDef {
+                    name: "speak".to_owned(),
+                    description: "Say it out loud.".to_owned(),
+                    input_schema: None,
+                    kind: ToolKind::Other,
+                },
+            ],
+        }
+    }
+
+    /// Names stay bare. Claude Code prefixes them with the server itself, so prefixing here would
+    /// publish `mcp__murtaugh__mcp__murtaugh__…`.
+    #[test]
+    fn published_tools_keep_the_names_the_gateway_gave_them() {
+        let published = published(&catalogue());
+        let names: Vec<&str> = published
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+        assert_eq!(names, vec!["slack_read_message", "speak"]);
+        assert_eq!(published[0]["inputSchema"]["required"][0], "link");
+    }
+
+    /// A tool taking no arguments still needs a schema: Claude Code rejects a tool without one.
+    #[test]
+    fn a_tool_with_no_schema_is_published_as_taking_an_empty_object() {
+        let published = published(&catalogue());
+        assert_eq!(published[1]["inputSchema"], json!({"type": "object"}));
+    }
+
+    #[test]
+    fn a_gateway_server_names_itself_in_its_initialize() {
+        let answer = initialize(&json!({}), "murtaugh");
+        assert_eq!(answer["serverInfo"]["name"], "murtaugh");
+        assert_eq!(
+            initialize(&json!({}), MCP_SERVER)["serverInfo"]["name"],
+            "riggs"
+        );
+    }
 }
