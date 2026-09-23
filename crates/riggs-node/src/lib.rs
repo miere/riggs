@@ -15,8 +15,8 @@ pub use backend::{
     BackendRecord, NewSession, Opened, Restore, SessionKey, TurnHandle,
 };
 pub use host::{
-    BackgroundGate, BackgroundSink, CredentialReporter, HostHandles, NotDelivered, SignInRefused,
-    SignIns,
+    BackgroundGate, BackgroundSink, CredentialReporter, GatewayTools, HostHandles, NotDelivered,
+    SignInRefused, SignIns, ToolUnreachable,
 };
 pub use server::{
     CALL_TIMEOUT, LINK_GRACE, NodeServer, SESSION_RETENTION, SHUTDOWN_GRACE, ServerConfig,

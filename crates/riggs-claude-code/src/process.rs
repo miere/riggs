@@ -8,7 +8,7 @@ use rax::ToolCall;
 use rax::content::ContentBlock;
 use rax::event::StopReason;
 use rax::id::{RequestId, ToolCallId};
-use rax::tool::{Decision, DeniedBy, ToolCallStatus, ToolCallUpdate};
+use rax::tool::{Decision, DeniedBy, ToolCallStatus, ToolCallUpdate, ToolCatalogue};
 use riggs_node::{
     BackendError, BackendEvent, HostHandles, SessionKey, ToolGate, TurnHandle, TurnPrompts,
 };
@@ -262,6 +262,16 @@ impl Proc {
         &self.ctx.config.workdir
     }
 
+    pub(crate) fn key(&self) -> &SessionKey {
+        &self.key
+    }
+
+    /// What the attached gateway published at `initialize`, read fresh each time: the catalogue
+    /// belongs to the link, so a session resumed under another gateway sees that one's tools.
+    pub(crate) fn gateway_tools(&self) -> Option<ToolCatalogue> {
+        self.ctx.host.get()?.tools.catalogue()
+    }
+
     pub(crate) fn is_alive(&self) -> bool {
         !self.lock().dead
     }
@@ -302,7 +312,11 @@ impl Proc {
 
     async fn handshake(&self) -> Result<(), ClaudeCodeError> {
         let config = &self.ctx.config;
-        let answered = self.request(wire::initialize(config.hook_timeout.as_secs().max(1)))?;
+        let namespace = self.gateway_tools().map(|catalogue| catalogue.namespace);
+        let answered = self.request(wire::initialize(
+            config.hook_timeout.as_secs().max(1),
+            namespace.as_deref(),
+        ))?;
         let deadline = sleep(config.handshake_timeout);
         tokio::select! {
             biased;
@@ -535,7 +549,12 @@ impl Proc {
                     .map_or_else(|| format!("hook-{request_id}"), str::to_owned);
                 let name = text_of(&input, "tool_name").unwrap_or("unknown");
                 let tool_input = input.get("tool_input").cloned().unwrap_or(Value::Null);
-                let call = tool::call(&tool_use_id, name, tool_input);
+                let call = tool::call(
+                    &tool_use_id,
+                    name,
+                    tool_input,
+                    self.gateway_tools().as_ref(),
+                );
                 self.gate(request_id, call, Answer::Hook);
             }
             Some("can_use_tool") => {
@@ -549,7 +568,12 @@ impl Proc {
                     let _ = self.send(&wire::permission_answer(&request_id, &input, None));
                     return;
                 }
-                let call = tool::call(&tool_use_id, name, input.clone());
+                let call = tool::call(
+                    &tool_use_id,
+                    name,
+                    input.clone(),
+                    self.gateway_tools().as_ref(),
+                );
                 self.gate(request_id, call, Answer::Permission(input));
             }
             Some("mcp_message") => {

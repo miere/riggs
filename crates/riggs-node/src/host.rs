@@ -4,9 +4,10 @@ use rax::attachment::Attachment;
 use rax::credential::CredentialHealth;
 use rax::event::BackgroundEvent;
 use rax::interaction::{DisplayOutcome, SignInRequest, SignInSettled, SignInState};
-use rax::tool::Decision;
-use rax::{NodeCall, ToolCall};
+use rax::tool::{CallTool, Decision, ToolCatalogue, ToolOutcome};
+use rax::{NodeCall, NodeReply, ToolCall};
 use rax_tokio::{CallError, SendError, TransferError};
+use serde_json::Value;
 use tokio::time::{Instant, timeout};
 
 use crate::backend::{AttachmentSource, SessionKey};
@@ -20,6 +21,7 @@ pub struct HostHandles {
     pub background: BackgroundSink,
     pub sign_ins: SignIns,
     pub credentials: CredentialReporter,
+    pub tools: GatewayTools,
 }
 
 impl HostHandles {
@@ -34,7 +36,68 @@ impl HostHandles {
             sign_ins: SignIns {
                 shared: shared.clone(),
             },
-            credentials: CredentialReporter { shared },
+            credentials: CredentialReporter {
+                shared: shared.clone(),
+            },
+            tools: GatewayTools { shared },
+        }
+    }
+}
+
+/// The tools the attached gateway runs on this node's behalf. The node publishes them to its agent
+/// and calls them back; it never learns what any of them do.
+#[derive(Clone)]
+pub struct GatewayTools {
+    shared: Arc<Shared>,
+}
+
+/// Every variant is a reason the tool never ran, so each must reach the agent as a refusal it can
+/// act on. Silence would leave a turn hanging on a gateway that is not coming back.
+#[derive(Debug, thiserror::Error)]
+pub enum ToolUnreachable {
+    #[error("no gateway is attached, so its tools cannot be reached right now")]
+    NoGateway,
+    #[error("the link ended before the gateway answered")]
+    LinkEnded,
+    #[error("the gateway did not answer in time")]
+    TimedOut,
+    #[error("the gateway refused it: {0}")]
+    Refused(String),
+}
+
+impl GatewayTools {
+    /// What the attached gateway published at `initialize`. The catalogue belongs to the link, so
+    /// this can change between turns when a session resumes under a different gateway, and is
+    /// `None` whenever no gateway is attached.
+    pub fn catalogue(&self) -> Option<ToolCatalogue> {
+        self.shared.live()?.caps?.tools
+    }
+
+    pub async fn call(
+        &self,
+        session: &SessionKey,
+        name: &str,
+        arguments: Value,
+    ) -> Result<ToolOutcome, ToolUnreachable> {
+        let epoch = self.shared.live().ok_or(ToolUnreachable::NoGateway)?;
+        let call = NodeCall::CallTool(CallTool {
+            session_id: session.session_id(),
+            name: name.to_owned(),
+            arguments: Some(arguments),
+        });
+        let answered = tokio::select! {
+            answered = timeout(self.shared.call_timeout, epoch.handle.call(call)) => answered,
+            () = epoch.ended.cancelled() => return Err(ToolUnreachable::LinkEnded),
+        };
+        match answered {
+            Ok(Ok(NodeReply::CallTool(outcome))) => Ok(outcome),
+            // A reply to another method cannot happen without a broken gateway, but the agent still
+            // has to be told something rather than wait.
+            Ok(Ok(_)) => Err(ToolUnreachable::Refused(
+                "the gateway answered a different call".to_owned(),
+            )),
+            Ok(Err(err)) => Err(ToolUnreachable::Refused(err.to_string())),
+            Err(_) => Err(ToolUnreachable::TimedOut),
         }
     }
 }
@@ -267,6 +330,7 @@ async fn push(shared: &Shared, epoch: &Epoch, call: NodeCall) {
         NodeCall::SignInSettled(_) => "sign_in.settled",
         NodeCall::CredentialHealth(_) => "credential.health",
         NodeCall::ReadResource(_) => "resource.read",
+        NodeCall::CallTool(_) => "tool.call",
     };
     let answered = tokio::select! {
         answered = timeout(shared.call_timeout, epoch.handle.call(call)) => answered,

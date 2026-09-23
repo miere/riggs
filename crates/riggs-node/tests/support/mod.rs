@@ -435,6 +435,7 @@ pub fn all_caps() -> GatewayCapabilities {
         sign_in: true,
         resource_schemes: vec![],
         readable_schemes: vec![],
+        tools: None,
     }
 }
 
