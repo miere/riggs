@@ -9,8 +9,16 @@
 //! that was never sandboxed. Claude Code refreshes on that turn and saves the result normally.
 //! Nothing here handles the secret: the expiry is read out of the credential and the rest of the
 //! bytes are dropped.
+//!
+//! Every node run by one user shares one credential, and every node's warden reads the same expiry
+//! and fires in the same instant. Two forcing turns then present the same refresh token, one of
+//! them presents it after it was retired, and the credential is lost. So the forcing turn runs
+//! under a file lock kept beside the credential, and a warden that waited for it looks again
+//! before spending a turn of its own.
 
-use std::path::PathBuf;
+use std::fs::{File, OpenOptions, TryLockError};
+use std::os::unix::fs::OpenOptionsExt as _;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -41,6 +49,11 @@ const MAX_ATTEMPTS: u32 = 6;
 /// Two failed passes, not one: a keychain lookup can lose to a locked keychain or a waking
 /// machine, and an alert on the first miss would cry wolf.
 const DEGRADED_AFTER: u32 = 2;
+/// Long enough for another warden's forcing turn to finish; past it, the holder is presumed wedged
+/// and this pass gives up rather than race it.
+const LOCK_WAIT: Duration = Duration::from_secs(REFRESH_TIMEOUT.as_secs() + 30);
+const LOCK_POLL: Duration = Duration::from_millis(250);
+const LOCK_FILE: &str = ".riggs-refresh.lock";
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
 /// By absolute path, so a PATH entry cannot substitute another binary for a credential read.
 const SECURITY: &str = "/usr/bin/security";
@@ -142,11 +155,92 @@ async fn pass(config: &ClaudeCodeConfig, health: &Health, watch: &mut Watch) -> 
         attempt = watch.attempts,
         "refreshing Claude Code's credential before it lapses"
     );
-    match force_refresh(config).await {
-        Ok(()) => RETRY,
+    match refresh_alone(config, expiry).await {
+        Ok(Refreshed::Ran) => RETRY,
+        Ok(Refreshed::ByAnother) => {
+            tracing::info!("another node refreshed the credential while this one waited");
+            // The next pass reads the new expiry without delay.
+            Duration::ZERO
+        }
         Err(reason) => {
             tracing::warn!(%reason, "the credential refresh did not run");
             RETRY
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Refreshed {
+    Ran,
+    ByAnother,
+}
+
+/// The forcing turn, run by at most one warden per credential at a time. `aimed_at` is the expiry
+/// this warden read before it queued: once the lock is held, a different one means the turn it
+/// waited on already did the work.
+async fn refresh_alone(
+    config: &ClaudeCodeConfig,
+    aimed_at: OffsetDateTime,
+) -> Result<Refreshed, String> {
+    let path = lock_path(config)?;
+    let _held = lock(&path).await?;
+    match read_expiry(config).await {
+        Ok(expiry) if expiry != aimed_at => return Ok(Refreshed::ByAnother),
+        Ok(_) => {}
+        Err(err) => return Err(err.to_string()),
+    }
+    force_refresh(config).await.map(|()| Refreshed::Ran)
+}
+
+/// Beside the credential, so nodes share a lock exactly when they share a credential. A keychain
+/// credential is keyed by Claude Code's configuration directory, as its keychain entry is.
+fn lock_path(config: &ClaudeCodeConfig) -> Result<PathBuf, String> {
+    if let Some(file) = &config.credential_file {
+        let dir = file.parent().unwrap_or_else(|| Path::new("."));
+        return Ok(dir.join(LOCK_FILE));
+    }
+    let var = |name: &str| {
+        config
+            .env
+            .get(name)
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os(name).map(PathBuf::from))
+            .filter(|path| !path.as_os_str().is_empty())
+    };
+    let dir = var("CLAUDE_CONFIG_DIR")
+        .or_else(|| var("HOME").map(|home| home.join(".claude")))
+        .ok_or("HOME is not set, so there is nowhere to keep the refresh lock")?;
+    Ok(dir.join(LOCK_FILE))
+}
+
+/// Polled rather than blocked on, so a wedged holder costs this pass `LOCK_WAIT` and no thread.
+/// The kernel drops the lock with the file, however its holder exits.
+async fn lock(path: &Path) -> Result<File, String> {
+    let describe = |err: std::io::Error| format!("cannot lock {}: {err}", path.display());
+    if let Some(dir) = path.parent() {
+        tokio::fs::create_dir_all(dir).await.map_err(describe)?;
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path)
+        .map_err(describe)?;
+    let deadline = tokio::time::Instant::now() + LOCK_WAIT;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(TryLockError::Error(err)) => return Err(describe(err)),
+            Err(TryLockError::WouldBlock) if tokio::time::Instant::now() >= deadline => {
+                return Err(format!(
+                    "another refresh held {} for over {} s",
+                    path.display(),
+                    LOCK_WAIT.as_secs()
+                ));
+            }
+            Err(TryLockError::WouldBlock) => tokio::time::sleep(LOCK_POLL).await,
         }
     }
 }
@@ -304,6 +398,63 @@ mod tests {
 
         config.credential_file = Some(dir.path().join("missing.json"));
         assert!(read_expiry(&config).await.is_err());
+    }
+
+    /// Two nodes on one credential, both aimed at the same expiry: the second waits out the first
+    /// and finds the work done, rather than presenting a refresh token the first just retired.
+    #[tokio::test]
+    async fn two_wardens_on_one_credential_refresh_it_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let creds = dir.path().join("creds.json");
+        std::fs::write(&creds, br#"{"claudeAiOauth":{"expiresAt":1789000000000}}"#).unwrap();
+        let claude = dir.path().join("claude");
+        std::fs::write(
+            &claude,
+            "#!/bin/sh\necho run >> \"$RUNS\"\nsleep 0.5\nprintf '{\"claudeAiOauth\":{\"expiresAt\":1789030000000}}' > \"$CREDS\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+            .unwrap();
+        let mut config = ClaudeCodeConfig::new(dir.path());
+        config.command = claude;
+        config.credential_file = Some(creds.clone());
+        let runs = dir.path().join("runs");
+        config.env.insert("RUNS".into(), runs.display().to_string());
+        config
+            .env
+            .insert("CREDS".into(), creds.display().to_string());
+        let aimed = read_expiry(&config).await.unwrap();
+
+        let (first, second) =
+            tokio::join!(refresh_alone(&config, aimed), refresh_alone(&config, aimed));
+        let mut outcomes = [first.unwrap(), second.unwrap()];
+        outcomes.sort_by_key(|outcome| *outcome == Refreshed::ByAnother);
+        assert_eq!(outcomes, [Refreshed::Ran, Refreshed::ByAnother]);
+        assert_eq!(std::fs::read_to_string(&runs).unwrap(), "run\n");
+    }
+
+    #[test]
+    fn the_lock_sits_beside_the_credential_it_guards() {
+        let mut config = ClaudeCodeConfig::new("/tmp");
+        config.credential_file = Some(PathBuf::from("/creds/one.json"));
+        assert_eq!(
+            lock_path(&config).unwrap(),
+            Path::new("/creds/.riggs-refresh.lock")
+        );
+
+        config.credential_file = None;
+        config.env.insert("HOME".into(), "/home/me".into());
+        assert_eq!(
+            lock_path(&config).unwrap(),
+            Path::new("/home/me/.claude/.riggs-refresh.lock")
+        );
+        config
+            .env
+            .insert("CLAUDE_CONFIG_DIR".into(), "/home/me/work".into());
+        assert_eq!(
+            lock_path(&config).unwrap(),
+            Path::new("/home/me/work/.riggs-refresh.lock")
+        );
     }
 
     #[test]
