@@ -5,7 +5,7 @@ use rax::credential::CredentialHealth;
 use rax::event::BackgroundEvent;
 use rax::interaction::{DisplayOutcome, SignInRequest, SignInSettled, SignInState};
 use rax::tool::{CallTool, Decision, ToolCatalogue, ToolOutcome};
-use rax::{NodeCall, NodeReply, ToolCall};
+use rax::{NodeCall, NodeReply, ToolCall, UpdateMetadata};
 use rax_tokio::{CallError, SendError, TransferError};
 use serde_json::Value;
 use tokio::time::{Instant, timeout};
@@ -311,6 +311,29 @@ impl CredentialReporter {
     }
 }
 
+/// One update at a time, each carrying whatever is latest when its turn comes, so a burst of
+/// edits ends with the gateway holding the last one. With no gateway attached there is nothing to
+/// do: the next `initialize` declares the latest anyway.
+pub(crate) async fn push_metadata(shared: &Shared) {
+    let Some(_in_order) = shared.in_order(&shared.metadata_sending).await else {
+        return;
+    };
+    match shared.live() {
+        Some(epoch) if epoch.caps.is_some() => {
+            let metadata = lock(&shared.metadata).clone();
+            push(
+                shared,
+                &epoch,
+                NodeCall::UpdateMetadata(UpdateMetadata { metadata }),
+            )
+            .await;
+        }
+        _ => {
+            tracing::debug!("no gateway is attached; the next one hears the metadata at initialize")
+        }
+    }
+}
+
 pub(crate) async fn push_health_snapshot(shared: &Shared, epoch: u64) {
     let Some(_in_order) = shared.in_order(&shared.health_sending).await else {
         return;
@@ -331,6 +354,7 @@ async fn push(shared: &Shared, epoch: &Epoch, call: NodeCall) {
         NodeCall::CredentialHealth(_) => "credential.health",
         NodeCall::ReadResource(_) => "resource.read",
         NodeCall::CallTool(_) => "tool.call",
+        NodeCall::UpdateMetadata(_) => "metadata.update",
     };
     let answered = tokio::select! {
         answered = timeout(shared.call_timeout, epoch.handle.call(call)) => answered,

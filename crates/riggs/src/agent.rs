@@ -12,6 +12,7 @@ pub fn server(
     agent: &AgentConfig,
     sessions: SessionsConfig,
     files_dir: PathBuf,
+    metadata: rax::Metadata,
 ) -> Result<NodeServer, ServerError> {
     let (backend, turn_failed): (Arc<dyn Backend>, Option<TurnFailed>) = match agent {
         AgentConfig::ClaudeCode(config) => {
@@ -24,5 +25,6 @@ pub fn server(
     let mut config = ServerConfig::new(sessions);
     config.turn_failed = turn_failed;
     config.files_dir = Some(files_dir);
+    config.metadata = metadata;
     NodeServer::new(backend, config)
 }

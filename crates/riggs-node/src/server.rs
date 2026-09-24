@@ -6,11 +6,12 @@ use std::time::Duration;
 
 use rax::content::ContentBlock;
 use rax::id::{RequestId, SessionId};
+use rax::open::Subject;
 use rax::session::{
     Initialize, Initialized, NewSession, NodeCapabilities, PROTOCOL_VERSION, Prompt,
     PromptAccepted, SessionCreated,
 };
-use rax::{ErrorKind, GatewayCall, GatewayReply, Open};
+use rax::{ErrorKind, GatewayCall, GatewayReply, Metadata, Open, Rejection};
 use rax_tokio::node::{NodeEvent, NodeEvents, NodeHandle};
 use tokio::sync::{OnceCell, mpsc};
 use tokio::time::{Instant, Sleep, interval_at, sleep, timeout};
@@ -19,9 +20,9 @@ use tokio_util::task::TaskTracker;
 
 use crate::backend::{self, Backend, BackendInfo, HostHandles, SessionKey, TurnHandle};
 use crate::files::Files;
-use crate::host::push_health_snapshot;
+use crate::host::{push_health_snapshot, push_metadata};
 use crate::sessions::{OpenError, Sessions};
-use crate::state::{Reserve, Reset, ResetReason, Shared};
+use crate::state::{Reserve, Reset, ResetReason, Shared, lock};
 use crate::store::{Record, SessionStore, StoreError};
 use crate::turn::{self, Failures, Pump, ToolGate, TurnFailed, TurnPrompts};
 
@@ -56,6 +57,8 @@ pub struct ServerConfig {
     /// Where files the gateway links are saved for the agent to read. Unset means a folder in the
     /// system temp dir, emptied at start like any ephemeral state.
     pub files_dir: Option<PathBuf>,
+    /// Forwarded to the gateway unread; [`NodeServer::set_metadata`] replaces it later.
+    pub metadata: Metadata,
 }
 
 impl ServerConfig {
@@ -69,12 +72,13 @@ impl ServerConfig {
             drain_timeout: DRAIN_TIMEOUT,
             turn_failed: None,
             files_dir: None,
+            metadata: Metadata::new(),
         }
     }
 }
 
 /// Why `serve` returned, so the binary knows whether to redial, wait for a new token, or exit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stopped {
     Shutdown,
     CredentialRejected,
@@ -83,6 +87,8 @@ pub enum Stopped {
     },
     /// The gateway sent `close`; a new link may be dialled.
     Closed,
+    /// The gateway refused the metadata and will again until its owner changes it.
+    Rejected(Rejection),
     LinkEnded,
 }
 
@@ -129,9 +135,11 @@ impl NodeServer {
             backend: backend.clone(),
             hook: config.turn_failed.clone(),
         };
+        let shared = Arc::new(Shared::new(config.call_timeout));
+        *lock(&shared.metadata) = config.metadata.clone();
         Ok(Self {
             inner: Arc::new(Inner {
-                shared: Arc::new(Shared::new(config.call_timeout)),
+                shared,
                 sessions: Sessions::new(store),
                 files,
                 backend,
@@ -149,6 +157,16 @@ impl NodeServer {
     /// session store and close the link, so a new node can open the store as soon as it returns.
     pub fn shutdown_token(&self) -> CancellationToken {
         self.inner.shutdown.clone()
+    }
+
+    /// The owner changed the metadata: the gateway hears it now if one is attached, and every
+    /// later `initialize` declares it, so no restart is needed.
+    pub fn set_metadata(&self, metadata: Metadata) {
+        *lock(&self.inner.shared.metadata) = metadata;
+        let shared = self.inner.shared.clone();
+        self.inner
+            .tasks
+            .spawn(async move { push_metadata(&shared).await });
     }
 
     /// For a shutdown that arrives while no link is being served.
@@ -223,6 +241,13 @@ impl NodeServer {
                         NodeEvent::Refused { status } => {
                             inner.reset(ResetReason::LinkEnded);
                             return Stopped::Refused { status };
+                        }
+                        NodeEvent::Rejected(rejection) => {
+                            inner.reset(ResetReason::LinkEnded);
+                            return Stopped::Rejected(rejection);
+                        }
+                        NodeEvent::Unhandled { body: rax::Unhandled { subject: Subject::MetadataKey { key }, message, .. }, .. } => {
+                            tracing::warn!(%key, reason = ?message, "the gateway ignores this metadata key");
                         }
                         NodeEvent::Request { id, call } => {
                             let epoch = inner.shared.live().map(|epoch| epoch.id);
@@ -445,6 +470,7 @@ impl Inner {
                 tool_gate: info.tool_gate,
                 sessions: self.sessions.durability(&info),
             },
+            metadata: lock(&self.shared.metadata).clone(),
         })
     }
 

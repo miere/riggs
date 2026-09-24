@@ -12,6 +12,7 @@ mod logging;
 mod signals;
 mod token;
 mod version;
+mod watch;
 
 use std::process::ExitCode;
 

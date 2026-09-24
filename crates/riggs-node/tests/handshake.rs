@@ -162,3 +162,55 @@ async fn an_unknown_message_kind_is_answered_unhandled_and_the_link_stays_up() {
     node.server.shutdown_token().cancel();
     within(node.serving).await.unwrap();
 }
+
+fn metadata(value: serde_json::Value) -> rax::Metadata {
+    serde_json::from_value(value).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_owners_metadata_travels_at_initialize_and_again_whenever_it_changes() {
+    let declared = metadata(json!({"murtaugh_access": {"policy": "always_allow"}}));
+    let mut config = ephemeral();
+    config.metadata = declared.clone();
+    let mut h = harness(Fake::new(), config).await;
+    let initialized = initialize(&h.gateway.link, all_caps()).await;
+    assert_eq!(initialized.metadata, declared);
+
+    let narrowed = metadata(json!({"murtaugh_access": {"policy": "allow_list", "people": []}}));
+    h.node.server.set_metadata(narrowed.clone());
+    let (id, update) = loop {
+        if let rax_tokio::gateway::LinkEvent::Request {
+            id,
+            call: rax::NodeCall::UpdateMetadata(update),
+        } = next_link(&mut h.gateway.events).await
+        {
+            break (id, update);
+        }
+    };
+    assert_eq!(update.metadata, narrowed);
+    h.gateway
+        .link
+        .reply(id, rax::NodeReply::UpdateMetadata)
+        .await
+        .unwrap();
+
+    let again = initialize(&h.gateway.link, all_caps()).await;
+    assert_eq!(
+        again.metadata, narrowed,
+        "a later initialize declares the latest"
+    );
+    h.node.shut_down().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn metadata_the_gateway_rejects_stops_the_node_for_good() {
+    let h = harness(Fake::new(), ephemeral()).await;
+    initialize(&h.gateway.link, all_caps()).await;
+    let rejection = rax::Rejection {
+        key: Some("murtaugh_access".into()),
+        message: "`murtaugh_access` must be a table with a `policy`".into(),
+    };
+    h.gateway.link.reject(rejection.clone()).await;
+    let stopped = within(h.node.serving).await.unwrap();
+    assert_eq!(stopped, riggs_node::Stopped::Rejected(rejection));
+}

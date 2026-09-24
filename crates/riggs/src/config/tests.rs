@@ -329,3 +329,35 @@ fn a_box_defaults_to_off_and_an_unknown_one_is_named() {
         ["agent.sandbox.mode"]
     );
 }
+
+#[test]
+fn metadata_is_forwarded_as_written_and_absent_means_none() {
+    let (_dir, path) = write(GOOD);
+    assert!(
+        load(&path, &Overrides::default())
+            .unwrap()
+            .metadata
+            .is_empty()
+    );
+
+    let (_dir, path) = write(&format!(
+        "{GOOD}\n[metadata]\nother_level = 3\n\n[metadata.murtaugh_access]\npolicy = \"allow_list\"\npeople = [\"U0BOB0001\"]\n"
+    ));
+    let config = load(&path, &Overrides::default()).unwrap();
+    let expected: rax::Metadata = serde_json::from_value(serde_json::json!({
+        "other_level": 3,
+        "murtaugh_access": {"policy": "allow_list", "people": ["U0BOB0001"]},
+    }))
+    .unwrap();
+    assert_eq!(config.metadata, expected);
+}
+
+#[test]
+fn a_date_in_metadata_is_named_because_it_cannot_travel_as_json() {
+    assert_eq!(
+        fields(&format!(
+            "{GOOD}\n[metadata.murtaugh_access]\nsince = 2026-09-24\n"
+        )),
+        ["metadata.murtaugh_access.since"]
+    );
+}
