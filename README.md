@@ -70,6 +70,11 @@ outside it on purpose: a boxed `claude` can read its credential but cannot write
 back, and because Anthropic rotates refresh tokens, a refresh that cannot be saved destroys the
 credential. The node's own token is always denied to the agent, whatever `deny_read` lists.
 
+Rotation is also why several nodes run by one user take turns refreshing: they share one
+credential, and two refreshes at once would present the same refresh token twice. The refresh
+holds a lock at `.riggs-refresh.lock` in Claude Code's configuration directory (`CLAUDE_CONFIG_DIR`,
+or `~/.claude`; beside `credential_file` when one is set), and a node that waited for it skips its own refresh if the expiry already moved.
+
 Four things follow from that, and they are worth stating because the middle two are easy to assume
 backwards:
 
