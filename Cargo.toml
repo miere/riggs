@@ -18,9 +18,9 @@ expect_used = "deny"
 panic = "deny"
 
 [workspace.dependencies]
-rax = { git = "https://github.com/miere/rax-rs", tag = "0.3.0" }
-rax-tokio = { git = "https://github.com/miere/rax-rs", tag = "0.3.0" }
-rax-sim = { git = "https://github.com/miere/rax-rs", tag = "0.3.0" }
+rax = { git = "https://github.com/miere/rax-rs", rev = "db9df0f0f9794ff5cd019a3474db39222d8cb3e1" }
+rax-tokio = { git = "https://github.com/miere/rax-rs", rev = "db9df0f0f9794ff5cd019a3474db39222d8cb3e1" }
+rax-sim = { git = "https://github.com/miere/rax-rs", rev = "db9df0f0f9794ff5cd019a3474db39222d8cb3e1" }
 agent-client-protocol = "=2.1.0"
 async-trait = "0.1"
 clap = { version = "4", features = ["derive"] }
