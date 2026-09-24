@@ -21,6 +21,10 @@ pub enum DialError {
         "the gateway refused this node with HTTP {status}, and dialling again will not change that"
     )]
     Refused { status: u16 },
+    #[error(
+        "the gateway rejected this node's metadata: {message}. Fix [metadata] in the configuration and start riggs again"
+    )]
+    Rejected { message: String },
     #[error(transparent)]
     Endpoint(#[from] EndpointError),
 }
@@ -75,6 +79,13 @@ impl Dialer {
                     tracing::error!(gateways = ?self.endpoints, status, "the gateway refused this node; not dialling again");
                     self.server.stop().await;
                     return Err(DialError::Refused { status });
+                }
+                Stopped::Rejected(rejection) => {
+                    tracing::error!(gateways = ?self.endpoints, key = ?rejection.key, reason = %rejection.message, "the gateway rejected this node's metadata; not dialling again until [metadata] is fixed");
+                    self.server.stop().await;
+                    return Err(DialError::Rejected {
+                        message: rejection.message,
+                    });
                 }
                 Stopped::Closed => {}
                 Stopped::LinkEnded => {

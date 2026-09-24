@@ -16,6 +16,9 @@ pub struct File {
     #[serde(default)]
     pub log: Log,
     pub env_file: Option<String>,
+    /// Forwarded to the gateway unread, so any shape is accepted here.
+    #[serde(default)]
+    pub metadata: toml::Table,
 }
 
 #[derive(Debug, Default, Deserialize)]

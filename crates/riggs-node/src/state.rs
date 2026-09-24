@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+use rax::Metadata;
 use rax::credential::CredentialHealth;
 use rax::id::{PromptId, RequestId, ToolCallId};
 use rax::interaction::{DisplayAnswer, DisplayOutcome};
@@ -173,6 +174,9 @@ pub(crate) struct Shared {
     pub(crate) settles: tokio::sync::Mutex<()>,
     pub(crate) health_sending: tokio::sync::Mutex<()>,
     pub(crate) health: Mutex<std::collections::BTreeMap<String, CredentialHealth>>,
+    pub(crate) metadata_sending: tokio::sync::Mutex<()>,
+    /// The owner's latest, which every `initialize` declares and every update replaces whole.
+    pub(crate) metadata: Mutex<Metadata>,
 }
 
 impl Shared {
@@ -191,6 +195,8 @@ impl Shared {
             settles: tokio::sync::Mutex::new(()),
             health_sending: tokio::sync::Mutex::new(()),
             health: Mutex::new(Default::default()),
+            metadata_sending: tokio::sync::Mutex::new(()),
+            metadata: Mutex::new(Metadata::new()),
         }
     }
 

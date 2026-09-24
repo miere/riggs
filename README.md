@@ -55,6 +55,10 @@ retain = "30d"
 [log]
 level = "info"              # trace, debug, info, warn or error
 format = "text"             # or "json"
+
+[metadata.murtaugh_access]  # sent to the gateway as written; see below
+policy = "allow_list"       # or "always_allow"
+people = ["U0ABC1234"]
 ```
 
 Files a person shares in the conversation are fetched from the gateway when the prompt arrives and
@@ -86,6 +90,15 @@ backwards:
   which the agent is denied whatever the profile says, so there is nothing here that an environment
   allowlist would be protecting — a gateway that ran the node inside itself would answer that
   differently.
+
+`[metadata]` is for the gateway, not for Riggs. Each key names the gateway that reads it before
+the first underscore (`murtaugh_access` is Murtaugh's), and Riggs forwards the whole table
+without looking inside. The example tells Murtaugh who besides you may talk to this machine.
+Riggs rereads it every couple of seconds while it runs and sends the gateway any change, so
+tightening who is let in needs no restart; any other edit to the file still does. A key the
+gateway does not know is logged as a warning. A key it owns but cannot accept makes it end the
+link, and Riggs then exits with the gateway's reason rather than redial into the same refusal.
+Dates cannot travel this way, so quote one to send it as text.
 
 An ACP agent uses `kind = "acp"` and may also set `interruptible`, `startup_timeout`,
 `cancel_grace_period` and `permission_timeout`. An optional top-level `env_file = ".env"` adds

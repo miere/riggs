@@ -6,6 +6,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use rax::Metadata;
 use riggs_acp::AcpConfig;
 use riggs_claude_code::{ClaudeCodeConfig, SandboxConfig, SandboxMode};
 use riggs_node::{SESSION_RETENTION, SessionsConfig};
@@ -126,6 +127,9 @@ pub struct Config {
     pub agent: AgentConfig,
     pub sessions: SessionsConfig,
     pub log: LogConfig,
+    /// The `[metadata]` table as the gateway will receive it. Riggs never reads the keys: each
+    /// belongs to a gateway, which gives it a meaning.
+    pub metadata: Metadata,
 }
 
 pub fn default_path(alias: &str) -> Result<PathBuf, ConfigError> {
@@ -210,6 +214,7 @@ fn build(
     );
     let sessions = sessions(dir, &file.sessions, problems);
     let log = log(&file.log, problems);
+    let metadata = metadata(file.metadata, problems);
     Some(Config {
         path: path.to_path_buf(),
         dir: dir.to_path_buf(),
@@ -218,7 +223,60 @@ fn build(
         agent: agent?,
         sessions: sessions?,
         log: log?,
+        metadata: metadata?,
     })
+}
+
+/// Only checks that the table can travel as JSON. A date cannot: it would arrive as whatever
+/// shape the TOML library gives it, which no gateway expects, so it has to be written as text.
+fn metadata(table: toml::Table, problems: &mut Problems) -> Option<Metadata> {
+    let before = problems.0.len();
+    let metadata = table
+        .into_iter()
+        .map(|(key, value)| {
+            let json = json(&format!("metadata.{key}"), value, problems);
+            (key, json)
+        })
+        .collect();
+    (problems.0.len() == before).then_some(metadata)
+}
+
+fn json(field: &str, value: toml::Value, problems: &mut Problems) -> serde_json::Value {
+    use serde_json::Value as Json;
+    match value {
+        toml::Value::String(text) => Json::String(text),
+        toml::Value::Integer(number) => Json::from(number),
+        toml::Value::Float(number) => serde_json::Number::from_f64(number)
+            .map(Json::Number)
+            .unwrap_or_else(|| {
+                problems.add(field, "is not a finite number, which JSON cannot carry");
+                Json::Null
+            }),
+        toml::Value::Boolean(flag) => Json::Bool(flag),
+        toml::Value::Datetime(date) => {
+            problems.add(
+                field,
+                format!("is a date; quote it (\"{date}\") to send it as text"),
+            );
+            Json::Null
+        }
+        toml::Value::Array(items) => Json::Array(
+            items
+                .into_iter()
+                .enumerate()
+                .map(|(index, item)| json(&format!("{field}[{index}]"), item, problems))
+                .collect(),
+        ),
+        toml::Value::Table(table) => Json::Object(
+            table
+                .into_iter()
+                .map(|(key, item)| {
+                    let item = json(&format!("{field}.{key}"), item, problems);
+                    (key, item)
+                })
+                .collect(),
+        ),
+    }
 }
 
 fn gateway(

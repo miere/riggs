@@ -9,6 +9,7 @@ use crate::dial::Dialer;
 use crate::launchd::{self, Job, Launchctl, Plan};
 use crate::logging::redact;
 use crate::version::{self, GitHub, VERSION};
+use crate::watch::Watch;
 use crate::{agent, lock, logging, signals, token};
 
 pub fn dispatch(cli: Cli) -> ExitCode {
@@ -43,6 +44,7 @@ fn run(flag: Option<PathBuf>, alias: &str, args: RunArgs) -> Result<(), String> 
         token_file: args.token_file,
         insecure_skip_verify: args.insecure_skip_verify,
     };
+    let watched = overrides.clone();
     let config = config::load(&path, &overrides).map_err(|err| err.to_string())?;
     logging::init(&config.log);
     let token = token::read(&config.token_file)
@@ -54,8 +56,22 @@ fn run(flag: Option<PathBuf>, alias: &str, args: RunArgs) -> Result<(), String> 
         .build()
         .map_err(|err| format!("cannot start the async runtime: {err}"))?;
     runtime.block_on(async move {
-        let server = agent::server(&config.agent, config.sessions.clone(), config.dir.join("files"))
-            .map_err(|err| err.to_string())?;
+        let server = agent::server(
+            &config.agent,
+            config.sessions.clone(),
+            config.dir.join("files"),
+            config.metadata.clone(),
+        )
+        .map_err(|err| err.to_string())?;
+        tokio::spawn(
+            Watch {
+                path: config.path.clone(),
+                overrides: watched,
+                server: server.clone(),
+                metadata: config.metadata.clone(),
+            }
+            .run(),
+        );
         signals::install(server.shutdown_token())
             .map_err(|err| format!("cannot install signal handlers: {err}"))?;
         tracing::info!(gateways = ?config.gateways, agent = %config.agent.describe(), "riggs {VERSION} starting");
@@ -82,6 +98,10 @@ fn print_banner(config: &Config) {
     println!("agent: {}", config.agent.describe());
     println!("sessions: {sessions}");
     println!("tool_gate: {}", config.agent.tool_gate());
+    if !config.metadata.is_empty() {
+        let keys: Vec<&str> = config.metadata.keys().map(String::as_str).collect();
+        println!("metadata: {}", keys.join(", "));
+    }
 }
 
 fn validate(flag: Option<PathBuf>, alias: &str) -> Result<(), String> {
