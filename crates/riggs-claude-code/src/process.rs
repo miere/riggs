@@ -55,6 +55,9 @@ pub(crate) struct TurnCtl {
 
 enum Tool {
     Running(Route),
+    /// Claude Code backgrounded the call: its `tool_result` only says the task started, and the
+    /// call finishes when the task's `task_notification` arrives, often after the turn has ended.
+    Backgrounded,
     Denied,
 }
 
@@ -471,6 +474,13 @@ impl Proc {
         let mut state = self.lock();
         state.dead = true;
         state.ours.clear();
+        // Claude Code's background tasks die with it, so a call still waiting on one has failed.
+        let route = Self::route(&state);
+        for (id, tool) in state.tools.drain() {
+            if matches!(tool, Tool::Backgrounded) {
+                self.emit(route.clone(), update(&id, ToolCallStatus::Failed, None));
+            }
+        }
         let turn = state.turn.take();
         let inflight: Vec<Inflight> = state.theirs.drain().map(|(_, inflight)| inflight).collect();
         for Inflight { task, gated } in inflight {
@@ -481,7 +491,6 @@ impl Proc {
                 self.emit(gated.route, update(&gated.id, ToolCallStatus::Denied, None));
             }
         }
-        state.tools.clear();
         if let Some(turn) = turn {
             let event = if turn.interrupted {
                 BackendEvent::Complete(Some(StopReason::Cancelled))
@@ -795,6 +804,9 @@ impl Proc {
             let Some(id) = text_of(block, "tool_use_id") else {
                 continue;
             };
+            if matches!(state.tools.get(id), Some(Tool::Backgrounded)) {
+                continue;
+            }
             if let Some(Tool::Running(route)) = state.tools.remove(id) {
                 let failed = block.get("is_error").and_then(Value::as_bool) == Some(true);
                 let status = if failed {
@@ -809,9 +821,48 @@ impl Proc {
     }
 
     fn system(&self, frame: &Value) {
-        if text_of(frame, "subtype") != Some("api_retry") {
+        match text_of(frame, "subtype") {
+            Some("api_retry") => self.api_retry(frame),
+            Some("task_started") => self.task_started(frame),
+            Some("task_notification") => self.task_notification(frame),
+            _ => {}
+        }
+    }
+
+    /// A call Claude Code sent to the background stays in progress past its launch receipt.
+    fn task_started(&self, frame: &Value) {
+        if frame.get("is_backgrounded").and_then(Value::as_bool) != Some(true) {
             return;
         }
+        let Some(id) = text_of(frame, "tool_use_id") else {
+            return;
+        };
+        let mut state = self.lock();
+        if let Some(tool @ Tool::Running(_)) = state.tools.get_mut(id) {
+            *tool = Tool::Backgrounded;
+        }
+    }
+
+    /// Settles a backgrounded call on whichever route is open now: the turn it started in has
+    /// usually ended, and then the gateway hears it as background work.
+    fn task_notification(&self, frame: &Value) {
+        let Some(id) = text_of(frame, "tool_use_id") else {
+            return;
+        };
+        let mut state = self.lock();
+        if !matches!(state.tools.get(id), Some(Tool::Backgrounded)) {
+            return;
+        }
+        state.tools.remove(id);
+        let status = match text_of(frame, "status") {
+            Some("completed") => ToolCallStatus::Completed,
+            _ => ToolCallStatus::Failed,
+        };
+        let output = frame.get("summary").cloned();
+        self.emit(Self::route(&state), update(id, status, output));
+    }
+
+    fn api_retry(&self, frame: &Value) {
         let state = self.lock();
         let status = frame
             .get("error_status")

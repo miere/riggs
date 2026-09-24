@@ -618,6 +618,7 @@ async fn a_background_subagent_reports_after_the_turn_and_its_tool_waits_for_a_v
         panic!("expected a tool call")
     };
     assert_eq!(tool_call.kind, ToolKind::Think);
+    let agent = tool_call.id.clone();
     turn.verdict(tool_call.id, Decision::Allow).await.unwrap();
     turn.expect(Match::message_contains("launched"))
         .await
@@ -626,6 +627,12 @@ async fn a_background_subagent_reports_after_the_turn_and_its_tool_waits_for_a_v
         .await
         .unwrap();
     turn.until_end().await.unwrap();
+    // Its launch receipt is not its result: the sub-agent is still working when the turn ends.
+    assert!(!turn.seen().iter().any(|event| matches!(
+        event,
+        Open::Known(Event::ToolCallUpdate { tool_call_update })
+            if tool_call_update.id == agent && tool_call_update.status != ToolCallStatus::InProgress
+    )));
 
     let (session_id, event) = node.next_background().await.unwrap();
     assert_eq!(session_id, session);
@@ -646,18 +653,22 @@ async fn a_background_subagent_reports_after_the_turn_and_its_tool_waits_for_a_v
             break;
         }
     }
-    let statuses: Vec<ToolCallStatus> = background
+    let updates: Vec<(&str, ToolCallStatus)> = background
         .iter()
         .filter_map(|event| match event {
             Open::Known(BackgroundEvent::ToolCallUpdate { tool_call_update }) => {
-                Some(tool_call_update.status)
+                Some((tool_call_update.id.0.as_str(), tool_call_update.status))
             }
             _ => None,
         })
         .collect();
     assert_eq!(
-        statuses,
-        [ToolCallStatus::InProgress, ToolCallStatus::Completed]
+        updates,
+        [
+            ("toolu_01CNnYcU1S8btC7xyxETGamL", ToolCallStatus::InProgress),
+            ("toolu_01CNnYcU1S8btC7xyxETGamL", ToolCallStatus::Completed),
+            (agent.0.as_str(), ToolCallStatus::Completed),
+        ]
     );
     let texts: Vec<String> = background
         .iter()
