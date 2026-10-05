@@ -24,6 +24,8 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
     runs-on: ${{ matrix.runner }}
+    # The signing certificate's secrets live in this environment.
+    environment: release
     steps:
       - uses: actions/checkout@v4
       - name: Let Cargo fetch the private RAX crates
@@ -39,6 +41,17 @@ jobs:
         run: |
           export RIGGS_VERSION="${GITHUB_REF_NAME#v}"
           cargo build --release --locked --target ${{ matrix.target }} -p "$BINARY"
+      - name: Sign the macOS binary
+        if: endsWith(matrix.target, 'apple-darwin')
+        env:
+          P12_B64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          P12_PW: ${{ secrets.MACOS_CERT_PASSWORD }}
+          # Both end up inside every user's stored TCC grant. Changing either
+          # one invalidates every existing grant at once, so treat them as
+          # permanent.
+          SIGN_IDENTIFIER: dev.murtaugh.riggs
+          SIGN_LEAF_SHA1: 08e8006e09132416a8fa6f105c0a2a9d4785283c
+        run: scripts/sign-macos.sh "target/${{ matrix.target }}/release/$BINARY"
       - name: Package
         run: |
           name="$BINARY-$GITHUB_REF_NAME-${{ matrix.target }}"
@@ -53,6 +66,9 @@ jobs:
 
   publish:
     needs: build
+    # A `-dryrun` tag exercises the build and signing without publishing a
+    # release that the update check would pick up as the latest.
+    if: ${{ !endsWith(github.ref_name, '-dryrun') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
