@@ -72,6 +72,17 @@ pub enum Step {
         #[serde(default)]
         deny: Vec<Step>,
     },
+    /// Asks through the permission prompt tool, as Claude Code does when its own checks still
+    /// want a person after the hook allowed the call.
+    Permission {
+        id: String,
+        name: String,
+        input: Value,
+        #[serde(default)]
+        allow: Vec<Step>,
+        #[serde(default)]
+        deny: Vec<Step>,
+    },
     CallTool {
         id: String,
         name: String,

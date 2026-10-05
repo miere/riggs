@@ -20,7 +20,7 @@ pub fn init(session: &str, cwd: &str, tools: &[String], seed: u64) -> Value {
     json!({
         "type": "system", "subtype": "init", "cwd": cwd, "session_id": session, "tools": all,
         "mcp_servers": [{"name": "riggs", "status": "connected"}], "model": MODEL,
-        "permissionMode": "dontAsk", "apiKeySource": "none", "claude_code_version": "2.1.271",
+        "permissionMode": "default", "apiKeySource": "none", "claude_code_version": "2.1.271",
         "output_style": "default",
         "capabilities": ["interrupt_receipt_v1", "interrupt_cancel_queued_v1", "msg_lifecycle_v1"],
         "uuid": uuid(seed),
@@ -30,7 +30,7 @@ pub fn init(session: &str, cwd: &str, tools: &[String], seed: u64) -> Value {
 pub fn initialized(pid: u32) -> Value {
     json!({
         "output_style": "default", "available_output_styles": ["default"], "pid": pid,
-        "current_permission_mode": "dontAsk", "hooks_applied": true, "session_state": "idle",
+        "current_permission_mode": "default", "hooks_applied": true, "session_state": "idle",
     })
 }
 
@@ -79,7 +79,7 @@ pub fn hook_callback(
 ) -> Value {
     let mut hook = json!({
         "session_id": session, "transcript_path": format!("/fake/.claude/projects/fake/{session}.jsonl"),
-        "cwd": cwd, "prompt_id": uuid(7), "permission_mode": "dontAsk",
+        "cwd": cwd, "prompt_id": uuid(7), "permission_mode": "default",
         "hook_event_name": "PreToolUse", "tool_name": name, "tool_input": input, "tool_use_id": id,
     });
     if let (Some(agent_id), Some(fields)) = (agent_id, hook.as_object_mut()) {
@@ -89,6 +89,16 @@ pub fn hook_callback(
     json!({
         "type": "control_request", "request_id": request_id,
         "request": {"subtype": "hook_callback", "callback_id": "gate", "input": hook, "tool_use_id": id},
+    })
+}
+
+pub fn can_use_tool(request_id: &str, name: &str, input: &Value, id: &str) -> Value {
+    json!({
+        "type": "control_request", "request_id": request_id,
+        "request": {
+            "subtype": "can_use_tool", "tool_name": name, "input": input,
+            "permission_suggestions": [], "tool_use_id": id,
+        },
     })
 }
 

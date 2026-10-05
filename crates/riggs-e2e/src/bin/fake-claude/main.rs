@@ -527,6 +527,13 @@ impl Fake {
                     .hook(id, name, input, agent_id, parent, allow, deny)
                     .await;
             }
+            Step::Permission {
+                id,
+                name,
+                input,
+                allow,
+                deny,
+            } => return self.permission(id, name, input, allow, deny).await,
             Step::CallTool {
                 id,
                 name,
@@ -663,6 +670,33 @@ impl Fake {
             seq,
         );
         self.emit(frame).await;
+        run(self.clone(), deny).await
+    }
+
+    async fn permission(
+        self: Arc<Self>,
+        id: String,
+        name: String,
+        input: Value,
+        allow: Vec<Step>,
+        deny: Vec<Step>,
+    ) -> Flow {
+        let input = self.fill(&input);
+        let request_id = format!("permission-{:08x}-{}", self.pid, self.next());
+        let answered = self.wait_for(&request_id);
+        self.emit(shapes::can_use_tool(&request_id, &name, &input, &id))
+            .await;
+        let Ok(response) = answered.await else {
+            return std::future::pending::<Flow>().await;
+        };
+        let behaviour = &response["response"];
+        if response["subtype"] == "success" && behaviour["behavior"] == "allow" {
+            self.log(json!({"event": "permission_allowed", "tool_use_id": id}));
+            return run(self.clone(), allow).await;
+        }
+        let reason = behaviour["message"].as_str().unwrap_or_default().to_owned();
+        self.log(json!({"event": "permission_denied", "tool_use_id": id, "reason": reason}));
+        self.set("deny_reason", reason);
         run(self.clone(), deny).await
     }
 

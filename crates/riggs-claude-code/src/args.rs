@@ -18,8 +18,10 @@ pub(crate) fn argv(config: &ClaudeCodeConfig, key: &SessionKey, launch: Launch) 
         "--output-format",
         "stream-json",
         "--verbose",
+        // Not `dontAsk`: it denies whatever Claude Code's own checks still want to ask about after
+        // the hook allowed the call, instead of putting it to the permission prompt tool.
         "--permission-mode",
-        "dontAsk",
+        "default",
         "--permission-prompt-tool",
         "stdio",
         "--disallowedTools",
