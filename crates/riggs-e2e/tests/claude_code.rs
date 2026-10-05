@@ -114,7 +114,7 @@ async fn a_prompt_is_accepted_before_its_events_and_completes() {
             "stream-json",
             "--verbose",
             "--permission-mode",
-            "dontAsk",
+            "default",
             "--permission-prompt-tool",
             "stdio",
             "--disallowedTools",
@@ -267,6 +267,38 @@ async fn a_tool_call_does_not_run_until_the_gateway_allows_it() {
         .unwrap();
     turn.until_end().await.unwrap();
     assert!(ran.exists());
+    world.assert_no_violations();
+    world.stop_node().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn claude_codes_own_permission_check_after_an_allowed_hook_does_not_ask_again() {
+    let mut world = World::new("permission-after-hook").await;
+    let node = world.start_node().await;
+    let session = node.new_session(vec![]).await.unwrap().session_id;
+    let mut turn = node.prompt(session, text("touch it")).await.unwrap();
+
+    let Event::ToolCall { tool_call } = turn.expect(Match::tool_call("Bash")).await.unwrap() else {
+        panic!("expected a tool call")
+    };
+    turn.verdict(tool_call.id, Decision::Allow).await.unwrap();
+    turn.expect(Match::tool_call_update(ToolCallStatus::Completed))
+        .await
+        .unwrap();
+    turn.expect(Match::message_contains("done")).await.unwrap();
+    turn.expect(Match::complete(StopReason::EndTurn))
+        .await
+        .unwrap();
+    turn.until_end().await.unwrap();
+
+    let asked = turn
+        .seen()
+        .iter()
+        .filter(|event| matches!(event.known(), Some(Event::ToolCall { .. })))
+        .count();
+    assert_eq!(asked, 1, "the gateway was asked twice for one call");
+    assert!(world.has_event("permission_allowed"));
+    assert!(world.work().join("ran.txt").exists());
     world.assert_no_violations();
     world.stop_node().await;
 }
