@@ -113,7 +113,9 @@ An ACP agent uses `kind = "acp"` and may also set `interruptible`, `startup_time
 `cancel_grace_period` and `permission_timeout`. An optional top-level `env_file = ".env"` adds
 variables to the agent's environment. A value in `agent.env` may read one back with `${NAME}`,
 which resolves against Riggs' own environment first and then `env_file`, so a secret stays out of
-the TOML; a name nothing sets is an error rather than an empty value. Unknown keys are an error,
+the TOML; a name nothing sets is an error rather than an empty value. A leading `~/`, including
+one after a `:` in a `PATH`-style list, expands to your home folder as it would in a shell, since
+the tools the agent runs would otherwise read it as a folder named `~`. Unknown keys are an error,
 so typos never pass silently.
 
 The gateway identifies this node only by its token. Put the token you minted on the gateway in the
