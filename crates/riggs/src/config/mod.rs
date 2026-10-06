@@ -648,14 +648,18 @@ fn dotenv(path: &Path, problems: &mut Problems) -> Option<BTreeMap<String, Strin
 /// the token's prefix is checked straight afterwards, while an `agent.env` value is opaque here
 /// and an empty one would only surface much later, inside the sandbox, as the tool it feeds
 /// failing to authenticate.
+///
+/// A `~` is expanded first, as a shell would in an assignment, because the agent runs the value
+/// without one: a tool given `~/.gcloud` takes it as a folder named `~` under its working directory.
 fn expand(
     raw: &str,
     key: &str,
     dotenv: &BTreeMap<String, String>,
     problems: &mut Problems,
 ) -> Option<String> {
+    let raw = expand_tilde(raw);
     let mut out = String::with_capacity(raw.len());
-    let mut rest = raw;
+    let mut rest = raw.as_str();
     let mut resolved = true;
     while let Some(start) = rest.find("${") {
         out.push_str(&rest[..start]);
@@ -686,6 +690,23 @@ fn expand(
     }
     out.push_str(rest);
     resolved.then_some(out)
+}
+
+/// Expands a `~` that starts the value or one of its `:`-separated entries and stands alone or
+/// before a `/`, the places a shell assignment expands it, so `PATH`-style lists work too. A `~`
+/// anywhere else, or `~user`, is left as written, and so is every `~` when `HOME` is unset.
+fn expand_tilde(raw: &str) -> String {
+    let Some(home) = home() else {
+        return raw.to_owned();
+    };
+    let home = home.to_string_lossy();
+    raw.split(':')
+        .map(|entry| match entry.strip_prefix('~') {
+            Some(rest) if rest.is_empty() || rest.starts_with('/') => format!("{home}{rest}"),
+            _ => entry.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join(":")
 }
 
 fn expand_home(raw: &Path) -> PathBuf {

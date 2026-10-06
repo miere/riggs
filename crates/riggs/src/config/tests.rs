@@ -234,6 +234,36 @@ fn a_dollar_that_opens_no_reference_stays_in_the_value() {
 }
 
 #[test]
+fn a_home_path_reaches_the_agent_expanded() {
+    let (_dir, path) = write(&format!(
+        "{GOOD}env = {{ CLOUDSDK_CONFIG = \"~/.gcloud\", HOME_ITSELF = \"~\", \
+         LIST = \"~/bin:/usr/bin:~\" }}\n"
+    ));
+    let config = load(&path, &Overrides::default()).unwrap();
+    let AgentConfig::ClaudeCode(agent) = &config.agent else {
+        panic!("expected claude_code")
+    };
+    let home = home().unwrap().display().to_string();
+    assert_eq!(agent.env["CLOUDSDK_CONFIG"], format!("{home}/.gcloud"));
+    assert_eq!(agent.env["HOME_ITSELF"], home);
+    assert_eq!(agent.env["LIST"], format!("{home}/bin:/usr/bin:{home}"));
+}
+
+#[test]
+fn a_tilde_a_shell_would_not_expand_stays_in_the_value() {
+    let (_dir, path) = write(&format!(
+        "{GOOD}env = {{ OTHER_USER = \"~root/x\", MIDDLE = \"a/~/b\", BARE = \"~x\" }}\n"
+    ));
+    let config = load(&path, &Overrides::default()).unwrap();
+    let AgentConfig::ClaudeCode(agent) = &config.agent else {
+        panic!("expected claude_code")
+    };
+    assert_eq!(agent.env["OTHER_USER"], "~root/x");
+    assert_eq!(agent.env["MIDDLE"], "a/~/b");
+    assert_eq!(agent.env["BARE"], "~x");
+}
+
+#[test]
 fn a_reference_nothing_sets_is_named_rather_than_left_empty() {
     let problems = problems(&format!(
         "{GOOD}env = {{ GH_TOKEN = \"${{RIGGS_TEST_ABSENT}}\" }}\n"
