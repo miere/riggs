@@ -1,0 +1,64 @@
+{
+  "source": [
+    "p5-async-subagent/background-task-attempt1",
+    "p3-sdk-mcp/roundtrip-dontask-hook-allow"
+  ],
+  "turns": [
+    [
+      {
+        "say": "the run is going"
+      },
+      {
+        "result": {
+          "text": "the run is going",
+          "num_turns": 1
+        }
+      },
+      {
+        "emit": {
+          "type": "system",
+          "subtype": "task_notification",
+          "task_id": "b8c41f0e9a2d7c3b1",
+          "tool_use_id": "toolu_01RUNaaaaaaaaaaaaaaaaaaa",
+          "status": "completed",
+          "output_file": "/private/tmp/claude-501/fake/tasks/b8c41f0e9a2d7c3b1.output",
+          "summary": "tests finished",
+          "uuid": "5d0f7a2e-1c3b-4e8f-9a6d-2b7c4e1f8a90",
+          "session_id": "{{session_id}}"
+        }
+      },
+      {
+        "hook": {
+          "id": "toolu_01ATTACHcccccccccccccccc",
+          "name": "mcp__riggs__attach",
+          "input": {
+            "path": "report.md",
+            "title": "Report"
+          },
+          "allow": [
+            {
+              "call_tool": {
+                "id": "toolu_01ATTACHcccccccccccccccc",
+                "name": "attach",
+                "arguments": {
+                  "path": "report.md",
+                  "title": "Report"
+                },
+                "as": "attached"
+              }
+            },
+            {
+              "say": "{{attached}}"
+            }
+          ]
+        }
+      },
+      {
+        "result": {
+          "text": "{{attached}}",
+          "num_turns": 2
+        }
+      }
+    ]
+  ]
+}
