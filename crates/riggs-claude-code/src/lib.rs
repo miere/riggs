@@ -16,6 +16,7 @@ mod process;
 mod profile;
 mod repair;
 mod sandbox;
+mod servers;
 mod sign_in;
 mod tool;
 mod warden;

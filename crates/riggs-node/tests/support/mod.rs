@@ -87,6 +87,7 @@ pub struct Fake {
     health: Mutex<Option<CredentialHealth>>,
     cancelled: Notify,
     last_prompt: Mutex<Vec<Open<ContentBlock>>>,
+    last_groups: Mutex<Vec<String>>,
 }
 
 impl Fake {
@@ -116,6 +117,7 @@ impl Fake {
             health: Mutex::new(None),
             cancelled: Notify::new(),
             last_prompt: Mutex::new(Vec::new()),
+            last_groups: Mutex::new(Vec::new()),
         })
     }
 
@@ -128,6 +130,11 @@ impl Fake {
                 .take()
                 .expect("seen taken twice"),
         }
+    }
+
+    /// The namespaces of the groups the last session was opened with, as the backend got them.
+    pub fn last_groups(&self) -> Vec<String> {
+        self.last_groups.lock().unwrap().clone()
     }
 
     pub fn last_prompt(&self) -> Vec<Open<ContentBlock>> {
@@ -204,6 +211,11 @@ impl Backend for Fake {
     }
 
     async fn new_session(&self, request: NewSession<'_>) -> Result<Opened, BackendError> {
+        *self.last_groups.lock().unwrap() = request
+            .tool_groups
+            .iter()
+            .map(|group| group.namespace.clone())
+            .collect();
         let _ = self.seen.send(Seen::NewSession(*request.key));
         let unhandled = request
             .context
@@ -459,7 +471,7 @@ pub async fn initialize(
 }
 
 pub async fn new_session(link: &GatewayLink) -> SessionId {
-    let request = GatewayCall::NewSession(NewSessionCall { context: vec![] });
+    let request = GatewayCall::NewSession(NewSessionCall::default());
     match call(link, request).await {
         Ok(GatewayReply::NewSession(created)) => created.session_id,
         other => panic!("expected session.new, got {other:?}"),

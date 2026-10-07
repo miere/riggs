@@ -27,12 +27,13 @@ pub(crate) fn control_request(request_id: &str, request: Value) -> Value {
     json!({"type": "control_request", "request_id": request_id, "request": request})
 }
 
-/// `gateway_server` is the namespace the attached gateway published its catalogue under. It is
-/// announced as a second in-process server, so its tools reach the agent as `mcp__<namespace>__…`
-/// — the same names they have when an agent runs beside that gateway instead of on a node.
-pub(crate) fn initialize(hook_timeout_secs: u64, gateway_server: Option<&str>) -> Value {
+/// `gateway_servers` are the namespaces of the tool groups the session was opened with. Each is
+/// announced as an in-process server of its own, so its tools reach the agent as
+/// `mcp__<namespace>__…` — the same names they have when an agent runs beside that gateway
+/// instead of on a node.
+pub(crate) fn initialize(hook_timeout_secs: u64, gateway_servers: &[&str]) -> Value {
     let mut servers = vec![Value::from(MCP_SERVER)];
-    servers.extend(gateway_server.map(Value::from));
+    servers.extend(gateway_servers.iter().copied().map(Value::from));
     json!({
         "subtype": "initialize",
         "hooks": {"PreToolUse": [{"hookCallbackIds": [GATE_CALLBACK], "timeout": hook_timeout_secs}]},

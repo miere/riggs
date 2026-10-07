@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rax::attachment::MAX_ATTACHMENT_BYTES;
-use rax::tool::ToolCatalogue;
+use rax::tool::ToolGroup;
 use riggs_node::{AttachmentMeta, AttachmentSource, BackendEvent};
 use serde_json::{Value, json};
 
@@ -30,11 +30,7 @@ pub(crate) async fn serve(
     let server = text_of(&request, "server_name")
         .unwrap_or_default()
         .to_owned();
-    // Read fresh rather than cached at spawn: the catalogue belongs to the link, so a session that
-    // resumed under another gateway must serve that gateway's tools, not the ones it started with.
-    let catalogue = proc
-        .gateway_tools()
-        .filter(|catalogue| catalogue.namespace == server);
+    let group = proc.groups().iter().find(|group| group.namespace == server);
     let reply = if server == MCP_SERVER {
         match method.as_str() {
             "initialize" => Ok(initialize(&params, MCP_SERVER)),
@@ -43,11 +39,11 @@ pub(crate) async fn serve(
             "ping" => Ok(json!({})),
             _ => Err((-32601, "method not found".to_owned())),
         }
-    } else if let Some(catalogue) = catalogue {
+    } else if let Some(group) = group {
         match method.as_str() {
-            "initialize" => Ok(initialize(&params, &catalogue.namespace)),
-            "tools/list" => Ok(json!({"tools": published(&catalogue)})),
-            "tools/call" => Ok(render(relay(&proc, &params).await)),
+            "initialize" => Ok(initialize(&params, &group.namespace)),
+            "tools/list" => Ok(json!({"tools": published(group)})),
+            "tools/call" => Ok(render(relay(&proc, &group.namespace, &params).await)),
             "ping" => Ok(json!({})),
             _ => Err((-32601, "method not found".to_owned())),
         }
@@ -151,10 +147,10 @@ fn tools() -> Value {
     ])
 }
 
-/// The gateway's tools, as the agent sees them. Names stay bare: Claude Code prefixes them with
+/// One group's tools, as the agent sees them. Names stay bare: Claude Code prefixes them with
 /// the server itself, so they arrive as `mcp__<namespace>__<name>`.
-fn published(catalogue: &ToolCatalogue) -> Value {
-    let tools: Vec<Value> = catalogue
+fn published(group: &ToolGroup) -> Value {
+    let tools: Vec<Value> = group
         .tools
         .iter()
         .map(|tool| {
@@ -170,7 +166,7 @@ fn published(catalogue: &ToolCatalogue) -> Value {
 
 /// Hands one call to the gateway and waits. Every way this can fail is a refusal the agent reads,
 /// never silence: a turn must not hang on a gateway that is not coming back.
-async fn relay(proc: &Arc<Proc>, params: &Value) -> ToolResult {
+async fn relay(proc: &Arc<Proc>, namespace: &str, params: &Value) -> ToolResult {
     let name = text_of(params, "name").unwrap_or_default().to_owned();
     let arguments = params
         .get("arguments")
@@ -182,7 +178,11 @@ async fn relay(proc: &Arc<Proc>, params: &Value) -> ToolResult {
              Do not retry it; say so and ask how to proceed.",
         );
     };
-    match host.tools.call(proc.key(), &name, arguments).await {
+    match host
+        .tools
+        .call(proc.key(), namespace, &name, arguments)
+        .await
+    {
         Ok(outcome) if outcome.is_error => ToolResult::error(outcome.content),
         Ok(outcome) => ToolResult::text(outcome.content),
         Err(unreachable) => ToolResult::error(format!(
@@ -358,12 +358,12 @@ mod tests {
 
     use super::*;
 
-    fn catalogue() -> ToolCatalogue {
-        ToolCatalogue {
-            namespace: "murtaugh".to_owned(),
+    fn group() -> ToolGroup {
+        ToolGroup {
+            namespace: "slack".to_owned(),
             tools: vec![
                 ToolDef {
-                    name: "slack_read_message".to_owned(),
+                    name: "read_message".to_owned(),
                     description: "Read a Slack message.".to_owned(),
                     input_schema: Some(json!({"type": "object", "required": ["link"]})),
                     kind: ToolKind::Read,
@@ -379,31 +379,31 @@ mod tests {
     }
 
     /// Names stay bare. Claude Code prefixes them with the server itself, so prefixing here would
-    /// publish `mcp__murtaugh__mcp__murtaugh__…`.
+    /// publish `mcp__slack__mcp__slack__…`.
     #[test]
     fn published_tools_keep_the_names_the_gateway_gave_them() {
-        let published = published(&catalogue());
+        let published = published(&group());
         let names: Vec<&str> = published
             .as_array()
             .into_iter()
             .flatten()
             .filter_map(|tool| tool["name"].as_str())
             .collect();
-        assert_eq!(names, vec!["slack_read_message", "speak"]);
+        assert_eq!(names, vec!["read_message", "speak"]);
         assert_eq!(published[0]["inputSchema"]["required"][0], "link");
     }
 
     /// A tool taking no arguments still needs a schema: Claude Code rejects a tool without one.
     #[test]
     fn a_tool_with_no_schema_is_published_as_taking_an_empty_object() {
-        let published = published(&catalogue());
+        let published = published(&group());
         assert_eq!(published[1]["inputSchema"], json!({"type": "object"}));
     }
 
     #[test]
     fn a_gateway_server_names_itself_in_its_initialize() {
-        let answer = initialize(&json!({}), "murtaugh");
-        assert_eq!(answer["serverInfo"]["name"], "murtaugh");
+        let answer = initialize(&json!({}), "slack");
+        assert_eq!(answer["serverInfo"]["name"], "slack");
         assert_eq!(
             initialize(&json!({}), MCP_SERVER)["serverInfo"]["name"],
             "riggs"

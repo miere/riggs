@@ -24,6 +24,10 @@ async fn initialize_declares_every_capability_the_backend_resolved() {
     let caps = initialized.capabilities;
     assert_eq!(caps.interruptible, Some(true));
     assert_eq!(caps.tool_gate, ToolGate::EveryCall);
+    assert!(
+        caps.tool_groups,
+        "the node takes its gateway tools per session"
+    );
     assert_eq!(
         caps.sessions,
         SessionDurability::Ephemeral,

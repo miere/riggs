@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use rax::content::ContentBlock;
 use rax::credential::CredentialRenewal;
 use rax::session::{PromptCapabilities, SessionDurability, ToolGate as GateMode};
+use rax::tool::ToolGroup;
 use rax::{ErrorKind, Open, Unhandled};
 use riggs_node::{
     Backend, BackendError, BackendInfo, BackendRecord, HostHandles, NewSession, Opened, Restore,
@@ -21,6 +22,7 @@ use crate::error::{self, ClaudeCodeError};
 use crate::health::{self, Health};
 use crate::process::{self, Ctx, Proc};
 use crate::repair::Repair;
+use crate::servers;
 
 /// Stored with every session record, so a node moved to another agent never resumes these.
 pub const BACKEND_NAME: &str = "claude-code";
@@ -30,6 +32,10 @@ pub const BACKEND_NAME: &str = "claude-code";
 pub struct ClaudeCodeRecord {
     pub claude_session_id: String,
     pub workdir: String,
+    /// The gateway tools the session was opened with, so a resumed process announces the same
+    /// servers and the agent keeps its tool names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_groups: Vec<ToolGroup>,
 }
 
 #[derive(Default)]
@@ -38,6 +44,7 @@ struct Slot {
     proc: Mutex<Option<Arc<Proc>>>,
     unused: AtomicBool,
     context: Mutex<Option<String>>,
+    groups: Arc<[ToolGroup]>,
 }
 
 /// One Claude Code process per session, started at its first prompt or restore and kept for
@@ -106,15 +113,16 @@ impl ClaudeCode {
         } else {
             Launch::Resume
         };
-        let proc = process::spawn(self.ctx.clone(), *key, launch).await?;
+        let proc = process::spawn(self.ctx.clone(), *key, launch, slot.groups.clone()).await?;
         *lock(&slot.proc) = Some(proc.clone());
         Ok(proc)
     }
 
-    fn record(&self, key: &SessionKey) -> BackendRecord {
+    fn record(&self, key: &SessionKey, groups: &[ToolGroup]) -> BackendRecord {
         let record = ClaudeCodeRecord {
             claude_session_id: key.to_string(),
             workdir: self.ctx.config.workdir.display().to_string(),
+            tool_groups: groups.to_vec(),
         };
         BackendRecord(serde_json::to_value(record).unwrap_or_default())
     }
@@ -164,17 +172,19 @@ impl Backend for ClaudeCode {
     }
 
     async fn new_session(&self, request: NewSession<'_>) -> Result<Opened, BackendError> {
-        let (context, unhandled) = content::context(request.context);
+        let (context, mut unhandled) = content::context(request.context);
+        let taken = servers::configured(&self.ctx.config).await;
+        let (groups, clashing) = servers::publishable(request.tool_groups, &taken);
+        unhandled.extend(clashing);
+        let record = self.record(request.key, &groups);
         let slot = Slot {
             unused: AtomicBool::new(true),
             context: Mutex::new(context),
+            groups: groups.into(),
             ..Slot::default()
         };
         lock(&self.slots).insert(*request.key, Arc::new(slot));
-        Ok(Opened {
-            record: self.record(request.key),
-            unhandled,
-        })
+        Ok(Opened { record, unhandled })
     }
 
     async fn restore_session(
@@ -193,7 +203,10 @@ impl Backend for ClaudeCode {
         if saved.workdir != self.ctx.config.workdir.display().to_string() {
             tracing::warn!(session_id = %key, was = %saved.workdir, "resuming a session that ran in another working directory");
         }
-        let slot = Arc::new(Slot::default());
+        let slot = Arc::new(Slot {
+            groups: saved.tool_groups.into(),
+            ..Slot::default()
+        });
         lock(&self.slots).insert(*key, slot.clone());
         match self.running(key, &slot).await {
             Ok(_) => Ok(Restore::Restored),

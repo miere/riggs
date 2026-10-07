@@ -102,10 +102,10 @@ pub fn can_use_tool(request_id: &str, name: &str, input: &Value, id: &str) -> Va
     })
 }
 
-pub fn mcp_request(request_id: &str, message: Value) -> Value {
+pub fn mcp_request(request_id: &str, server: &str, message: Value) -> Value {
     json!({
         "type": "control_request", "request_id": request_id,
-        "request": {"subtype": "mcp_message", "server_name": "riggs", "message": message},
+        "request": {"subtype": "mcp_message", "server_name": server, "message": message},
     })
 }
 

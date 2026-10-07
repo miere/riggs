@@ -6,12 +6,13 @@ use std::time::Duration;
 
 use rax::content::ContentBlock;
 use rax::id::{RequestId, SessionId};
-use rax::open::Subject;
+use rax::open::{Subject, UnhandledReason};
 use rax::session::{
     Initialize, Initialized, NewSession, NodeCapabilities, PROTOCOL_VERSION, Prompt,
     PromptAccepted, SessionCreated,
 };
-use rax::{ErrorKind, GatewayCall, GatewayReply, Metadata, Open, Rejection};
+use rax::tool::{MAX_NAMESPACE_LEN, ToolGroup};
+use rax::{ErrorKind, GatewayCall, GatewayReply, Metadata, Open, Rejection, Unhandled};
 use rax_tokio::node::{NodeEvent, NodeEvents, NodeHandle};
 use tokio::sync::{OnceCell, mpsc};
 use tokio::time::{Instant, Sleep, interval_at, sleep, timeout};
@@ -469,6 +470,7 @@ impl Inner {
                 resource_schemes,
                 tool_gate: info.tool_gate,
                 sessions: self.sessions.durability(&info),
+                tool_groups: true,
             },
             metadata: lock(&self.shared.metadata).clone(),
         })
@@ -502,9 +504,11 @@ impl Inner {
                 &CancellationToken::new(),
             )
             .await;
+        let (tool_groups, refused) = admit_groups(request.tool_groups);
         let opening = backend::NewSession {
             key: &key,
             context: &fetched.content,
+            tool_groups: &tool_groups,
         };
         let opened = self
             .backend
@@ -522,6 +526,7 @@ impl Inner {
         }
         tracing::debug!(session_id = %key, "session created");
         let mut unhandled = fetched.unhandled;
+        unhandled.extend(refused);
         unhandled.extend(opened.unhandled);
         Ok(SessionCreated {
             session_id: key.session_id(),
@@ -665,4 +670,41 @@ impl Inner {
         self.files.discard(&key);
         tracing::debug!(session_id = %key, "session closed");
     }
+}
+
+/// Keeps the groups a backend could publish as they are. A namespace that would not survive as a
+/// tool name, or a second group under one already taken, is refused here rather than by every
+/// backend, and the session opens without it.
+fn admit_groups(groups: Vec<ToolGroup>) -> (Vec<ToolGroup>, Vec<Unhandled>) {
+    let mut admitted: Vec<ToolGroup> = Vec::with_capacity(groups.len());
+    let mut refused = Vec::new();
+    for group in groups {
+        let problem = if !ToolGroup::is_valid_namespace(&group.namespace) {
+            Some(format!(
+                "`{}` is not a namespace this node can publish: it must be [a-z0-9_] and at most {MAX_NAMESPACE_LEN} characters",
+                group.namespace
+            ))
+        } else if admitted
+            .iter()
+            .any(|kept| kept.namespace == group.namespace)
+        {
+            Some(format!(
+                "the session was already given a group named `{}`",
+                group.namespace
+            ))
+        } else {
+            None
+        };
+        match problem {
+            Some(message) => refused.push(Unhandled {
+                subject: Subject::ToolGroup {
+                    namespace: group.namespace,
+                },
+                reason: UnhandledReason::Other,
+                message: Some(message),
+            }),
+            None => admitted.push(group),
+        }
+    }
+    (admitted, refused)
 }

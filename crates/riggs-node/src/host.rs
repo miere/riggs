@@ -4,7 +4,7 @@ use rax::attachment::Attachment;
 use rax::credential::CredentialHealth;
 use rax::event::BackgroundEvent;
 use rax::interaction::{DisplayOutcome, SignInRequest, SignInSettled, SignInState};
-use rax::tool::{CallTool, Decision, ToolCatalogue, ToolOutcome};
+use rax::tool::{CallTool, Decision, ToolOutcome};
 use rax::{NodeCall, NodeReply, ToolCall, UpdateMetadata};
 use rax_tokio::{CallError, SendError, TransferError};
 use serde_json::Value;
@@ -66,22 +66,20 @@ pub enum ToolUnreachable {
 }
 
 impl GatewayTools {
-    /// What the attached gateway published at `initialize`. The catalogue belongs to the link, so
-    /// this can change between turns when a session resumes under a different gateway, and is
-    /// `None` whenever no gateway is attached.
-    pub fn catalogue(&self) -> Option<ToolCatalogue> {
-        self.shared.live()?.caps?.tools
-    }
-
+    /// Runs `name` from the group `namespace` the session was opened with. The groups themselves
+    /// travel with `session.new`, never through here: this node declares `tool_groups`, so it
+    /// ignores any catalogue a gateway still sends at `initialize`.
     pub async fn call(
         &self,
         session: &SessionKey,
+        namespace: &str,
         name: &str,
         arguments: Value,
     ) -> Result<ToolOutcome, ToolUnreachable> {
         let epoch = self.shared.live().ok_or(ToolUnreachable::NoGateway)?;
         let call = NodeCall::CallTool(CallTool {
             session_id: session.session_id(),
+            namespace: Some(namespace.to_owned()),
             name: name.to_owned(),
             arguments: Some(arguments),
         });
