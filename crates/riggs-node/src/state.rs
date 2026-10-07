@@ -19,6 +19,7 @@ pub(crate) const INTERRUPTED: &str =
     "Skipped: the turn was interrupted before the approval was answered. The action was not run.";
 pub(crate) const LINK_ENDED: &str = "Skipped: the connection to the gateway dropped before the approval was answered. The action was not run.";
 pub(crate) const NOBODY: &str = "Skipped: no gateway is attached, so nobody could be asked to approve this. The action was not run.";
+pub(crate) const UNOWNED: &str = "Skipped: this session belongs to no gateway this node knows, so nobody could be asked to approve this. The action was not run.";
 pub(crate) const TIMED_OUT: &str =
     "Skipped: nobody answered the approval request in time. The action was not run.";
 pub(crate) const WITHDRAWN: &str =
@@ -52,9 +53,13 @@ pub(crate) fn outcome(id: &PromptId, outcome: DisplayOutcome) -> DisplayAnswer {
     }
 }
 
+/// A gateway's name in the node's configuration. Sessions, epochs and calls all belong to one.
+pub type GatewayName = String;
+
 #[derive(Clone)]
 pub(crate) struct Epoch {
     pub(crate) id: u64,
+    pub(crate) gateway: GatewayName,
     pub(crate) handle: NodeHandle,
     pub(crate) caps: Option<GatewayCapabilities>,
     pub(crate) ended: CancellationToken,
@@ -74,6 +79,7 @@ enum Phase {
 pub(crate) struct TurnEntry {
     pub(crate) stream: RequestId,
     pub(crate) epoch: u64,
+    pub(crate) gateway: GatewayName,
     pub(crate) cancel: CancellationToken,
     pub(crate) orphaned: CancellationToken,
     pub(crate) finished: CancellationToken,
@@ -99,7 +105,11 @@ struct Pending {
 }
 
 struct State {
-    phase: Phase,
+    /// One per gateway that has ever attached; a missing entry is `Detached`.
+    phases: HashMap<GatewayName, Phase>,
+    /// Which gateway opened each session this process knows. Only that gateway may drive it, and
+    /// everything the session sends with no turn open goes there.
+    owners: HashMap<SessionKey, GatewayName>,
     turns: HashMap<SessionKey, TurnEntry>,
     held: HashMap<ToolCallId, Held>,
     prompts: HashMap<PromptId, Pending>,
@@ -115,6 +125,7 @@ pub(crate) enum ResetReason {
 }
 
 pub(crate) struct Reset {
+    pub(crate) gateway: GatewayName,
     pub(crate) old_epoch: u64,
     pub(crate) turns: Vec<SessionKey>,
     pub(crate) calls_denied: usize,
@@ -145,6 +156,7 @@ pub(crate) enum PromptRoute<'a> {
         session: &'a SessionKey,
         stream: &'a RequestId,
     },
+    /// Raised outside any session, so it goes to the primary gateway: its owner gets one card.
     Background,
 }
 
@@ -166,6 +178,8 @@ pub(crate) enum PromptStart<T> {
 
 pub(crate) struct Shared {
     state: Mutex<State>,
+    /// Receives what belongs to no session, such as a sign-in raised by a credential repair.
+    pub(crate) primary: GatewayName,
     next_serial: AtomicU64,
     next_epoch: AtomicU64,
     pub(crate) call_timeout: Duration,
@@ -177,13 +191,17 @@ pub(crate) struct Shared {
     pub(crate) metadata_sending: tokio::sync::Mutex<()>,
     /// The owner's latest, which every `initialize` declares and every update replaces whole.
     pub(crate) metadata: Mutex<Metadata>,
+    /// Per gateway, merged over `metadata` for that gateway's link only.
+    pub(crate) gateway_metadata: Mutex<HashMap<GatewayName, Metadata>>,
 }
 
 impl Shared {
-    pub(crate) fn new(call_timeout: Duration) -> Self {
+    pub(crate) fn new(call_timeout: Duration, primary: GatewayName) -> Self {
         Self {
+            primary,
             state: Mutex::new(State {
-                phase: Phase::Detached,
+                phases: HashMap::new(),
+                owners: HashMap::new(),
                 turns: HashMap::new(),
                 held: HashMap::new(),
                 prompts: HashMap::new(),
@@ -197,7 +215,17 @@ impl Shared {
             health: Mutex::new(Default::default()),
             metadata_sending: tokio::sync::Mutex::new(()),
             metadata: Mutex::new(Metadata::new()),
+            gateway_metadata: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// What this gateway is told: the top-level table with its own merged over it.
+    pub(crate) fn metadata_for(&self, gateway: &str) -> Metadata {
+        let mut metadata = lock(&self.metadata).clone();
+        if let Some(own) = lock(&self.gateway_metadata).get(gateway) {
+            metadata.extend(own.iter().map(|(key, value)| (key.clone(), value.clone())));
+        }
+        metadata
     }
 
     /// `None` once the node is stopping: a queue that orders calls must not outlast the calls.
@@ -219,44 +247,84 @@ impl Shared {
         lock(&self.state)
     }
 
-    pub(crate) fn live(&self) -> Option<Epoch> {
-        match &self.state().phase {
-            Phase::Live(epoch) => Some(epoch.clone()),
-            _ => None,
-        }
+    /// This gateway's link, if it is attached.
+    pub(crate) fn live(&self, gateway: &str) -> Option<Epoch> {
+        self.state().live(gateway).cloned()
+    }
+
+    /// Every attached link, for what the whole node reports, such as credential health.
+    pub(crate) fn lives(&self) -> Vec<Epoch> {
+        self.state()
+            .phases
+            .values()
+            .filter_map(|phase| match phase {
+                Phase::Live(epoch) => Some(epoch.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The link with this epoch, if it is still attached.
+    pub(crate) fn epoch(&self, epoch: u64) -> Option<Epoch> {
+        self.state().epoch(epoch).cloned()
     }
 
     pub(crate) fn is_live(&self, epoch: u64) -> bool {
-        matches!(&self.state().phase, Phase::Live(live) if live.id == epoch)
+        self.state().epoch(epoch).is_some()
     }
 
-    pub(crate) fn fresh(&self, handle: NodeHandle) -> (Option<Reset>, u64) {
-        let reset = self.end_epoch(ResetReason::ResumeRefused);
+    /// The link of the gateway that opened this session, if both are known and it is attached.
+    pub(crate) fn owner_link(&self, session: &SessionKey) -> Result<Epoch, Unreached> {
+        let state = self.state();
+        let gateway = state.owners.get(session).ok_or(Unreached::Unowned)?;
+        state.live(gateway).cloned().ok_or(Unreached::Detached)
+    }
+
+    pub(crate) fn owner(&self, session: &SessionKey) -> Option<GatewayName> {
+        self.state().owners.get(session).cloned()
+    }
+
+    pub(crate) fn set_owner(&self, session: SessionKey, gateway: GatewayName) {
+        self.state().owners.insert(session, gateway);
+    }
+
+    pub(crate) fn forget_owner(&self, session: &SessionKey) {
+        self.state().owners.remove(session);
+    }
+
+    pub(crate) fn fresh(&self, gateway: &str, handle: NodeHandle) -> (Option<Reset>, u64) {
+        let reset = self.end_epoch(gateway, ResetReason::ResumeRefused);
         let id = self.next_epoch.fetch_add(1, Ordering::Relaxed);
-        self.state().phase = Phase::Live(Epoch {
-            id,
-            handle,
-            caps: None,
-            ended: CancellationToken::new(),
-        });
+        self.state().phases.insert(
+            gateway.to_owned(),
+            Phase::Live(Epoch {
+                id,
+                gateway: gateway.to_owned(),
+                handle,
+                caps: None,
+                ended: CancellationToken::new(),
+            }),
+        );
         (reset, id)
     }
 
-    pub(crate) fn resumed(&self) -> Option<(NodeHandle, Vec<RequestId>)> {
+    pub(crate) fn resumed(&self, gateway: &str) -> Option<(NodeHandle, Vec<RequestId>)> {
         let mut state = self.state();
-        let Phase::Lapsed { .. } = state.phase else {
+        let phase = state.phases.get_mut(gateway)?;
+        let Phase::Lapsed { .. } = phase else {
             return None;
         };
         let Phase::Lapsed {
             handle,
             caps,
             orphans,
-        } = std::mem::replace(&mut state.phase, Phase::Detached)
+        } = std::mem::replace(phase, Phase::Detached)
         else {
             return None;
         };
-        state.phase = Phase::Live(Epoch {
+        *phase = Phase::Live(Epoch {
             id: self.next_epoch.fetch_add(1, Ordering::Relaxed),
+            gateway: gateway.to_owned(),
             handle: handle.clone(),
             caps,
             ended: CancellationToken::new(),
@@ -265,24 +333,30 @@ impl Shared {
     }
 
     pub(crate) fn set_caps(&self, epoch: u64, caps: GatewayCapabilities) -> bool {
-        match &mut self.state().phase {
-            Phase::Live(live) if live.id == epoch => {
+        match self.state().epoch_mut(epoch) {
+            Some(live) => {
                 live.caps = Some(caps);
                 true
             }
-            _ => false,
+            None => false,
         }
     }
 
-    pub(crate) fn end_epoch(&self, reason: ResetReason) -> Option<Reset> {
+    /// Ends this gateway's link only: the turns, held calls and prompts of every other link carry
+    /// on.
+    pub(crate) fn end_epoch(&self, gateway: &str, reason: ResetReason) -> Option<Reset> {
         let mut state = self.state();
-        if !matches!(state.phase, Phase::Live(_)) {
+        let phase = state
+            .phases
+            .entry(gateway.to_owned())
+            .or_insert(Phase::Detached);
+        if !matches!(phase, Phase::Live(_)) {
             if reason != ResetReason::GraceExpired {
-                state.phase = Phase::Detached;
+                *phase = Phase::Detached;
             }
             return None;
         }
-        let Phase::Live(epoch) = std::mem::replace(&mut state.phase, Phase::Detached) else {
+        let Phase::Live(epoch) = std::mem::replace(phase, Phase::Detached) else {
             return None;
         };
         epoch.ended.cancel();
@@ -299,13 +373,17 @@ impl Shared {
         let calls_denied = state.deny_where(|held| held.epoch == epoch.id, LINK_ENDED);
         state.dismiss_where(|pending| pending.epoch == epoch.id);
         if reason == ResetReason::GraceExpired {
-            state.phase = Phase::Lapsed {
-                handle: epoch.handle.clone(),
-                caps: epoch.caps.clone(),
-                orphans,
-            };
+            state.phases.insert(
+                gateway.to_owned(),
+                Phase::Lapsed {
+                    handle: epoch.handle.clone(),
+                    caps: epoch.caps.clone(),
+                    orphans,
+                },
+            );
         }
         Some(Reset {
+            gateway: gateway.to_owned(),
             old_epoch: epoch.id,
             turns,
             calls_denied,
@@ -327,10 +405,10 @@ impl Shared {
 
     pub(crate) fn reserve_turn(&self, key: &SessionKey, stream: &RequestId, epoch: u64) -> Reserve {
         let mut state = self.state();
-        match &state.phase {
-            Phase::Live(live) if live.id == epoch && !self.stopping.is_cancelled() => {}
+        let gateway = match state.epoch(epoch) {
+            Some(live) if !self.stopping.is_cancelled() => live.gateway.clone(),
             _ => return Reserve::Stale,
-        }
+        };
         if let Some(open) = state.turns.get(key) {
             return if open.orphaned.is_cancelled() {
                 Reserve::Draining(open.finished.clone())
@@ -341,6 +419,7 @@ impl Shared {
         let turn = TurnEntry {
             stream: stream.clone(),
             epoch,
+            gateway,
             cancel: CancellationToken::new(),
             orphaned: CancellationToken::new(),
             finished: CancellationToken::new(),
@@ -378,17 +457,20 @@ impl Shared {
         state.dismiss_where(|pending| pending.stream == stream);
     }
 
+    /// Holds a call for a verdict from the gateway that owns `session`: the turn's link if the
+    /// call belongs to `stream`, otherwise the session's.
     pub(crate) fn hold(
         &self,
         id: &ToolCallId,
-        route: Option<(&SessionKey, &RequestId)>,
+        session: &SessionKey,
+        stream: Option<&RequestId>,
     ) -> HoldStart {
         let mut state = self.state();
         if self.stopping.is_cancelled() {
             return HoldStart::Refused(deny(SHUTTING_DOWN));
         }
-        let stream = match route {
-            Some((key, stream)) => match state.turns.get(key) {
+        let (stream, gateway) = match stream {
+            Some(stream) => match state.turns.get(session) {
                 Some(turn) if &turn.stream == stream => {
                     if turn.orphaned.is_cancelled() {
                         return HoldStart::Refused(deny(LINK_ENDED));
@@ -396,16 +478,18 @@ impl Shared {
                     if turn.cancel.is_cancelled() {
                         return HoldStart::Refused(deny(INTERRUPTED));
                     }
-                    Some(stream.clone())
+                    (Some(stream.clone()), turn.gateway.clone())
                 }
                 _ => return HoldStart::NoTurn,
             },
-            None => None,
+            None => match state.owners.get(session) {
+                Some(gateway) => (None, gateway.clone()),
+                None => return HoldStart::Refused(deny(UNOWNED)),
+            },
         };
-        let Phase::Live(epoch) = &state.phase else {
+        let Some(epoch) = state.live(&gateway).cloned() else {
             return HoldStart::Refused(deny(NOBODY));
         };
-        let epoch = epoch.clone();
         if state.held.contains_key(id) {
             return HoldStart::Refused(deny(DUPLICATE));
         }
@@ -435,8 +519,17 @@ impl Shared {
         }
     }
 
-    pub(crate) fn verdict(&self, verdict: ToolVerdict) -> bool {
-        match self.state().held.remove(&verdict.id) {
+    /// Only the link holding the call may rule on it, so one gateway cannot approve what another
+    /// was asked.
+    pub(crate) fn verdict(&self, from: &str, verdict: ToolVerdict) -> bool {
+        let mut state = self.state();
+        let Some(from) = state.live(from).map(|live| live.id) else {
+            return false;
+        };
+        if state.held.get(&verdict.id).map(|held| held.epoch) != Some(from) {
+            return false;
+        }
+        match state.held.remove(&verdict.id) {
             Some(held) => {
                 let _ = held.decide.send(verdict.decision);
                 true
@@ -453,22 +546,22 @@ impl Shared {
         answerer: impl FnOnce() -> (Answerer, T),
     ) -> PromptStart<T> {
         let mut state = self.state();
-        let stream = match route {
+        let (stream, gateway) = match route {
             PromptRoute::Turn { session, stream } => match state.turns.get(session) {
                 Some(turn) if &turn.stream == stream => {
                     if turn.cancel.is_cancelled() {
                         return PromptStart::Refused(DisplayOutcome::Dismissed);
                     }
-                    Some(stream.clone())
+                    (Some(stream.clone()), turn.gateway.clone())
                 }
                 _ => return PromptStart::Refused(DisplayOutcome::NoConversation),
             },
-            PromptRoute::Background => None,
+            PromptRoute::Background => (None, self.primary.clone()),
         };
         if self.stopping.is_cancelled() {
             return PromptStart::Refused(DisplayOutcome::Dismissed);
         }
-        let Phase::Live(epoch) = &state.phase else {
+        let Some(epoch) = state.live(&gateway) else {
             return PromptStart::Refused(DisplayOutcome::Unavailable);
         };
         let caps = epoch.caps.clone().unwrap_or_default();
@@ -522,11 +615,16 @@ impl Shared {
             .map(|pending| pending.epoch)
     }
 
-    pub(crate) fn answer(&self, answer: DisplayAnswer) -> bool {
+    /// Only the link that showed the prompt may answer it.
+    pub(crate) fn answer(&self, from: &str, answer: DisplayAnswer) -> bool {
         let mut state = self.state();
+        let from = state.live(from).map(|live| live.id);
         let Some(pending) = state.prompts.get(&answer.id) else {
             return false;
         };
+        if Some(pending.epoch) != from {
+            return false;
+        }
         match &pending.answer {
             Answerer::Open(answers) => {
                 if answers.try_send(answer).is_err() {
@@ -559,7 +657,37 @@ pub(crate) fn open() -> (Answerer, mpsc::Receiver<DisplayAnswer>) {
     (Answerer::Open(sender), receiver)
 }
 
+/// Why something a session sends with no turn open has nowhere to go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Unreached {
+    /// No gateway opened this session in this process, and none restored it yet.
+    Unowned,
+    /// Its gateway is not attached right now.
+    Detached,
+}
+
 impl State {
+    fn live(&self, gateway: &str) -> Option<&Epoch> {
+        match self.phases.get(gateway) {
+            Some(Phase::Live(epoch)) => Some(epoch),
+            _ => None,
+        }
+    }
+
+    fn epoch(&self, id: u64) -> Option<&Epoch> {
+        self.phases.values().find_map(|phase| match phase {
+            Phase::Live(epoch) if epoch.id == id => Some(epoch),
+            _ => None,
+        })
+    }
+
+    fn epoch_mut(&mut self, id: u64) -> Option<&mut Epoch> {
+        self.phases.values_mut().find_map(|phase| match phase {
+            Phase::Live(epoch) if epoch.id == id => Some(epoch),
+            _ => None,
+        })
+    }
+
     fn deny_where(&mut self, matches: impl Fn(&Held) -> bool, reason: &str) -> usize {
         let ids: Vec<ToolCallId> = self
             .held

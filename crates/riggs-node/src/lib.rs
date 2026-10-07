@@ -19,8 +19,9 @@ pub use host::{
     SignInRefused, SignIns, ToolUnreachable,
 };
 pub use server::{
-    CALL_TIMEOUT, LINK_GRACE, NodeServer, SESSION_RETENTION, SHUTDOWN_GRACE, ServerConfig,
-    ServerError, SessionsConfig, Stopped,
+    CALL_TIMEOUT, DEFAULT_GATEWAY, LINK_GRACE, NodeServer, SESSION_RETENTION, SHUTDOWN_GRACE,
+    ServerConfig, ServerError, SessionsConfig, Stopped,
 };
+pub use state::GatewayName;
 pub use store::StoreError;
 pub use turn::{SignInPrompt, ToolGate, TurnClosed, TurnFailed, TurnPrompts, TurnSink};

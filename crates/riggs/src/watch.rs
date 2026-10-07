@@ -1,6 +1,8 @@
-//! Picks up edits to the `[metadata]` table while riggs runs, so a node's owner can change who may
-//! talk to their machine without a restart. Everything else in the file still needs one.
+//! Picks up edits to the `[metadata]` tables while riggs runs, the top-level one and each
+//! gateway's, so a node's owner can change who may talk to their machine without a restart.
+//! Everything else in the file still needs one.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -17,8 +19,9 @@ pub struct Watch {
     pub path: PathBuf,
     pub overrides: Overrides,
     pub server: NodeServer,
-    /// What the gateway was last told.
+    /// What the gateways were last told.
     pub metadata: Metadata,
+    pub gateway_metadata: HashMap<String, Metadata>,
 }
 
 impl Watch {
@@ -48,10 +51,13 @@ impl Watch {
             if outside_metadata(seen.as_deref()) != started {
                 tracing::warn!(config = %self.path.display(), "the configuration changed outside [metadata]; those changes apply at the next restart");
             }
-            if config.metadata != self.metadata {
-                tracing::info!(keys = ?config.metadata.keys().collect::<Vec<_>>(), "metadata changed; telling the gateway");
-                self.server.set_metadata(config.metadata.clone());
+            let gateway_metadata = config.gateway_metadata();
+            if config.metadata != self.metadata || gateway_metadata != self.gateway_metadata {
+                tracing::info!(keys = ?config.metadata.keys().collect::<Vec<_>>(), gateways = ?gateway_metadata.keys().collect::<Vec<_>>(), "metadata changed; telling the gateways");
+                self.server
+                    .set_all_metadata(config.metadata.clone(), gateway_metadata.clone());
                 self.metadata = config.metadata;
+                self.gateway_metadata = gateway_metadata;
             }
         }
     }
@@ -64,6 +70,13 @@ fn read(path: &Path) -> Option<String> {
 fn outside_metadata(text: Option<&str>) -> Option<toml::Table> {
     let mut table: toml::Table = text?.parse().ok()?;
     table.remove("metadata");
+    if let Some(toml::Value::Array(gateways)) = table.get_mut("gateways") {
+        for gateway in gateways {
+            if let toml::Value::Table(gateway) = gateway {
+                gateway.remove("metadata");
+            }
+        }
+    }
     Some(table)
 }
 
@@ -80,5 +93,16 @@ mod tests {
         assert!(unchanged.is_some());
         assert_eq!(outside_metadata(Some(metadata_only)), unchanged);
         assert_ne!(outside_metadata(Some(gateway_too)), unchanged);
+    }
+
+    #[test]
+    fn an_edit_inside_a_gateways_metadata_is_not_an_edit_outside_it() {
+        let before = "[[gateways]]\nname = \"a\"\nurls = [\"wss://a\"]\n[gateways.metadata]\nmurtaugh_access = 1\n";
+        let metadata_only = before.replace("murtaugh_access = 1", "murtaugh_access = 2");
+        let renamed = before.replace("name = \"a\"", "name = \"b\"");
+        let unchanged = outside_metadata(Some(before));
+        assert!(unchanged.is_some());
+        assert_eq!(outside_metadata(Some(&metadata_only)), unchanged);
+        assert_ne!(outside_metadata(Some(&renamed)), unchanged);
     }
 }

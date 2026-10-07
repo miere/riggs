@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -22,8 +23,8 @@ use tokio_util::task::TaskTracker;
 use crate::backend::{self, Backend, BackendInfo, HostHandles, SessionKey, TurnHandle};
 use crate::files::Files;
 use crate::host::{push_health_snapshot, push_metadata};
-use crate::sessions::{OpenError, Sessions};
-use crate::state::{Reserve, Reset, ResetReason, Shared, lock};
+use crate::sessions::{OpenError, Sessions, Slot};
+use crate::state::{GatewayName, Reserve, Reset, ResetReason, Shared, lock};
 use crate::store::{Record, SessionStore, StoreError};
 use crate::turn::{self, Failures, Pump, ToolGate, TurnFailed, TurnPrompts};
 
@@ -58,9 +59,17 @@ pub struct ServerConfig {
     /// Where files the gateway links are saved for the agent to read. Unset means a folder in the
     /// system temp dir, emptied at start like any ephemeral state.
     pub files_dir: Option<PathBuf>,
-    /// Forwarded to the gateway unread; [`NodeServer::set_metadata`] replaces it later.
+    /// Forwarded to every gateway unread; [`NodeServer::set_metadata`] replaces it later.
     pub metadata: Metadata,
+    /// Per gateway, merged over `metadata` for that gateway only.
+    pub gateway_metadata: HashMap<GatewayName, Metadata>,
+    /// The gateway that receives sign-ins raised outside any session, and owns session records
+    /// written before sessions recorded their gateway.
+    pub primary: GatewayName,
 }
+
+/// The name a node with a single, unnamed gateway gives it.
+pub const DEFAULT_GATEWAY: &str = "default";
 
 impl ServerConfig {
     pub fn new(sessions: SessionsConfig) -> Self {
@@ -74,11 +83,14 @@ impl ServerConfig {
             turn_failed: None,
             files_dir: None,
             metadata: Metadata::new(),
+            gateway_metadata: HashMap::new(),
+            primary: DEFAULT_GATEWAY.to_owned(),
         }
     }
 }
 
-/// Why `serve` returned, so the binary knows whether to redial, wait for a new token, or exit.
+/// Why `serve` returned for one gateway, so the binary knows whether to redial, wait for a new
+/// token, or give up on that gateway.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stopped {
     Shutdown,
@@ -100,7 +112,8 @@ pub enum ServerError {
 }
 
 /// Sessions, the started backend and credential reports outlive any one link, so the same server
-/// can `serve` a new link after a rejected token or a gateway `close`.
+/// can `serve` a new link after a rejected token or a gateway `close`, and serve one link per
+/// gateway at once.
 #[derive(Clone)]
 pub struct NodeServer {
     inner: Arc<Inner>,
@@ -136,8 +149,9 @@ impl NodeServer {
             backend: backend.clone(),
             hook: config.turn_failed.clone(),
         };
-        let shared = Arc::new(Shared::new(config.call_timeout));
+        let shared = Arc::new(Shared::new(config.call_timeout, config.primary.clone()));
         *lock(&shared.metadata) = config.metadata.clone();
+        *lock(&shared.gateway_metadata) = config.gateway_metadata.clone();
         Ok(Self {
             inner: Arc::new(Inner {
                 shared,
@@ -160,10 +174,21 @@ impl NodeServer {
         self.inner.shutdown.clone()
     }
 
-    /// The owner changed the metadata: the gateway hears it now if one is attached, and every
-    /// later `initialize` declares it, so no restart is needed.
+    /// The owner changed the metadata: every attached gateway hears it now, and every later
+    /// `initialize` declares it, so no restart is needed.
     pub fn set_metadata(&self, metadata: Metadata) {
+        let per_gateway = lock(&self.inner.shared.gateway_metadata).clone();
+        self.set_all_metadata(metadata, per_gateway);
+    }
+
+    /// Replaces the top-level table and every gateway's own at once, so no gateway hears a mix.
+    pub fn set_all_metadata(
+        &self,
+        metadata: Metadata,
+        per_gateway: HashMap<GatewayName, Metadata>,
+    ) {
         *lock(&self.inner.shared.metadata) = metadata;
+        *lock(&self.inner.shared.gateway_metadata) = per_gateway;
         let shared = self.inner.shared.clone();
         self.inner
             .tasks
@@ -176,7 +201,20 @@ impl NodeServer {
         self.inner.stop().await;
     }
 
-    pub async fn serve(&self, handle: NodeHandle, mut events: NodeEvents) -> Stopped {
+    /// Serves the primary gateway's link.
+    pub async fn serve(&self, handle: NodeHandle, events: NodeEvents) -> Stopped {
+        let primary = self.inner.config.primary.clone();
+        self.serve_gateway(&primary, handle, events).await
+    }
+
+    /// Serves one gateway's link. Call it once per gateway, concurrently: each link resets,
+    /// expires and stops on its own, and only shutdown is node-wide.
+    pub async fn serve_gateway(
+        &self,
+        gateway: &str,
+        handle: NodeHandle,
+        mut events: NodeEvents,
+    ) -> Stopped {
         let inner = &self.inner;
         let (closing, mut close_requested) = mpsc::channel::<()>(1);
         let mut grace: Option<Pin<Box<Sleep>>> = None;
@@ -186,19 +224,19 @@ impl NodeServer {
                 biased;
                 () = inner.shutdown.cancelled() => {
                     inner.stop().await;
-                    inner.reset(ResetReason::Closed);
+                    inner.reset(gateway, ResetReason::Closed);
                     handle.close().await;
                     return Stopped::Shutdown;
                 }
                 Some(()) = close_requested.recv() => {
-                    inner.reset(ResetReason::Closed);
+                    inner.reset(gateway, ResetReason::Closed);
                     handle.close().await;
-                    tracing::info!("gateway connection closed");
+                    tracing::info!(%gateway, "gateway connection closed");
                     return Stopped::Closed;
                 }
                 () = expiry(&mut grace) => {
                     grace = None;
-                    inner.reset(ResetReason::GraceExpired);
+                    inner.reset(gateway, ResetReason::GraceExpired);
                 }
                 _ = prune.tick() => {
                     let pruning = inner.clone();
@@ -213,62 +251,62 @@ impl NodeServer {
                 }
                 event = events.recv() => {
                     let Some(event) = event else {
-                        inner.reset(ResetReason::LinkEnded);
+                        inner.reset(gateway, ResetReason::LinkEnded);
                         return Stopped::LinkEnded;
                     };
                     match event {
                         NodeEvent::Fresh => {
                             grace = None;
-                            let (reset, epoch) = inner.shared.fresh(handle.clone());
+                            let (reset, epoch) = inner.shared.fresh(gateway, handle.clone());
                             if let Some(reset) = reset {
                                 inner.after_reset(reset, ResetReason::ResumeRefused);
                             }
-                            tracing::info!(epoch, "attached to gateway");
+                            tracing::info!(%gateway, epoch, "attached to gateway");
                         }
                         NodeEvent::Resumed => {
                             grace = None;
-                            inner.resumed();
+                            inner.resumed(gateway);
                         }
                         NodeEvent::Disconnected { reason } => {
-                            tracing::info!(%reason, "gateway connection dropped; waiting for it to resume");
+                            tracing::info!(%gateway, %reason, "gateway connection dropped; waiting for it to resume");
                             if grace.is_none() {
                                 grace = Some(Box::pin(sleep(inner.config.link_grace)));
                             }
                         }
                         NodeEvent::CredentialRejected => {
-                            inner.reset(ResetReason::CredentialRejected);
+                            inner.reset(gateway, ResetReason::CredentialRejected);
                             return Stopped::CredentialRejected;
                         }
                         NodeEvent::Refused { status } => {
-                            inner.reset(ResetReason::LinkEnded);
+                            inner.reset(gateway, ResetReason::LinkEnded);
                             return Stopped::Refused { status };
                         }
                         NodeEvent::Rejected(rejection) => {
-                            inner.reset(ResetReason::LinkEnded);
+                            inner.reset(gateway, ResetReason::LinkEnded);
                             return Stopped::Rejected(rejection);
                         }
                         NodeEvent::Unhandled { body: rax::Unhandled { subject: Subject::MetadataKey { key }, message, .. }, .. } => {
-                            tracing::warn!(%key, reason = ?message, "the gateway ignores this metadata key");
+                            tracing::warn!(%gateway, %key, reason = ?message, "the gateway ignores this metadata key");
                         }
                         NodeEvent::Request { id, call } => {
-                            let epoch = inner.shared.live().map(|epoch| epoch.id);
-                            let request = inner.clone().request(handle.clone(), epoch, id, call, closing.clone());
+                            let epoch = inner.shared.live(gateway).map(|epoch| epoch.id);
+                            let request = inner.clone().request(gateway.to_owned(), handle.clone(), epoch, id, call, closing.clone());
                             inner.tasks.spawn(request);
                         }
                         NodeEvent::Verdict(verdict) => {
                             let id = verdict.id.clone();
-                            if !inner.shared.verdict(verdict) {
-                                tracing::debug!(tool_call_id = %id, "verdict for a tool call nobody is holding");
+                            if !inner.shared.verdict(gateway, verdict) {
+                                tracing::debug!(%gateway, tool_call_id = %id, "verdict for a tool call this link is not holding");
                             }
                         }
                         NodeEvent::Answer(answer) => {
                             let id = answer.id.clone();
-                            if !inner.shared.answer(answer) {
-                                tracing::debug!(prompt = %id, "answer for a prompt nobody is waiting on");
+                            if !inner.shared.answer(gateway, answer) {
+                                tracing::debug!(%gateway, prompt = %id, "answer for a prompt this link did not show");
                             }
                         }
                         NodeEvent::Unhandled { stream, body } => {
-                            tracing::warn!(stream = ?stream, subject = ?body.subject, reason = ?body.reason, "the gateway could not handle something this node sent");
+                            tracing::warn!(%gateway, stream = ?stream, subject = ?body.subject, reason = ?body.reason, "the gateway could not handle something this node sent");
                         }
                     }
                 }
@@ -320,8 +358,8 @@ impl Inner {
             .cloned()
     }
 
-    fn reset(self: &Arc<Self>, reason: ResetReason) {
-        if let Some(reset) = self.shared.end_epoch(reason) {
+    fn reset(self: &Arc<Self>, gateway: &str, reason: ResetReason) {
+        if let Some(reset) = self.shared.end_epoch(gateway, reason) {
             self.after_reset(reset, reason);
         }
     }
@@ -329,7 +367,7 @@ impl Inner {
     fn after_reset(self: &Arc<Self>, reset: Reset, reason: ResetReason) {
         let turns_failed = reset.turns.len();
         if turns_failed > 0 || reset.calls_denied > 0 || reason != ResetReason::Closed {
-            tracing::warn!(old_epoch = reset.old_epoch, reason = ?reason, turns_failed, calls_denied = reset.calls_denied, "link reset");
+            tracing::warn!(gateway = %reset.gateway, old_epoch = reset.old_epoch, reason = ?reason, turns_failed, calls_denied = reset.calls_denied, "link reset");
         }
         for key in reset.turns {
             let inner = self.clone();
@@ -338,12 +376,13 @@ impl Inner {
         }
     }
 
-    fn resumed(self: &Arc<Self>) {
-        let Some((handle, orphans)) = self.shared.resumed() else {
-            tracing::info!("link resumed");
+    fn resumed(self: &Arc<Self>, gateway: &str) {
+        let Some((handle, orphans)) = self.shared.resumed(gateway) else {
+            tracing::info!(%gateway, "link resumed");
             return;
         };
         tracing::info!(
+            %gateway,
             ended = orphans.len(),
             "link resumed after its grace ran out"
         );
@@ -386,6 +425,7 @@ impl Inner {
 
     async fn request(
         self: Arc<Self>,
+        gateway: GatewayName,
         handle: NodeHandle,
         epoch: Option<u64>,
         id: RequestId,
@@ -397,22 +437,24 @@ impl Inner {
         };
         let answer = match call {
             GatewayCall::Initialize(offer) => self
-                .initialize(epoch, offer)
+                .initialize(&gateway, epoch, offer)
                 .await
                 .map(GatewayReply::Initialize),
             GatewayCall::NewSession(request) => self
-                .new_session(&handle, epoch, request)
+                .new_session(&gateway, &handle, epoch, request)
                 .await
                 .map(GatewayReply::NewSession),
-            GatewayCall::Prompt(prompt) => return self.prompt(handle, epoch, id, prompt).await,
-            GatewayCall::Cancel(session) => {
-                self.cancel(&session.session_id).await;
-                Ok(GatewayReply::Cancel)
+            GatewayCall::Prompt(prompt) => {
+                return self.prompt(&gateway, handle, epoch, id, prompt).await;
             }
-            GatewayCall::CloseSession(session) => {
-                self.close_session(&session.session_id).await;
-                Ok(GatewayReply::CloseSession)
-            }
+            GatewayCall::Cancel(session) => self
+                .cancel(&gateway, &session.session_id)
+                .await
+                .map(|()| GatewayReply::Cancel),
+            GatewayCall::CloseSession(session) => self
+                .close_session(&gateway, &session.session_id)
+                .await
+                .map(|()| GatewayReply::CloseSession),
             GatewayCall::RenewCredential => Ok(GatewayReply::RenewCredential(
                 self.backend.renew_credential().await,
             )),
@@ -453,7 +495,12 @@ impl Inner {
         }
     }
 
-    async fn initialize(&self, epoch: u64, offer: Initialize) -> Result<Initialized, rax::Error> {
+    async fn initialize(
+        &self,
+        gateway: &str,
+        epoch: u64,
+        offer: Initialize,
+    ) -> Result<Initialized, rax::Error> {
         let info = self.started().await?;
         let mut resource_schemes = info.resource_schemes.clone();
         for scheme in &offer.capabilities.readable_schemes {
@@ -472,14 +519,13 @@ impl Inner {
                 sessions: self.sessions.durability(&info),
                 tool_groups: true,
             },
-            metadata: lock(&self.shared.metadata).clone(),
+            metadata: self.shared.metadata_for(gateway),
         })
     }
 
     fn readable_schemes(&self, epoch: u64) -> Vec<String> {
         self.shared
-            .live()
-            .filter(|live| live.id == epoch)
+            .epoch(epoch)
             .and_then(|live| live.caps)
             .map(|caps| caps.readable_schemes)
             .unwrap_or_default()
@@ -487,6 +533,7 @@ impl Inner {
 
     async fn new_session(
         &self,
+        gateway: &str,
         handle: &NodeHandle,
         epoch: u64,
         request: NewSession,
@@ -515,8 +562,16 @@ impl Inner {
             .new_session(opening)
             .await
             .map_err(|err| rax::Error::new(self.backend.classify(&err), err.to_string()))?;
-        let record = Record::new(&key, info.name.clone(), opened.record, fetched.content);
+        let record = Record::new(
+            &key,
+            gateway.to_owned(),
+            info.name.clone(),
+            opened.record,
+            fetched.content,
+        );
+        self.shared.set_owner(key, gateway.to_owned());
         if let Err(err) = self.sessions.create(key, record, &info).await {
+            self.shared.forget_owner(&key);
             self.backend.close_session(&key).await;
             self.files.discard(&key);
             return Err(rax::Error::new(
@@ -524,7 +579,7 @@ impl Inner {
                 format!("this node could not save the new session: {err}"),
             ));
         }
-        tracing::debug!(session_id = %key, "session created");
+        tracing::debug!(%gateway, session_id = %key, "session created");
         let mut unhandled = fetched.unhandled;
         unhandled.extend(refused);
         unhandled.extend(opened.unhandled);
@@ -536,6 +591,7 @@ impl Inner {
 
     async fn prompt(
         self: Arc<Self>,
+        gateway: &str,
         handle: NodeHandle,
         epoch: u64,
         id: RequestId,
@@ -545,7 +601,7 @@ impl Inner {
             session_id,
             content,
         } = prompt;
-        let Some(key) = SessionKey::parse(&session_id) else {
+        let Some(key) = self.owned(gateway, &session_id).await else {
             let refusal = Err(unknown_session(&session_id));
             return self.answer(&handle, epoch, id, refusal).await;
         };
@@ -579,7 +635,17 @@ impl Inner {
             }
         };
         let slot = match self.sessions.open(key, &*self.backend, &info).await {
-            Ok(slot) => slot,
+            Ok(mut slot) => {
+                // A record from before sessions named their gateway belongs to the primary, and
+                // says so from its next save on.
+                if let Slot::Live(record) = &mut *slot {
+                    let owner = record
+                        .gateway
+                        .get_or_insert_with(|| self.config.primary.clone());
+                    self.shared.set_owner(key, owner.clone());
+                }
+                slot
+            }
             Err(err) => {
                 self.shared.finish_turn(&key, &id);
                 let error = match err {
@@ -650,25 +716,60 @@ impl Inner {
         self.sessions.touch(key, &info).await;
     }
 
-    async fn cancel(&self, session_id: &SessionId) {
-        let Some(key) = SessionKey::parse(session_id) else {
-            return;
+    /// The session's key, if `gateway` may drive it: the gateway that opened it, or any gateway
+    /// for an id this node never heard of, which then fails as it always did. Another gateway's
+    /// session is as unknown to this one as a session that never existed.
+    async fn owned(&self, gateway: &str, session_id: &SessionId) -> Option<SessionKey> {
+        let key = SessionKey::parse(session_id)?;
+        let owner = match self.shared.owner(&key) {
+            Some(owner) => Some(owner),
+            None => self
+                .sessions
+                .recorded_owner(&key)
+                .await
+                .map(|owner| owner.unwrap_or_else(|| self.config.primary.clone())),
         };
-        if self.shared.cancel_turn(&key) || self.sessions.is_known(&key) {
-            self.cancel_at_backend(&key).await;
+        match owner {
+            Some(owner) if owner != gateway => {
+                tracing::warn!(%gateway, %owner, session_id = %key, "refused a call for another gateway's session");
+                None
+            }
+            _ => Some(key),
         }
     }
 
-    async fn close_session(&self, session_id: &SessionId) {
-        let Some(key) = SessionKey::parse(session_id) else {
-            return;
-        };
+    /// Succeeds for a session this node does not have, as the protocol asks, but not for one
+    /// another gateway opened.
+    async fn cancel(&self, gateway: &str, session_id: &SessionId) -> Result<(), rax::Error> {
+        if SessionKey::parse(session_id).is_none() {
+            return Ok(());
+        }
+        let key = self
+            .owned(gateway, session_id)
+            .await
+            .ok_or_else(|| unknown_session(session_id))?;
+        if self.shared.cancel_turn(&key) || self.sessions.is_known(&key) {
+            self.cancel_at_backend(&key).await;
+        }
+        Ok(())
+    }
+
+    async fn close_session(&self, gateway: &str, session_id: &SessionId) -> Result<(), rax::Error> {
+        if SessionKey::parse(session_id).is_none() {
+            return Ok(());
+        }
+        let key = self
+            .owned(gateway, session_id)
+            .await
+            .ok_or_else(|| unknown_session(session_id))?;
         if self.shared.cancel_turn(&key) {
             self.cancel_at_backend(&key).await;
         }
         self.sessions.close(key, &*self.backend).await;
+        self.shared.forget_owner(&key);
         self.files.discard(&key);
-        tracing::debug!(session_id = %key, "session closed");
+        tracing::debug!(%gateway, session_id = %key, "session closed");
+        Ok(())
     }
 }
 

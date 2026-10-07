@@ -11,7 +11,7 @@ use serde_json::Value;
 use tokio::time::{Instant, timeout};
 
 use crate::backend::{AttachmentSource, SessionKey};
-use crate::state::{self, Epoch, PromptKind, PromptRoute, PromptStart, Shared, lock};
+use crate::state::{self, Epoch, PromptKind, PromptRoute, PromptStart, Shared, Unreached, lock};
 use crate::turn::{SignInPrompt, hold_background};
 
 /// Everything a backend may reach with no turn open. It outlives every socket and link.
@@ -44,7 +44,7 @@ impl HostHandles {
     }
 }
 
-/// The tools the attached gateway runs on this node's behalf. The node publishes them to its agent
+/// The tools each session's gateway runs on this node's behalf. The node publishes them to its agent
 /// and calls them back; it never learns what any of them do.
 #[derive(Clone)]
 pub struct GatewayTools {
@@ -55,7 +55,9 @@ pub struct GatewayTools {
 /// act on. Silence would leave a turn hanging on a gateway that is not coming back.
 #[derive(Debug, thiserror::Error)]
 pub enum ToolUnreachable {
-    #[error("no gateway is attached, so its tools cannot be reached right now")]
+    #[error(
+        "the gateway that opened this session is not attached, so its tools cannot be reached right now"
+    )]
     NoGateway,
     #[error("the link ended before the gateway answered")]
     LinkEnded,
@@ -76,7 +78,10 @@ impl GatewayTools {
         name: &str,
         arguments: Value,
     ) -> Result<ToolOutcome, ToolUnreachable> {
-        let epoch = self.shared.live().ok_or(ToolUnreachable::NoGateway)?;
+        let epoch = self
+            .shared
+            .owner_link(session)
+            .map_err(|_| ToolUnreachable::NoGateway)?;
         let call = NodeCall::CallTool(CallTool {
             session_id: session.session_id(),
             namespace: Some(namespace.to_owned()),
@@ -120,7 +125,9 @@ impl BackgroundGate {
 #[derive(Debug, thiserror::Error)]
 pub enum NotDelivered {
     /// Not queued: notices about work that finished long ago are noise once a gateway returns.
-    #[error("riggs-node: no gateway is attached, so the background event was dropped")]
+    #[error(
+        "riggs-node: the session's gateway is not attached, so the background event was dropped"
+    )]
     NoGateway,
     #[error("riggs-node: the link ended before the background event was sent")]
     LinkEnded,
@@ -172,8 +179,11 @@ impl BackgroundSink {
     }
 
     fn epoch(&self, session: &SessionKey) -> Result<Epoch, NotDelivered> {
-        self.shared.live().ok_or_else(|| {
-            tracing::debug!(session_id = %session, "dropping a background event; no gateway is attached");
+        self.shared.owner_link(session).map_err(|unreached| {
+            match unreached {
+                Unreached::Unowned => tracing::debug!(session_id = %session, "dropping a background event; no gateway owns this session"),
+                Unreached::Detached => tracing::debug!(session_id = %session, "dropping a background event; its gateway is not attached"),
+            }
             NotDelivered::NoGateway
         })
     }
@@ -217,8 +227,10 @@ impl SignIns {
                 epoch,
                 answers,
             } => (serial, epoch, answers),
-            PromptStart::Refused(DisplayOutcome::Unavailable) if shared.live().is_none() => {
-                tracing::warn!(tool = %request.tool, "a sign-in with no conversation was refused; no gateway is attached");
+            PromptStart::Refused(DisplayOutcome::Unavailable)
+                if shared.live(&shared.primary).is_none() =>
+            {
+                tracing::warn!(tool = %request.tool, gateway = %shared.primary, "a sign-in with no conversation was refused; the primary gateway is not attached");
                 return Err(SignInRefused::NoGateway);
             }
             PromptStart::Refused(_) => return Err(SignInRefused::Unavailable),
@@ -270,8 +282,8 @@ impl SignIns {
         let id = settled.id.clone();
         let terminal = settled.state.is_terminal();
         let raised = shared.prompt_epoch(&id, None);
-        match shared.live() {
-            Some(epoch) if raised == Some(epoch.id) => {
+        match raised.and_then(|raised| shared.epoch(raised)) {
+            Some(epoch) => {
                 push(shared, &epoch, NodeCall::SignInSettled(settled)).await;
             }
             _ => {
@@ -284,8 +296,9 @@ impl SignIns {
     }
 }
 
-/// Reports go one at a time, so a recovery never overtakes the failure it ends. The latest
-/// report per credential is pushed again after every `initialize`.
+/// Reports go one at a time, so a recovery never overtakes the failure it ends, and to every
+/// attached gateway, since the credential belongs to the whole node. The latest report per
+/// credential is pushed again after every `initialize`.
 #[derive(Clone)]
 pub struct CredentialReporter {
     shared: Arc<Shared>,
@@ -298,37 +311,38 @@ impl CredentialReporter {
         let Some(_in_order) = shared.in_order(&shared.health_sending).await else {
             return;
         };
-        match shared.live() {
-            Some(epoch) if epoch.caps.is_some() => {
-                push(shared, &epoch, NodeCall::CredentialHealth(health)).await;
-            }
-            _ => {
-                tracing::debug!(credential = %health.credential, "no gateway is attached; the next one hears this report");
-            }
+        let lives: Vec<Epoch> = shared
+            .lives()
+            .into_iter()
+            .filter(|epoch| epoch.caps.is_some())
+            .collect();
+        if lives.is_empty() {
+            tracing::debug!(credential = %health.credential, "no gateway is attached; the next one hears this report");
+        }
+        for epoch in lives {
+            push(shared, &epoch, NodeCall::CredentialHealth(health.clone())).await;
         }
     }
 }
 
 /// One update at a time, each carrying whatever is latest when its turn comes, so a burst of
-/// edits ends with the gateway holding the last one. With no gateway attached there is nothing to
-/// do: the next `initialize` declares the latest anyway.
+/// edits ends with each gateway holding the last one. Each link gets its own merge. A gateway that
+/// is not attached has nothing to do: its next `initialize` declares the latest anyway.
 pub(crate) async fn push_metadata(shared: &Shared) {
     let Some(_in_order) = shared.in_order(&shared.metadata_sending).await else {
         return;
     };
-    match shared.live() {
-        Some(epoch) if epoch.caps.is_some() => {
-            let metadata = lock(&shared.metadata).clone();
-            push(
-                shared,
-                &epoch,
-                NodeCall::UpdateMetadata(UpdateMetadata { metadata }),
-            )
-            .await;
+    for epoch in shared.lives() {
+        if epoch.caps.is_none() {
+            continue;
         }
-        _ => {
-            tracing::debug!("no gateway is attached; the next one hears the metadata at initialize")
-        }
+        let metadata = shared.metadata_for(&epoch.gateway);
+        push(
+            shared,
+            &epoch,
+            NodeCall::UpdateMetadata(UpdateMetadata { metadata }),
+        )
+        .await;
     }
 }
 
@@ -336,7 +350,7 @@ pub(crate) async fn push_health_snapshot(shared: &Shared, epoch: u64) {
     let Some(_in_order) = shared.in_order(&shared.health_sending).await else {
         return;
     };
-    let Some(epoch) = shared.live().filter(|live| live.id == epoch) else {
+    let Some(epoch) = shared.epoch(epoch) else {
         return;
     };
     let snapshot: Vec<CredentialHealth> = lock(&shared.health).values().cloned().collect();
@@ -359,13 +373,15 @@ async fn push(shared: &Shared, epoch: &Epoch, call: NodeCall) {
         () = epoch.ended.cancelled() => return,
         () = shared.stopping.cancelled() => return,
     };
+    let gateway = &epoch.gateway;
     match answered {
         Ok(Ok(_)) | Ok(Err(CallError::LinkReset | CallError::Closed)) => {}
         Ok(Err(err)) => {
-            tracing::warn!(method = what, error = %err, "the gateway did not accept an update");
+            tracing::warn!(%gateway, method = what, error = %err, "the gateway did not accept an update");
         }
         Err(_) => {
             tracing::warn!(
+                %gateway,
                 method = what,
                 "the gateway did not answer an update in time"
             );

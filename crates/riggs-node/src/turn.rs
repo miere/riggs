@@ -75,7 +75,7 @@ impl ToolGate {
     pub async fn hold(&self, call: ToolCall, deadline: Instant) -> Decision {
         let ticket = match self
             .shared
-            .hold(&call.id, Some((&self.session, &self.stream)))
+            .hold(&call.id, &self.session, Some(&self.stream))
         {
             HoldStart::Registered(ticket) => ticket,
             HoldStart::NoTurn => {
@@ -106,7 +106,7 @@ pub(crate) async fn hold_background(
     call: ToolCall,
     deadline: Instant,
 ) -> Decision {
-    let ticket = match shared.hold(&call.id, None) {
+    let ticket = match shared.hold(&call.id, session, None) {
         HoldStart::Registered(ticket) => ticket,
         HoldStart::NoTurn => return deny(NOBODY),
         HoldStart::Refused(decision) => return decision,

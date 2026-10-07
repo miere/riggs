@@ -35,8 +35,9 @@ pub struct SandboxConfig {
     pub write: Vec<PathBuf>,
     /// Unreadable; `None` takes the credential stores above, and an empty list blinds nothing.
     pub deny_read: Option<Vec<PathBuf>>,
-    /// Never readable or writable, whatever else the profile says: it is this node's identity.
-    pub node_token: Option<PathBuf>,
+    /// Never readable or writable, whatever else the profile says: they are this node's identity,
+    /// one per gateway.
+    pub node_tokens: Vec<PathBuf>,
 }
 
 impl SandboxConfig {
@@ -76,8 +77,10 @@ impl SandboxConfig {
                 out.push_str(&format!("(deny file-read* {})\n", both(&path)));
             }
         }
-        if let Some(token) = &self.node_token {
-            out.push_str("\n; this node's credential: never readable or writable\n");
+        if !self.node_tokens.is_empty() {
+            out.push_str("\n; this node's credentials: never readable or writable\n");
+        }
+        for token in &self.node_tokens {
             out.push_str(&format!("(deny file-read* {})\n", both(token)));
             out.push_str(&format!("(deny file-write* {})\n", both(token)));
         }
@@ -207,7 +210,7 @@ mod tests {
     #[test]
     fn the_nodes_own_credential_is_denied_both_ways() {
         let config = SandboxConfig {
-            node_token: Some(PathBuf::from("/work/node-token")),
+            node_tokens: vec![PathBuf::from("/work/node-token")],
             ..seatbelt()
         };
         let profile = config.profile(Path::new("/work"));
@@ -255,7 +258,7 @@ mod tests {
     fn macos_accepts_the_policy_this_builds() {
         let config = SandboxConfig {
             write: vec![PathBuf::from("/tmp/riggs-test")],
-            node_token: Some(PathBuf::from("/tmp/riggs-test/node-token")),
+            node_tokens: vec![PathBuf::from("/tmp/riggs-test/node-token")],
             ..seatbelt()
         };
         let wrapper = config.wrap(Path::new("/usr/bin/true"), Path::new("/tmp/riggs-test"));

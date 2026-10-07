@@ -37,8 +37,13 @@ command = "claude"
 fn a_minimal_config_resolves_defaults_against_its_directory() {
     let (dir, path) = write(GOOD);
     let config = load(&path, &Overrides::default()).unwrap();
-    assert_eq!(config.gateways, ["wss://gateway.example.com/rax/v1/link"]);
-    assert_eq!(config.token_file, dir.path().join("node-token"));
+    let [gateway] = config.gateways.as_slice() else {
+        panic!("expected one gateway")
+    };
+    assert_eq!(gateway.name, "default");
+    assert!(gateway.primary);
+    assert_eq!(gateway.urls, ["wss://gateway.example.com/rax/v1/link"]);
+    assert_eq!(gateway.token_file, dir.path().join("node-token"));
     let AgentConfig::ClaudeCode(agent) = &config.agent else {
         panic!("expected claude_code")
     };
@@ -92,7 +97,7 @@ fn fallback_gateways_keep_their_order_and_a_bad_one_is_named_by_position() {
     ));
     let config = load(&path, &Overrides::default()).unwrap();
     assert_eq!(
-        config.gateways,
+        config.gateways[0].urls,
         [
             "wss://a.example.com/rax/v1/link",
             "wss://b.example.com/rax/v1/link"
@@ -310,8 +315,11 @@ fn flags_replace_file_values() {
         insecure_skip_verify: false,
     };
     let config = load(&path, &overrides).unwrap();
-    assert_eq!(config.gateways, ["ws://localhost:1/rax/v1/link"]);
-    assert_eq!(config.token_file, PathBuf::from("/tmp/elsewhere"));
+    assert_eq!(config.gateways[0].urls, ["ws://localhost:1/rax/v1/link"]);
+    assert_eq!(
+        config.gateways[0].token_file,
+        PathBuf::from("/tmp/elsewhere")
+    );
 }
 
 #[test]
@@ -352,8 +360,8 @@ fn a_seatbelt_box_resolves_its_paths_and_always_denies_the_node_credential() {
         Some(&[PathBuf::from("/secrets")][..])
     );
     assert_eq!(
-        agent.sandbox.node_token.as_deref(),
-        Some(config.token_file.as_path())
+        agent.sandbox.node_tokens,
+        [config.gateways[0].token_file.clone()]
     );
 }
 
@@ -405,4 +413,129 @@ fn a_date_in_metadata_is_named_because_it_cannot_travel_as_json() {
         )),
         ["metadata.murtaugh_access.since"]
     );
+}
+
+const TWO: &str = r#"
+[[gateways]]
+name = "carmen"
+urls = ["wss://carmen.example.com"]
+token_file = "carmen.token"
+
+[gateways.metadata]
+murtaugh_access = { always_allow = true }
+
+[[gateways]]
+name = "work"
+urls = ["wss://murtaugh.work.example"]
+token_file = "work.token"
+primary = true
+
+[metadata]
+shared_key = 1
+
+[agent]
+kind = "claude_code"
+command = "claude"
+"#;
+
+#[test]
+fn several_gateways_load_with_their_own_tokens_and_metadata() {
+    let (dir, path) = write(TWO);
+    let config = load(&path, &Overrides::default()).unwrap();
+    let names: Vec<&str> = config.gateways.iter().map(|g| g.name.as_str()).collect();
+    assert_eq!(names, ["carmen", "work"]);
+    assert_eq!(config.primary().name, "work");
+    assert!(!config.gateways[0].primary);
+    assert_eq!(
+        config.gateways[0].token_file,
+        dir.path().join("carmen.token")
+    );
+    assert_eq!(
+        config.gateways[1].urls,
+        ["wss://murtaugh.work.example/rax/v1/link"]
+    );
+    let expected: rax::Metadata =
+        serde_json::from_value(serde_json::json!({"murtaugh_access": {"always_allow": true}}))
+            .unwrap();
+    assert_eq!(config.gateways[0].metadata, expected);
+    assert!(config.gateways[1].metadata.is_empty());
+    assert_eq!(config.gateway_metadata().len(), 1);
+    assert_eq!(config.metadata.len(), 1);
+    let AgentConfig::ClaudeCode(agent) = config.agent else {
+        panic!("expected claude_code")
+    };
+    assert_eq!(
+        agent.sandbox.node_tokens,
+        [
+            dir.path().join("carmen.token"),
+            dir.path().join("work.token")
+        ]
+    );
+}
+
+#[test]
+fn the_first_gateway_is_primary_unless_another_says_so() {
+    let (_dir, path) = write(&TWO.replace("primary = true\n", ""));
+    let config = load(&path, &Overrides::default()).unwrap();
+    assert_eq!(config.primary().name, "carmen");
+    assert!(config.gateways[0].primary);
+}
+
+#[test]
+fn both_forms_at_once_are_an_error() {
+    assert_eq!(
+        fields(&format!("[gateway]\nurls = [\"wss://a\"]\n{TWO}")),
+        ["gateway"]
+    );
+}
+
+#[test]
+fn gateway_names_must_be_unique_and_well_formed_and_one_primary_at_most() {
+    assert_eq!(
+        fields(&TWO.replace("name = \"work\"", "name = \"carmen\"")),
+        ["gateways[1].name"]
+    );
+    assert_eq!(
+        fields(&TWO.replace("name = \"work\"", "name = \"Work Gateway\"")),
+        ["gateways[1].name"]
+    );
+    assert_eq!(
+        fields(&TWO.replace("name = \"work\"\n", "")),
+        ["gateways[1].name"]
+    );
+    assert_eq!(
+        fields(&TWO.replace(
+            "token_file = \"carmen.token\"",
+            "token_file = \"carmen.token\"\nprimary = true"
+        )),
+        ["gateways"]
+    );
+    assert_eq!(
+        fields(&TWO.replace("wss://carmen.example.com", "http://carmen.example.com")),
+        ["gateways[0].urls[0]"]
+    );
+}
+
+#[test]
+fn flags_replace_several_gateways_only_when_given_together() {
+    let (_dir, path) = write(TWO);
+    let half = Overrides {
+        gateway: vec!["ws://localhost:1".to_owned()],
+        ..Overrides::default()
+    };
+    let Err(ConfigError::Invalid { problems, .. }) = load(&path, &half) else {
+        panic!("expected a problem")
+    };
+    assert_eq!(problems.0[0].field, "gateways");
+    let both = Overrides {
+        token_file: Some(PathBuf::from("/tmp/elsewhere")),
+        ..half
+    };
+    let config = load(&path, &both).unwrap();
+    let [gateway] = config.gateways.as_slice() else {
+        panic!("expected one ad-hoc gateway")
+    };
+    assert_eq!(gateway.name, "default");
+    assert_eq!(gateway.urls, ["ws://localhost:1/rax/v1/link"]);
+    assert_eq!(gateway.token_file, PathBuf::from("/tmp/elsewhere"));
 }

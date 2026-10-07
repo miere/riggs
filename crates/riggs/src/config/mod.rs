@@ -9,7 +9,7 @@ use std::time::Duration;
 use rax::Metadata;
 use riggs_acp::AcpConfig;
 use riggs_claude_code::{ClaudeCodeConfig, SandboxConfig, SandboxMode};
-use riggs_node::{SESSION_RETENTION, SessionsConfig};
+use riggs_node::{DEFAULT_GATEWAY, SESSION_RETENTION, SessionsConfig};
 
 use crate::token::is_configured;
 
@@ -34,8 +34,9 @@ pub enum ConfigError {
     Invalid {
         path: PathBuf,
         problems: Problems,
-        /// Still known, so `validate` can check the token alongside the other problems.
-        token_file: PathBuf,
+        /// Still known, so `validate` can check the tokens alongside the other problems: each
+        /// with the field that names it.
+        token_files: Vec<(String, PathBuf)>,
     },
     #[error(
         "HOME is not set, so the default configuration path cannot be found; pass --config PATH"
@@ -73,7 +74,9 @@ impl fmt::Display for Problems {
     }
 }
 
-/// Command-line values that replace the file's, applied before validation.
+/// Command-line values that replace the file's, applied before validation. They describe one
+/// ad-hoc gateway: with a single gateway configured they replace its values, and with several
+/// they replace the whole list, so both must then be given.
 #[derive(Debug, Default, Clone)]
 pub struct Overrides {
     pub gateway: Vec<String>,
@@ -116,20 +119,50 @@ pub struct LogConfig {
     pub format: LogFormat,
 }
 
+/// One gateway this node keeps a link to.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Gateway {
+    /// Unique, `[a-z0-9_-]`. Sessions, logs and metadata are keyed by it.
+    pub name: String,
+    /// One cluster, already checked by `resolve_endpoint`, so a bad scheme fails at startup, not
+    /// in a redial loop. Tried in order: a node stays on whichever answered last and moves on
+    /// when it stops.
+    pub urls: Vec<String>,
+    pub token_file: PathBuf,
+    /// Receives sign-ins raised outside any session. Exactly one gateway is.
+    pub primary: bool,
+    /// Merged over the top-level `[metadata]` for this gateway only.
+    pub metadata: Metadata,
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub path: PathBuf,
     pub dir: PathBuf,
-    /// Already checked by `resolve_endpoint`, so a bad scheme fails at startup, not in a redial loop.
-    /// Tried in order: a node stays on whichever answered last and moves on when it stops.
-    pub gateways: Vec<String>,
-    pub token_file: PathBuf,
+    pub gateways: Vec<Gateway>,
     pub agent: AgentConfig,
     pub sessions: SessionsConfig,
     pub log: LogConfig,
-    /// The `[metadata]` table as the gateway will receive it. Riggs never reads the keys: each
-    /// belongs to a gateway, which gives it a meaning.
+    /// The `[metadata]` table as every gateway will receive it, under its own. Riggs never reads
+    /// the keys: each belongs to a gateway, which gives it a meaning.
     pub metadata: Metadata,
+}
+
+impl Config {
+    pub fn primary(&self) -> &Gateway {
+        self.gateways
+            .iter()
+            .find(|gateway| gateway.primary)
+            .unwrap_or(&self.gateways[0])
+    }
+
+    pub fn gateway_metadata(&self) -> std::collections::HashMap<String, Metadata> {
+        self.gateways
+            .iter()
+            .filter(|gateway| !gateway.metadata.is_empty())
+            .map(|gateway| (gateway.name.clone(), gateway.metadata.clone()))
+            .collect()
+    }
 }
 
 pub fn default_path(alias: &str) -> Result<PathBuf, ConfigError> {
@@ -165,26 +198,96 @@ pub fn load(path: &Path, overrides: &Overrides) -> Result<Config, ConfigError> {
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("/"));
     let mut problems = Problems::default();
-    let token_file = token_file(&dir, &parsed.gateway, overrides);
-    let config = build(
-        &path,
-        &dir,
-        token_file.clone(),
-        parsed,
-        overrides,
-        &mut problems,
-    );
+    let sections = sections(&parsed, overrides, &mut problems);
+    let token_files: Vec<(String, PathBuf)> = sections
+        .iter()
+        .map(|section| {
+            (
+                section.field("token_file"),
+                token_file(&dir, section, overrides),
+            )
+        })
+        .collect();
+    let config = build(&path, &dir, &sections, parsed, overrides, &mut problems);
     match config {
         Some(config) if problems.0.is_empty() => Ok(config),
         _ => Err(ConfigError::Invalid {
             path,
             problems,
-            token_file,
+            token_files,
         }),
     }
 }
 
-fn token_file(dir: &Path, section: &file::Gateway, overrides: &Overrides) -> PathBuf {
+/// A gateway as written, in either form, with where to point a problem.
+struct Section {
+    /// `gateway` for the single form, `gateways[i]` for an entry of the list.
+    field: String,
+    name: Option<String>,
+    urls: Option<Vec<String>>,
+    token_file: Option<String>,
+    primary: Option<bool>,
+    insecure_skip_verify: Option<bool>,
+    metadata: toml::Table,
+}
+
+impl Section {
+    fn field(&self, key: &str) -> String {
+        format!("{}.{key}", self.field)
+    }
+}
+
+/// Both forms read as a list. Having both is an error, and an ad-hoc gateway from the flags
+/// replaces a list of several.
+fn sections(file: &file::File, overrides: &Overrides, problems: &mut Problems) -> Vec<Section> {
+    let single = |gateway: &file::Gateway| Section {
+        field: "gateway".to_owned(),
+        name: Some(DEFAULT_GATEWAY.to_owned()),
+        urls: gateway.urls.clone(),
+        token_file: gateway.token_file.clone(),
+        primary: Some(true),
+        insecure_skip_verify: gateway.insecure_skip_verify,
+        metadata: toml::Table::new(),
+    };
+    let sections = match (&file.gateway, &file.gateways) {
+        (Some(_), Some(_)) => {
+            problems.add(
+                "gateway",
+                "cannot be used together with [[gateways]]; move it into the list",
+            );
+            return Vec::new();
+        }
+        (Some(gateway), None) => vec![single(gateway)],
+        (None, Some(gateways)) => gateways
+            .iter()
+            .enumerate()
+            .map(|(index, gateway)| Section {
+                field: format!("gateways[{index}]"),
+                name: gateway.name.clone(),
+                urls: gateway.urls.clone(),
+                token_file: gateway.token_file.clone(),
+                primary: gateway.primary,
+                insecure_skip_verify: gateway.insecure_skip_verify,
+                metadata: gateway.metadata.clone(),
+            })
+            .collect(),
+        (None, None) => vec![single(&file::Gateway::default())],
+    };
+    let flagged = !overrides.gateway.is_empty() || overrides.token_file.is_some();
+    if flagged && sections.len() > 1 {
+        if overrides.gateway.is_empty() || overrides.token_file.is_none() {
+            problems.add(
+                "gateways",
+                "has several entries, so --gateway and --token-file must be given together to replace them",
+            );
+            return sections;
+        }
+        return vec![single(&file::Gateway::default())];
+    }
+    sections
+}
+
+fn token_file(dir: &Path, section: &Section, overrides: &Overrides) -> PathBuf {
     match (&overrides.token_file, &section.token_file) {
         (Some(flag), _) => absolute(&expand_home(flag)),
         (None, Some(raw)) if is_configured(raw) => resolve(dir, raw),
@@ -195,12 +298,16 @@ fn token_file(dir: &Path, section: &file::Gateway, overrides: &Overrides) -> Pat
 fn build(
     path: &Path,
     dir: &Path,
-    token_file: PathBuf,
+    sections: &[Section],
     file: file::File,
     overrides: &Overrides,
     problems: &mut Problems,
 ) -> Option<Config> {
-    let gateway = gateway(&file.gateway, overrides, problems);
+    let gateways = gateways(dir, sections, overrides, problems);
+    let token_files: Vec<PathBuf> = sections
+        .iter()
+        .map(|section| token_file(dir, section, overrides))
+        .collect();
     let dotenv = file
         .env_file
         .as_deref()
@@ -209,17 +316,16 @@ fn build(
         dir,
         file.agent,
         dotenv.unwrap_or_default(),
-        &token_file,
+        &token_files,
         problems,
     );
     let sessions = sessions(dir, &file.sessions, problems);
     let log = log(&file.log, problems);
-    let metadata = metadata(file.metadata, problems);
+    let metadata = metadata("metadata", file.metadata, problems);
     Some(Config {
         path: path.to_path_buf(),
         dir: dir.to_path_buf(),
-        gateways: gateway?,
-        token_file,
+        gateways: gateways?,
         agent: agent?,
         sessions: sessions?,
         log: log?,
@@ -229,12 +335,12 @@ fn build(
 
 /// Only checks that the table can travel as JSON. A date cannot: it would arrive as whatever
 /// shape the TOML library gives it, which no gateway expects, so it has to be written as text.
-fn metadata(table: toml::Table, problems: &mut Problems) -> Option<Metadata> {
+fn metadata(field: &str, table: toml::Table, problems: &mut Problems) -> Option<Metadata> {
     let before = problems.0.len();
     let metadata = table
         .into_iter()
         .map(|(key, value)| {
-            let json = json(&format!("metadata.{key}"), value, problems);
+            let json = json(&format!("{field}.{key}"), value, problems);
             (key, json)
         })
         .collect();
@@ -279,14 +385,93 @@ fn json(field: &str, value: toml::Value, problems: &mut Problems) -> serde_json:
     }
 }
 
-fn gateway(
-    section: &file::Gateway,
+/// A name is what sessions and logs record, so it must survive in a file name and a log line.
+fn is_valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+}
+
+fn gateways(
+    dir: &Path,
+    sections: &[Section],
     overrides: &Overrides,
     problems: &mut Problems,
-) -> Option<Vec<String>> {
+) -> Option<Vec<Gateway>> {
+    if sections.is_empty() {
+        return None;
+    }
+    let mut gateways = Some(Vec::with_capacity(sections.len()));
+    let mut names: Vec<&str> = Vec::new();
+    for section in sections {
+        let name = match section.name.as_deref().map(str::trim) {
+            Some(name) if is_valid_name(name) => {
+                if names.contains(&name) {
+                    problems.add(
+                        &section.field("name"),
+                        format!("{name:?} is already the name of another gateway"),
+                    );
+                }
+                names.push(name);
+                Some(name.to_owned())
+            }
+            Some(name) => {
+                problems.add(
+                    &section.field("name"),
+                    format!("{name:?} must be lower-case letters, digits, `_` and `-`"),
+                );
+                None
+            }
+            None => {
+                problems.add(
+                    &section.field("name"),
+                    "is not set; name the gateway, such as \"work\"",
+                );
+                None
+            }
+        };
+        let urls = urls(section, overrides, problems);
+        let metadata = metadata(
+            &section.field("metadata"),
+            section.metadata.clone(),
+            problems,
+        );
+        match (name, urls, metadata, &mut gateways) {
+            (Some(name), Some(urls), Some(metadata), Some(gateways)) => gateways.push(Gateway {
+                name,
+                urls,
+                token_file: token_file(dir, section, overrides),
+                primary: section.primary == Some(true),
+                metadata,
+            }),
+            _ => gateways = None,
+        }
+    }
+    let primaries = sections
+        .iter()
+        .filter(|section| section.primary == Some(true))
+        .count();
+    if primaries > 1 {
+        problems.add(
+            "gateways",
+            "marks more than one gateway primary; at most one receives sign-ins raised outside a session",
+        );
+        return None;
+    }
+    let mut gateways = gateways?;
+    if primaries == 0
+        && let Some(first) = gateways.first_mut()
+    {
+        first.primary = true;
+    }
+    Some(gateways)
+}
+
+fn urls(section: &Section, overrides: &Overrides, problems: &mut Problems) -> Option<Vec<String>> {
     if overrides.insecure_skip_verify || section.insecure_skip_verify == Some(true) {
         problems.add(
-            "gateway.insecure_skip_verify",
+            &section.field("insecure_skip_verify"),
             "is not supported: the RAX dialler always verifies the gateway's TLS certificate",
         );
     }
@@ -298,7 +483,7 @@ fn gateway(
     let urls: Vec<&String> = urls.iter().filter(|url| is_configured(url)).collect();
     if urls.is_empty() {
         problems.add(
-            "gateway.urls",
+            &section.field("urls"),
             "is not set; give the gateway address, such as [\"wss://gateway.example.com\"]",
         );
         return None;
@@ -314,7 +499,7 @@ fn gateway(
             Err(err) => {
                 let reason = err.to_string();
                 let reason = reason.strip_prefix("rax: ").unwrap_or(&reason);
-                problems.add(&format!("gateway.urls[{index}]"), reason);
+                problems.add(&format!("{}[{index}]", section.field("urls")), reason);
                 resolved = None;
             }
         }
@@ -327,12 +512,12 @@ enum Kind {
     Acp,
 }
 
-/// The box the agent runs in. Its own credential is always denied, whatever the profile lists,
-/// because a node that can read its token can pretend to be this machine.
+/// The box the agent runs in. Its own credentials are always denied, whatever the profile lists,
+/// because a node that can read a token can pretend to be this machine to that gateway.
 fn sandbox(
     dir: &Path,
     section: file::Sandbox,
-    token_file: &Path,
+    token_files: &[PathBuf],
     problems: &mut Problems,
 ) -> SandboxConfig {
     let mode = match section.mode.as_deref().map(str::trim) {
@@ -362,7 +547,7 @@ fn sandbox(
         mode,
         write: paths(section.write),
         deny_read: section.deny_read.map(paths),
-        node_token: Some(token_file.to_path_buf()),
+        node_tokens: token_files.to_vec(),
     }
 }
 
@@ -373,7 +558,7 @@ fn agent(
     dir: &Path,
     section: file::Agent,
     dotenv: BTreeMap<String, String>,
-    token_file: &Path,
+    token_files: &[PathBuf],
     problems: &mut Problems,
 ) -> Option<AgentConfig> {
     let kind = match section.kind.as_deref().map(str::trim) {
@@ -483,7 +668,7 @@ fn agent(
                     idle_timeout(idle, durations.problems).unwrap_or(config.idle_timeout);
             }
             config.command = command?;
-            config.sandbox = sandbox(dir, section.sandbox, token_file, problems);
+            config.sandbox = sandbox(dir, section.sandbox, token_files, problems);
             AgentConfig::ClaudeCode(Box::new(config))
         }
         Kind::Acp => {
