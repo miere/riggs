@@ -86,6 +86,9 @@ pub enum Step {
     CallTool {
         id: String,
         name: String,
+        /// The SDK server the tool belongs to; Riggs' own unless a gateway lent it.
+        #[serde(default = "riggs")]
+        server: String,
         arguments: Value,
         #[serde(rename = "as")]
         var: String,
@@ -110,4 +113,8 @@ pub enum Step {
 
 fn one() -> u64 {
     1
+}
+
+fn riggs() -> String {
+    "riggs".to_owned()
 }

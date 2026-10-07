@@ -7,7 +7,7 @@ use rax::event::StopReason;
 use rax::id::{RequestId, SessionId};
 use rax::interaction::SignInSettled;
 use rax::session::{PromptCapabilities, SessionDurability, ToolGate as GateMode};
-use rax::tool::{PlanEntry, ToolCallUpdate};
+use rax::tool::{PlanEntry, ToolCallUpdate, ToolGroup};
 use rax::{ErrorKind, Open, Unhandled};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncRead;
@@ -65,6 +65,10 @@ pub struct BackendRecord(pub serde_json::Value);
 pub struct NewSession<'a> {
     pub key: &'a SessionKey,
     pub context: &'a [Open<ContentBlock>],
+    /// The gateway tools this session sees for its whole life, already checked for a valid,
+    /// unique namespace. A backend that cannot publish one opens the session without it and lists
+    /// it in `Opened::unhandled`.
+    pub tool_groups: &'a [ToolGroup],
 }
 
 pub struct Opened {

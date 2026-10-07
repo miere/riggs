@@ -7,6 +7,7 @@ use rax::content::ContentBlock;
 use rax::event::StopReason;
 use rax::open::{Subject, UnhandledReason};
 use rax::session::{GatewayCapabilities, NewSession, SessionRef};
+use rax::tool::ToolGroup;
 use rax::{ErrorKind, Event, GatewayCall, GatewayReply};
 use riggs_node::BackendEvent;
 use support::*;
@@ -56,6 +57,7 @@ async fn context_the_agent_cannot_follow_is_reported_by_index() {
             ContentBlock::link("chat://w/c/t", "thread").into(),
             ContentBlock::link("file:///tmp/x", "file").into(),
         ],
+        ..Default::default()
     });
     let Ok(GatewayReply::NewSession(created)) = call(link, request).await else {
         panic!("expected session.new")
@@ -210,5 +212,44 @@ async fn a_gateway_that_stops_reading_parks_the_agent_instead_of_buffering() {
         Event::Complete { .. }
     ));
     ended(&mut events).await;
+    h.node.shut_down().await;
+}
+
+/// The node declares it takes tools per session, hands the backend every group it can publish,
+/// and refuses by name a namespace that cannot be a tool name or was already given.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_opens_with_the_groups_it_can_publish() {
+    let fake = Fake::new();
+    let h = harness(fake.clone(), ephemeral()).await;
+    let link = &h.gateway.link;
+    let group = |namespace: &str| ToolGroup {
+        namespace: namespace.to_owned(),
+        tools: vec![],
+    };
+    let request = GatewayCall::NewSession(NewSession {
+        tool_groups: vec![
+            group("slack"),
+            group("Open-Knowledge"),
+            group("openknowledge_x7k2"),
+            group("slack"),
+        ],
+        ..Default::default()
+    });
+    let Ok(GatewayReply::NewSession(created)) = call(link, request).await else {
+        panic!("expected session.new")
+    };
+    assert_eq!(fake.last_groups(), ["slack", "openknowledge_x7k2"]);
+    let refused: Vec<_> = created.unhandled.iter().map(|u| &u.subject).collect();
+    assert_eq!(
+        refused,
+        [
+            &Subject::ToolGroup {
+                namespace: "Open-Knowledge".into()
+            },
+            &Subject::ToolGroup {
+                namespace: "slack".into()
+            },
+        ]
+    );
     h.node.shut_down().await;
 }

@@ -1,35 +1,30 @@
 use rax::ToolCall;
 use rax::id::ToolCallId;
-use rax::tool::{DeniedBy, ToolCatalogue, ToolKind};
+use rax::tool::{DeniedBy, ToolGroup, ToolKind};
 use serde_json::Value;
 
 use crate::wire::MCP_SERVER;
 
 const TITLE_KEYS: &[&str] = &["command", "file_path", "path", "pattern", "url"];
 
-pub(crate) fn call(
-    id: &str,
-    name: &str,
-    input: Value,
-    gateway: Option<&ToolCatalogue>,
-) -> ToolCall {
+pub(crate) fn call(id: &str, name: &str, input: Value, groups: &[ToolGroup]) -> ToolCall {
     ToolCall {
         id: ToolCallId(id.to_owned()),
         name: name.to_owned(),
         title: Some(title(&input)),
-        kind: kind(name, gateway),
+        kind: kind(name, groups),
         input: Some(input),
         content: Vec::new(),
     }
 }
 
-/// A catalogued tool's kind comes from the gateway that published it: only the gateway knows
+/// A lent tool's kind comes from the group the gateway lent it in: only the gateway knows
 /// whether its tool reads or destroys, and guessing from the name would mislabel every card.
-pub(crate) fn kind(name: &str, gateway: Option<&ToolCatalogue>) -> ToolKind {
-    if let Some(catalogue) = gateway {
-        let prefix = format!("mcp__{}__", catalogue.namespace);
+pub(crate) fn kind(name: &str, groups: &[ToolGroup]) -> ToolKind {
+    for group in groups {
+        let prefix = format!("mcp__{}__", group.namespace);
         if let Some(bare) = name.strip_prefix(&prefix)
-            && let Some(tool) = catalogue.tools.iter().find(|tool| tool.name == bare)
+            && let Some(tool) = group.tools.iter().find(|tool| tool.name == bare)
         {
             return tool.kind;
         }
@@ -91,42 +86,46 @@ mod tests {
             "toolu_1",
             "Bash",
             json!({"command": "ls", "description": "list"}),
-            None,
+            &[],
         );
         assert_eq!(
             (bash.name.as_str(), bash.kind, bash.title.as_deref()),
             ("Bash", ToolKind::Execute, Some("ls"))
         );
-        let ask = call("toolu_2", "mcp__riggs__ask", json!({"questions": []}), None);
+        let ask = call("toolu_2", "mcp__riggs__ask", json!({"questions": []}), &[]);
         assert_eq!(ask.kind, ToolKind::Think);
         assert_eq!(ask.title.as_deref(), Some(r#"{"questions":[]}"#));
-        assert_eq!(kind("mcp__riggs__attach", None), ToolKind::Other);
-        assert_eq!(kind("Grep", None), ToolKind::Search);
+        assert_eq!(kind("mcp__riggs__attach", &[]), ToolKind::Other);
+        assert_eq!(kind("Grep", &[]), ToolKind::Search);
     }
 
-    /// The gateway names the kind of its own tools. Without the catalogue the same call lands on
-    /// `Other`, which is what would mislabel every approval card.
+    /// The gateway names the kind of its own tools. Outside the session's groups the same call
+    /// lands on `Other`, which is what would mislabel every approval card.
     #[test]
-    fn a_catalogued_tool_takes_its_kind_from_the_gateway() {
-        let catalogue = ToolCatalogue {
-            namespace: "murtaugh".to_owned(),
+    fn a_lent_tool_takes_its_kind_from_its_group() {
+        let group = |namespace: &str, name: &str, kind: ToolKind| ToolGroup {
+            namespace: namespace.to_owned(),
             tools: vec![rax::tool::ToolDef {
-                name: "slack_read_message".to_owned(),
-                description: "Read a Slack message.".to_owned(),
+                name: name.to_owned(),
+                description: String::new(),
                 input_schema: None,
-                kind: ToolKind::Read,
+                kind,
             }],
         };
-        let name = "mcp__murtaugh__slack_read_message";
-        assert_eq!(kind(name, Some(&catalogue)), ToolKind::Read);
-        assert_eq!(kind(name, None), ToolKind::Other);
-        // A name under the namespace that the catalogue does not list is not guessed at either.
+        let groups = [
+            group("slack", "read_message", ToolKind::Read),
+            group("openknowledge_x7k2", "write", ToolKind::Edit),
+        ];
+        assert_eq!(kind("mcp__slack__read_message", &groups), ToolKind::Read);
         assert_eq!(
-            kind("mcp__murtaugh__invented", Some(&catalogue)),
-            ToolKind::Other
+            kind("mcp__openknowledge_x7k2__write", &groups),
+            ToolKind::Edit
         );
-        // Another gateway's namespace never matches this catalogue.
-        assert_eq!(kind("mcp__voice__speak", Some(&catalogue)), ToolKind::Other);
+        assert_eq!(kind("mcp__slack__read_message", &[]), ToolKind::Other);
+        // A name under the namespace that the group does not list is not guessed at either.
+        assert_eq!(kind("mcp__slack__invented", &groups), ToolKind::Other);
+        // A group the session was not opened with never matches.
+        assert_eq!(kind("mcp__voice__speak", &groups), ToolKind::Other);
     }
 
     #[test]

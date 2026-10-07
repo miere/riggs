@@ -5,7 +5,9 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use async_trait::async_trait;
 use rax::content::ContentBlock;
+use rax::open::{Subject, UnhandledReason};
 use rax::session::{SessionDurability, ToolGate as GateMode};
+use rax::tool::ToolGroup;
 use rax::{ErrorKind, Open, Unhandled};
 use riggs_node::{
     Backend, BackendError, BackendInfo, BackendRecord, HostHandles, NewSession, Opened, Restore,
@@ -188,7 +190,8 @@ impl Backend for AcpBackend {
             .await
         };
         let (agent, acp_session_id) = opened.await.map_err(BackendError::new)?;
-        let (context, unhandled) = map::prompt_blocks(request.context, &agent.info.prompt);
+        let (context, mut unhandled) = map::prompt_blocks(request.context, &agent.info.prompt);
+        unhandled.extend(request.tool_groups.iter().map(unpublished));
         let record = Record {
             acp_session_id,
             load_session: agent.info.load_session,
@@ -279,5 +282,17 @@ impl Backend for AcpBackend {
             .filter_map(|session| lock(&session.live).take())
             .map(|agent| async move { agent.close().await });
         futures::future::join_all(closing).await;
+    }
+}
+
+/// An ACP agent is handed no tool servers by this node, so a gateway's group never reaches it. The
+/// session still opens, and the gateway hears which groups the agent will not see.
+fn unpublished(group: &ToolGroup) -> Unhandled {
+    Unhandled {
+        subject: Subject::ToolGroup {
+            namespace: group.namespace.clone(),
+        },
+        reason: UnhandledReason::UnsupportedType,
+        message: Some("this node's ACP agent cannot be lent gateway tools".to_owned()),
     }
 }

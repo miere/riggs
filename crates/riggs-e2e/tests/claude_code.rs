@@ -8,9 +8,10 @@ use std::time::Duration;
 use rax::content::ContentBlock;
 use rax::event::{BackgroundEvent, StopReason};
 use rax::interaction::{DisplayAnswer, DisplayOutcome, PlanChoice};
-use rax::session::{SessionDurability, ToolGate};
-use rax::tool::{DeniedBy, ToolCallStatus, ToolKind};
-use rax::{Decision, ErrorKind, Event, Open};
+use rax::open::Subject;
+use rax::session::{NewSession, SessionDurability, ToolGate};
+use rax::tool::{DeniedBy, ToolCallStatus, ToolDef, ToolGroup, ToolKind, ToolOutcome};
+use rax::{Decision, ErrorKind, Event, NodeCall, Open};
 use rax_sim::{LinkChange, Match, Transfer, VerdictPolicy};
 use serde_json::{Value, json};
 use support::*;
@@ -1077,5 +1078,164 @@ async fn live_claude_answers_a_trivial_prompt() {
     turn.until_end().await.unwrap();
     let said = messages(turn.seen()).join(" ").to_lowercase();
     assert!(said.contains("pong"), "{:?}", turn.seen());
+    world.stop_node().await;
+}
+
+/// A session announces one tool server per group it was opened with, leaves out a group named like
+/// a server the machine already has, and relays a call to the gateway under the group's namespace.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_publishes_and_calls_the_tool_groups_it_was_opened_with() {
+    let mut world = World::build(
+        "gateway-tools",
+        |config| {
+            // Keeps the machine's own Claude config out of the test.
+            let empty = config.workdir.with_file_name("state");
+            let empty = empty.display().to_string();
+            config.env.insert("CLAUDE_CONFIG_DIR".to_owned(), empty);
+        },
+        Default::default(),
+    )
+    .await;
+    let project = json!({"mcpServers": {"github": {"command": "gh-mcp"}}});
+    std::fs::write(world.work().join(".mcp.json"), project.to_string()).unwrap();
+    let node = world.start_node().await;
+    let group = |namespace: &str, name: &str| ToolGroup {
+        namespace: namespace.to_owned(),
+        tools: vec![ToolDef {
+            name: name.to_owned(),
+            description: format!("{name} from {namespace}"),
+            input_schema: Some(json!({"type": "object"})),
+            kind: ToolKind::Read,
+        }],
+    };
+    let created = node
+        .open_session(NewSession {
+            tool_groups: vec![
+                group("slack", "read_message"),
+                group("github", "issues"),
+                group("riggs", "shadow"),
+            ],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let refused: Vec<_> = created.unhandled.iter().map(|u| &u.subject).collect();
+    assert_eq!(
+        refused,
+        [
+            &Subject::ToolGroup {
+                namespace: "github".into()
+            },
+            &Subject::ToolGroup {
+                namespace: "riggs".into()
+            },
+        ]
+    );
+    let session = created.session_id;
+    let mut turn = node.prompt(session.clone(), text("read it")).await.unwrap();
+    let Event::ToolCall { tool_call } = turn
+        .expect(Match::tool_call("mcp__slack__read_message"))
+        .await
+        .unwrap()
+    else {
+        panic!("expected a tool call")
+    };
+    // The kind is the one the gateway gave the tool, not a guess from its name.
+    assert_eq!(tool_call.kind, ToolKind::Read);
+    turn.verdict(tool_call.id, Decision::Allow).await.unwrap();
+
+    // Credential health reports may arrive first; they are answered and set aside.
+    let request = loop {
+        let request = node.next_node_call().await.unwrap();
+        if matches!(request.call, NodeCall::CallTool(_)) {
+            break request;
+        }
+        request.reply().await.unwrap();
+    };
+    let NodeCall::CallTool(call) = &request.call else {
+        unreachable!()
+    };
+    assert_eq!(call.session_id, session);
+    assert_eq!(call.namespace.as_deref(), Some("slack"));
+    assert_eq!(call.name, "read_message");
+    request
+        .answer_tool(ToolOutcome {
+            content: "Alice said the build is green.".into(),
+            is_error: false,
+        })
+        .await
+        .unwrap();
+    turn.expect(Match::message_contains("the build is green"))
+        .await
+        .unwrap();
+    turn.until_end().await.unwrap();
+
+    let initialize = world
+        .stdin()
+        .into_iter()
+        .find(|frame| frame["request"]["subtype"] == "initialize")
+        .unwrap();
+    assert_eq!(
+        initialize["request"]["sdkMcpServers"],
+        json!(["riggs", "slack"])
+    );
+    let lent: Vec<Value> = world
+        .events("mcp_tools")
+        .into_iter()
+        .filter(|event| event["server"] == "slack")
+        .collect();
+    assert_eq!(lent[0]["tools"], json!(["read_message"]));
+    assert!(world.events("violation").is_empty());
+    world.stop_node().await;
+}
+
+/// The groups are part of the session, so a node that restarts resumes the agent with the same
+/// tool servers and the agent keeps its tool names.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resumed_session_announces_the_groups_it_was_opened_with() {
+    let mut world = World::new("resume").await;
+    let node = world.start_node().await;
+    let slack = ToolGroup {
+        namespace: "slack".into(),
+        tools: vec![],
+    };
+    let session = node
+        .open_session(NewSession {
+            tool_groups: vec![slack],
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .session_id;
+    let mut turn = node
+        .prompt(session.clone(), text("remember 42"))
+        .await
+        .unwrap();
+    turn.until_end().await.unwrap();
+    world.stop_node().await;
+
+    let node = world.start_node().await;
+    let mut turn = node
+        .prompt(session.clone(), text("what did I say?"))
+        .await
+        .unwrap();
+    turn.expect(Match::message_contains("recalled: remember 42"))
+        .await
+        .unwrap();
+    turn.until_end().await.unwrap();
+    assert_eq!(
+        world.argv(1)[world.argv(1).len() - 2..],
+        ["--resume", session.0.as_str()]
+    );
+    let announced: Vec<Value> = world
+        .stdin()
+        .into_iter()
+        .filter(|frame| frame["request"]["subtype"] == "initialize")
+        .map(|frame| frame["request"]["sdkMcpServers"].clone())
+        .collect();
+    assert_eq!(
+        announced,
+        [json!(["riggs", "slack"]), json!(["riggs", "slack"])]
+    );
     world.stop_node().await;
 }

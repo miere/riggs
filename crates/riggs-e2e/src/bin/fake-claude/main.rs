@@ -147,6 +147,17 @@ async fn main() {
         .is_some_and(|servers| servers.iter().any(|server| server == "riggs"));
     if mcp {
         fake.mcp_handshake(&init_id).await;
+        let lent = request["sdkMcpServers"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        for server in lent
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|s| *s != "riggs")
+        {
+            fake.list_lent(server).await;
+        }
     } else {
         fake.emit(shapes::control_success(
             &init_id,
@@ -420,10 +431,44 @@ impl Fake {
     }
 
     async fn mcp_call(&self, message: Value) -> Value {
+        self.mcp_call_to("riggs", message).await
+    }
+
+    async fn mcp_call_to(&self, server: &str, message: Value) -> Value {
         let request_id = format!("mcp-{:08x}-{}", self.pid, self.next());
         let answered = self.wait_for(&request_id);
-        self.emit(shapes::mcp_request(&request_id, message)).await;
+        self.emit(shapes::mcp_request(&request_id, server, message))
+            .await;
         answered.await.unwrap_or(Value::Null)
+    }
+
+    /// What Claude Code does with every other SDK server it was given: initialize it and list its
+    /// tools, logged under the server's name.
+    async fn list_lent(&self, server: &str) {
+        let initialize = json!({
+            "method": "initialize",
+            "params": {"protocolVersion": "2025-11-25", "capabilities": {}},
+            "jsonrpc": "2.0", "id": 0,
+        });
+        let answer = self.mcp_call_to(server, initialize).await;
+        let named = answer.pointer("/response/mcp_response/result/serverInfo/name");
+        if named != Some(&json!(server)) {
+            self.log(json!({"event": "violation", "detail": "lent server initialize failed", "answer": answer}));
+        }
+        let listed = self
+            .mcp_call_to(
+                server,
+                json!({"method": "tools/list", "jsonrpc": "2.0", "id": 1}),
+            )
+            .await;
+        let tools: Vec<String> = listed
+            .pointer("/response/mcp_response/result/tools")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
+            .collect();
+        self.log(json!({"event": "mcp_tools", "server": server, "tools": tools}));
     }
 
     async fn mcp_handshake(&self, init_id: &str) {
@@ -537,9 +582,10 @@ impl Fake {
             Step::CallTool {
                 id,
                 name,
+                server,
                 arguments,
                 var,
-            } => self.call_tool(id, name, arguments, var).await,
+            } => self.call_tool(id, &server, name, arguments, var).await,
             Step::ToolResult {
                 id,
                 content,
@@ -700,7 +746,14 @@ impl Fake {
         run(self.clone(), deny).await
     }
 
-    async fn call_tool(&self, id: String, name: String, arguments: Value, var: String) {
+    async fn call_tool(
+        &self,
+        id: String,
+        server: &str,
+        name: String,
+        arguments: Value,
+        var: String,
+    ) {
         let number = self.next();
         let message = json!({
             "method": "tools/call",
@@ -710,7 +763,7 @@ impl Fake {
             },
             "jsonrpc": "2.0", "id": number,
         });
-        let answer = self.mcp_call(message).await;
+        let answer = self.mcp_call_to(server, message).await;
         let result = answer
             .pointer("/response/mcp_response/result")
             .cloned()
