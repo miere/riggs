@@ -10,7 +10,7 @@ use crate::store::{Record, SessionStore, StoreError};
 
 pub(crate) enum Slot {
     Unloaded,
-    Live(Record),
+    Live(Box<Record>),
     Gone,
 }
 
@@ -70,6 +70,26 @@ impl Sessions {
         }
     }
 
+    /// The gateway the session's record names: `Some(None)` for a record that predates the
+    /// field, `None` for no record at all.
+    pub(crate) async fn recorded_owner(&self, key: &SessionKey) -> Option<Option<String>> {
+        let slot = lock(&self.slots).get(key).cloned();
+        if let Some(slot) = slot
+            && let Slot::Live(record) = &*slot.lock().await
+        {
+            return Some(record.gateway.clone());
+        }
+        match &self.store {
+            Some(store) => store
+                .load(*key)
+                .await
+                .ok()
+                .flatten()
+                .map(|record| record.gateway),
+            None => None,
+        }
+    }
+
     pub(crate) async fn create(
         &self,
         key: SessionKey,
@@ -79,7 +99,7 @@ impl Sessions {
         if let (Some(store), SessionDurability::Durable) = (&self.store, self.durability(info)) {
             store.save(key, record.clone()).await?;
         }
-        let slot = Arc::new(tokio::sync::Mutex::new(Slot::Live(record)));
+        let slot = Arc::new(tokio::sync::Mutex::new(Slot::Live(Box::new(record))));
         lock(&self.slots).insert(key, slot);
         Ok(())
     }
@@ -100,7 +120,7 @@ impl Sessions {
         let restored = self.restore(key, backend, info).await;
         match restored {
             Ok(Some(record)) => {
-                *guard = Slot::Live(record);
+                *guard = Slot::Live(Box::new(record));
                 Ok(guard)
             }
             Ok(None) => {

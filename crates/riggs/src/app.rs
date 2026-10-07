@@ -47,8 +47,16 @@ fn run(flag: Option<PathBuf>, alias: &str, args: RunArgs) -> Result<(), String> 
     let watched = overrides.clone();
     let config = config::load(&path, &overrides).map_err(|err| err.to_string())?;
     logging::init(&config.log);
-    let token = token::read(&config.token_file)
-        .map_err(|err| format!("this node has no usable credential: {err}"))?;
+    let mut tokens = Vec::with_capacity(config.gateways.len());
+    for gateway in &config.gateways {
+        let token = token::read(&gateway.token_file).map_err(|err| {
+            format!(
+                "this node has no usable credential for gateway {}: {err}",
+                gateway.name
+            )
+        })?;
+        tokens.push(token);
+    }
     print_banner(&config);
     let _lock = lock::acquire(&config.dir).map_err(|err| err.to_string())?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -56,32 +64,51 @@ fn run(flag: Option<PathBuf>, alias: &str, args: RunArgs) -> Result<(), String> 
         .build()
         .map_err(|err| format!("cannot start the async runtime: {err}"))?;
     runtime.block_on(async move {
-        let server = agent::server(
-            &config.agent,
-            config.sessions.clone(),
-            config.dir.join("files"),
-            config.metadata.clone(),
-        )
-        .map_err(|err| err.to_string())?;
+        let server = agent::server(&config, config.dir.join("files"))
+            .map_err(|err| err.to_string())?;
         tokio::spawn(
             Watch {
                 path: config.path.clone(),
                 overrides: watched,
                 server: server.clone(),
                 metadata: config.metadata.clone(),
+                gateway_metadata: config.gateway_metadata(),
             }
             .run(),
         );
         signals::install(server.shutdown_token())
             .map_err(|err| format!("cannot install signal handlers: {err}"))?;
-        tracing::info!(gateways = ?config.gateways, agent = %config.agent.describe(), "riggs {VERSION} starting");
-        let dialer = Dialer {
-            server,
-            endpoints: config.gateways.clone(),
-            token_file: config.token_file.clone(),
-        };
-        dialer.run(token).await.map_err(|err| err.to_string())?;
+        let names: Vec<&str> = config.gateways.iter().map(|gateway| gateway.name.as_str()).collect();
+        tracing::info!(gateways = ?names, agent = %config.agent.describe(), "riggs {VERSION} starting");
+        let mut dialers = tokio::task::JoinSet::new();
+        for (gateway, token) in config.gateways.iter().zip(tokens) {
+            let dialer = Dialer {
+                server: server.clone(),
+                gateway: gateway.name.clone(),
+                endpoints: gateway.urls.clone(),
+                token_file: gateway.token_file.clone(),
+            };
+            let name = gateway.name.clone();
+            dialers.spawn(async move { (name, dialer.run(token).await) });
+        }
+        // A gateway that refuses for good ends its own link; the node stops only when none is
+        // left to serve, or on shutdown.
+        let mut refusals = Vec::new();
+        while let Some(joined) = dialers.join_next().await {
+            match joined {
+                Ok((_, Ok(()))) => {}
+                Ok((name, Err(err))) => {
+                    tracing::error!(gateway = %name, error = %err, "stopped dialling this gateway; still serving the others");
+                    refusals.push(format!("gateway {name}: {err}"));
+                }
+                Err(err) => refusals.push(format!("a gateway's dialler failed: {err}")),
+            }
+        }
+        server.stop().await;
         tracing::info!("riggs stopped");
+        if refusals.len() == config.gateways.len() {
+            return Err(refusals.join("\n"));
+        }
         Ok(())
     })
 }
@@ -93,8 +120,23 @@ fn print_banner(config: &Config) {
     };
     println!("riggs {VERSION}");
     println!("config: {}", config.path.display());
-    println!("node credential: {}", config.token_file.display());
-    println!("gateway: {}", config.gateways.join(", then "));
+    for gateway in &config.gateways {
+        let primary = if gateway.primary && config.gateways.len() > 1 {
+            " (primary)"
+        } else {
+            ""
+        };
+        println!(
+            "gateway {}{primary}: {}",
+            gateway.name,
+            gateway.urls.join(", then ")
+        );
+        println!("  credential: {}", gateway.token_file.display());
+        if !gateway.metadata.is_empty() {
+            let keys: Vec<&str> = gateway.metadata.keys().map(String::as_str).collect();
+            println!("  metadata: {}", keys.join(", "));
+        }
+    }
     println!("agent: {}", config.agent.describe());
     println!("sessions: {sessions}");
     println!("tool_gate: {}", config.agent.tool_gate());
@@ -108,12 +150,22 @@ fn validate(flag: Option<PathBuf>, alias: &str) -> Result<(), String> {
     let path = config_path(flag, alias)?;
     match config::load(&path, &Overrides::default()) {
         Ok(config) => {
-            token::read(&config.token_file).map_err(|err| {
-                format!(
-                    "{} has problems:\n  - gateway.token_file: {err}",
-                    path.display()
-                )
-            })?;
+            let unreadable: Vec<String> = config
+                .gateways
+                .iter()
+                .filter_map(|gateway| {
+                    token::read(&gateway.token_file)
+                        .err()
+                        .map(|err| format!("  - gateway {} token_file: {err}", gateway.name))
+                })
+                .collect();
+            if !unreadable.is_empty() {
+                return Err(format!(
+                    "{} has problems:\n{}",
+                    path.display(),
+                    unreadable.join("\n")
+                ));
+            }
             println!("{} is valid", config.path.display());
             print_banner(&config);
             Ok(())
@@ -121,16 +173,18 @@ fn validate(flag: Option<PathBuf>, alias: &str) -> Result<(), String> {
         Err(ConfigError::Invalid {
             path,
             problems,
-            token_file,
+            token_files,
         }) => {
             let mut message = ConfigError::Invalid {
                 path,
                 problems,
-                token_file: token_file.clone(),
+                token_files: token_files.clone(),
             }
             .to_string();
-            if let Err(err) = token::read(&token_file) {
-                message.push_str(&format!("\n  - gateway.token_file: {err}"));
+            for (field, token_file) in &token_files {
+                if let Err(err) = token::read(token_file) {
+                    message.push_str(&format!("\n  - {field}: {err}"));
+                }
             }
             Err(message)
         }

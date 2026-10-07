@@ -7,8 +7,9 @@ use serde::Deserialize;
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct File {
-    #[serde(default)]
-    pub gateway: Gateway,
+    /// The single-gateway form, read as one `[[gateways]]` entry named `default`.
+    pub gateway: Option<Gateway>,
+    pub gateways: Option<Vec<NamedGateway>>,
     #[serde(default)]
     pub agent: Agent,
     #[serde(default)]
@@ -27,6 +28,19 @@ pub struct Gateway {
     pub urls: Option<Vec<String>>,
     pub token_file: Option<String>,
     pub insecure_skip_verify: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NamedGateway {
+    pub name: Option<String>,
+    pub urls: Option<Vec<String>>,
+    pub token_file: Option<String>,
+    pub primary: Option<bool>,
+    pub insecure_skip_verify: Option<bool>,
+    /// Merged over the top-level `[metadata]` for this gateway only.
+    #[serde(default)]
+    pub metadata: toml::Table,
 }
 
 #[derive(Debug, Default, Deserialize)]

@@ -16,7 +16,10 @@ use tokio::time::Instant;
 use crate::backend::{BackendRecord, SessionKey};
 use crate::state::lock;
 
-const RECORD_VERSION: u32 = 1;
+/// 2 adds `gateway`. A version 1 record belongs to the primary gateway, and is written back as 2
+/// the next time it is saved.
+const RECORD_VERSION: u32 = 2;
+const RECORD_VERSIONS: [u32; 2] = [1, RECORD_VERSION];
 const LOCK_FILE: &str = "riggs.lock";
 /// A child this process starts holds a copy of the lock file from the fork until it execs, so a
 /// single try can be refused while no other node is serving the store.
@@ -56,11 +59,16 @@ pub(crate) struct Record {
     pub(crate) last_used_at: OffsetDateTime,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) context: Vec<Open<ContentBlock>>,
+    /// The gateway that opened the session. Only it may drive the session. Absent in a version 1
+    /// record, which belongs to the primary gateway.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) gateway: Option<String>,
 }
 
 impl Record {
     pub(crate) fn new(
         key: &SessionKey,
+        gateway: String,
         backend: String,
         backend_session: BackendRecord,
         context: Vec<Open<ContentBlock>>,
@@ -74,6 +82,7 @@ impl Record {
             created_at: now,
             last_used_at: now,
             context,
+            gateway: Some(gateway),
         }
     }
 }
@@ -240,11 +249,12 @@ impl Inner {
             path: path.clone(),
             reason,
         };
-        let record: Record =
+        let mut record: Record =
             serde_json::from_slice(&bytes).map_err(|err| corrupt(err.to_string()))?;
-        if record.v != RECORD_VERSION {
+        if !RECORD_VERSIONS.contains(&record.v) {
             return Err(corrupt(format!("unknown record version {}", record.v)));
         }
+        record.v = RECORD_VERSION;
         if record.session_id != key.session_id() {
             return Err(corrupt(format!(
                 "the record names session {}",

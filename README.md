@@ -114,8 +114,8 @@ without looking inside. The example tells Murtaugh who besides you may talk to t
 Riggs rereads it every couple of seconds while it runs and sends the gateway any change, so
 tightening who is let in needs no restart; any other edit to the file still does. A key the
 gateway does not know is logged as a warning. A key it owns but cannot accept makes it end the
-link, and Riggs then exits with the gateway's reason rather than redial into the same refusal.
-Dates cannot travel this way, so quote one to send it as text.
+link, and Riggs then stops dialling that gateway with its reason rather than redial into the same
+refusal. Dates cannot travel this way, so quote one to send it as text.
 
 An ACP agent uses `kind = "acp"` and may also set `interruptible`, `startup_timeout`,
 `cancel_grace_period` and `permission_timeout`. An optional top-level `env_file = ".env"` adds
@@ -135,7 +135,37 @@ riggs validate
 riggs run
 ```
 
-`riggs validate` checks the config and the token file without connecting. `riggs run` prints a
+### Several gateways
+
+One node can keep a link to several gateways at once, such as your own Murtaugh and your team's.
+List them as `[[gateways]]` instead of `[gateway]`; having both is an error.
+
+```toml
+[[gateways]]
+name = "carmen"                         # unique, lower-case letters, digits, `_` and `-`
+urls = ["wss://carmen.example.com"]     # one cluster: the first that answers, the rest fall back
+token_file = "carmen.token"
+primary = true                          # receives sign-ins raised outside any conversation
+
+[gateways.metadata]                     # merged over the top-level [metadata], for this gateway only
+murtaugh_access = { always_allow = true }
+
+[[gateways]]
+name = "work"
+urls = ["wss://murtaugh.work.example"]
+token_file = "work.token"
+```
+
+Each gateway gets its own token, its own redials and its own refusals: one that rejects the token,
+refuses the node or rejects its metadata stops only its own link, and the node keeps serving the
+rest. A conversation belongs to the gateway that started it, which is the only one that can
+prompt, cancel or close it, and its tool calls and background notices go back there. Credential
+health goes to every gateway, and a sign-in raised outside any conversation goes to the primary
+one, the first in the list unless another says `primary = true`. Every token file must be readable
+at start, and the agent can read none of them. A `[gateway]` table is read as one entry named
+`default`, and `--gateway` with `--token-file` still describe one gateway, replacing the list.
+
+`riggs validate` checks the config and the token files without connecting. `riggs run` prints a
 short banner, then serves the agent until it gets SIGTERM or SIGINT. A second signal stops it at
 once.
 

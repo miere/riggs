@@ -597,3 +597,29 @@ pub async fn closed_port() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     listener.local_addr().unwrap()
 }
+
+/// A second gateway the same node keeps a link to, under its own name.
+pub struct Second {
+    pub server: GatewayServer,
+    pub new_links: NewLinks,
+    pub gateway: Gateway,
+    pub handle: NodeHandle,
+    pub serving: JoinHandle<Stopped>,
+}
+
+pub async fn second_gateway(node: &Node, name: &str) -> Second {
+    let (server, mut new_links) = gateway(gateway_config()).await;
+    let (handle, events) = NodeLink::start(node_config(server.local_addr())).unwrap();
+    let serving = tokio::spawn({
+        let (server, handle, name) = (node.server.clone(), handle.clone(), name.to_owned());
+        async move { server.serve_gateway(&name, handle, events).await }
+    });
+    let gateway = accept(&mut new_links).await;
+    Second {
+        server,
+        new_links,
+        gateway,
+        handle,
+        serving,
+    }
+}
