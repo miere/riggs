@@ -60,9 +60,16 @@ pub(crate) async fn run(ctx: Arc<Ctx>, key: SessionKey, mut queue: mpsc::Unbound
                 };
                 match turn {
                     Some(open) => {
-                        if let Some(sink) = &open.sink
-                            && sink.send(event).await.is_err()
-                        {
+                        let Some(sink) = &open.sink else {
+                            dropped(&key, &event);
+                            continue;
+                        };
+                        let file = attachment_name(&event);
+                        if sink.send(event).await.is_err() {
+                            tracing::warn!(session_id = %key, stream = %open.stream, "the turn stopped taking events; dropping the rest of it");
+                            if let Some(file) = file {
+                                tracing::warn!(session_id = %key, %file, "an attachment was dropped");
+                            }
                             open.sink = None;
                         }
                     }
@@ -101,10 +108,34 @@ fn observe(ctx: &Ctx, event: &BackendEvent) {
     }
 }
 
+/// The file an event carries, named the way a log reader would look for it.
+fn attachment_name(event: &BackendEvent) -> Option<String> {
+    match event {
+        BackendEvent::Attachment(source) => Some(
+            source
+                .meta
+                .filename
+                .clone()
+                .unwrap_or_else(|| "attachment".to_owned()),
+        ),
+        _ => None,
+    }
+}
+
+/// A lost message is a debug matter; a lost file is what someone asked for, so it is a warning.
+fn dropped(key: &SessionKey, event: &BackendEvent) {
+    match attachment_name(event) {
+        Some(file) => tracing::warn!(session_id = %key, %file, "an attachment was dropped"),
+        None => tracing::debug!(session_id = %key, "an event was dropped"),
+    }
+}
+
 async fn background(host: Option<&HostHandles>, key: &SessionKey, event: BackendEvent) {
     let Some(host) = host else {
+        dropped(key, &event);
         return;
     };
+    let file = attachment_name(&event);
     let sink = &host.background;
     let sent = match event {
         BackendEvent::Message(content) => {
@@ -130,7 +161,13 @@ async fn background(host: Option<&HostHandles>, key: &SessionKey, event: Backend
         }
         BackendEvent::SignInSettled(_) => return,
     };
-    if let Err(err) = sent {
-        tracing::debug!(session_id = %key, error = %err, "a background event was not delivered");
+    match (sent, file) {
+        (Ok(()), _) => {}
+        (Err(err), Some(file)) => {
+            tracing::warn!(session_id = %key, %file, error = %err, "a background attachment was not delivered");
+        }
+        (Err(err), None) => {
+            tracing::debug!(session_id = %key, error = %err, "a background event was not delivered");
+        }
     }
 }
