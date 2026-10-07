@@ -8,6 +8,7 @@ pub const HOOK_TIMEOUT: Duration = Duration::from_secs(3600);
 pub const HOOK_MARGIN: Duration = Duration::from_secs(60);
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
 pub const INTERRUPT_GRACE: Duration = Duration::from_secs(30);
+pub const IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 pub const MAX_LINE_BYTES: usize = 64 << 20;
 pub const SIGN_IN_LINK_WAIT: Duration = Duration::from_secs(60);
 /// Longer than a sign-in someone asked for: the owner is not expecting this one and has to notice it.
@@ -39,6 +40,9 @@ pub struct ClaudeCodeConfig {
     pub handshake_timeout: Duration,
     /// How long an interrupted turn may take to stop before its process is killed.
     pub interrupt_grace: Duration,
+    /// How long a session's process may sit with nothing to do before it is stopped. The session
+    /// stays: its next prompt resumes the conversation in a fresh process. Zero never stops it.
+    pub idle_timeout: Duration,
     /// A longer stdout line fails the turn and restarts the process rather than stalling it.
     pub max_line_bytes: usize,
     pub sign_in: SignInConfig,
@@ -95,6 +99,7 @@ impl ClaudeCodeConfig {
             hook_margin: HOOK_MARGIN,
             handshake_timeout: HANDSHAKE_TIMEOUT,
             interrupt_grace: INTERRUPT_GRACE,
+            idle_timeout: IDLE_TIMEOUT,
             max_line_bytes: MAX_LINE_BYTES,
             sign_in: SignInConfig::default(),
             credential_file: None,

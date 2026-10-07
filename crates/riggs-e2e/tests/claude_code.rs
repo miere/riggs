@@ -952,6 +952,80 @@ async fn a_restarted_node_resumes_a_durable_session_with_its_context() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_idle_process_is_stopped_and_the_next_prompt_resumes_it() {
+    let mut world = World::with("resume", |config| {
+        config.idle_timeout = Duration::from_millis(300);
+    })
+    .await;
+    let node = world.start_node().await;
+    let session = node.new_session(vec![]).await.unwrap().session_id;
+    let mut turn = node
+        .prompt(session.clone(), text("remember 42"))
+        .await
+        .unwrap();
+    turn.expect(Match::message_contains("noted")).await.unwrap();
+    turn.until_end().await.unwrap();
+    let first = world.pid(0);
+    world
+        .eventually("the idle process to be stopped", |_| !alive(first))
+        .await;
+
+    let mut turn = node
+        .prompt(session.clone(), text("what did I say?"))
+        .await
+        .unwrap();
+    turn.expect(Match::message_contains("recalled: remember 42"))
+        .await
+        .unwrap();
+    turn.until_end().await.unwrap();
+    assert_eq!(world.starts().len(), 2);
+    assert!(world.argv(1).contains(&"--resume".to_owned()));
+    world.stop_node().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_process_with_a_background_task_is_not_idle() {
+    let mut world = World::with("background-subagent", |config| {
+        config.idle_timeout = Duration::from_millis(300);
+    })
+    .await;
+    let node = world.start_node().await;
+    let session = node.new_session(vec![]).await.unwrap().session_id;
+    let mut turn = node
+        .prompt(session.clone(), text("work in the background"))
+        .await
+        .unwrap();
+    let Event::ToolCall { tool_call } = turn.expect(Match::tool_call("Agent")).await.unwrap()
+    else {
+        panic!("expected a tool call")
+    };
+    turn.verdict(tool_call.id, Decision::Allow).await.unwrap();
+    turn.until_end().await.unwrap();
+    let (_, event) = node.next_background().await.unwrap();
+    let Open::Known(BackgroundEvent::ToolCall { tool_call }) = event else {
+        panic!("expected a background tool call, got {event:?}")
+    };
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let pid = world.pid(0);
+    assert!(alive(pid), "a process still running a subagent was stopped");
+    node.verdict(tool_call.id, Decision::Allow).await.unwrap();
+    loop {
+        let (_, event) = node.next_background().await.unwrap();
+        if matches!(event, Open::Known(BackgroundEvent::Complete { .. })) {
+            break;
+        }
+    }
+    world
+        .eventually(
+            "the process to be stopped once its subagent is done",
+            |_| !alive(pid),
+        )
+        .await;
+    world.stop_node().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_stray_result_after_resume_does_not_end_the_turn() {
     let mut world = World::new("stray-after-resume").await;
     let node = world.start_node().await;

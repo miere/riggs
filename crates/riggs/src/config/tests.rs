@@ -44,6 +44,7 @@ fn a_minimal_config_resolves_defaults_against_its_directory() {
     };
     assert_eq!(agent.command, PathBuf::from("claude"));
     assert_eq!(agent.workdir, dir.path());
+    assert_eq!(agent.idle_timeout, riggs_claude_code::IDLE_TIMEOUT);
     assert!(matches!(
         &config.sessions,
         SessionsConfig::Durable { dir: store, retain } if *store == dir.path().join("sessions") && *retain == SESSION_RETENTION
@@ -114,7 +115,7 @@ fn unknown_keys_are_an_error_naming_the_key() {
 #[test]
 fn durations_must_parse_and_be_positive() {
     let found = problems(&format!(
-        "{GOOD}hook_timeout = \"0s\"\ninterrupt_grace = \"soon\"\n[sessions]\nretain = \"-1d\"\n"
+        "{GOOD}hook_timeout = \"0s\"\ninterrupt_grace = \"soon\"\nidle_timeout = \"later\"\n[sessions]\nretain = \"-1d\"\n"
     ));
     let names: Vec<&str> = found.iter().map(|problem| problem.field.as_str()).collect();
     assert_eq!(
@@ -122,10 +123,23 @@ fn durations_must_parse_and_be_positive() {
         [
             "agent.hook_timeout",
             "agent.interrupt_grace",
+            "agent.idle_timeout",
             "sessions.retain"
         ]
     );
     assert!(found[0].message.contains("longer than zero"));
+}
+
+#[test]
+fn a_zero_idle_timeout_never_stops_the_agent() {
+    for zero in ["0", "0s", "0m"] {
+        let (_dir, path) = write(&format!("{GOOD}idle_timeout = \"{zero}\"\n"));
+        let config = load(&path, &Overrides::default()).unwrap();
+        let AgentConfig::ClaudeCode(agent) = &config.agent else {
+            panic!("expected claude_code")
+        };
+        assert_eq!(agent.idle_timeout, Duration::ZERO, "{zero}");
+    }
 }
 
 #[test]
@@ -149,7 +163,7 @@ fn insecure_skip_verify_is_refused_because_the_dialler_cannot_honour_it() {
 #[test]
 fn an_acp_agent_maps_onto_its_backend_config() {
     let (dir, path) = write(&format!(
-        "{}args = [\"--acp\"]\nworkdir = \"work\"\ninterruptible = false\nstartup_timeout = \"5s\"\nenv = {{ MODE = \"x\" }}\n[sessions]\ndurable = false\n",
+        "{}args = [\"--acp\"]\nworkdir = \"work\"\ninterruptible = false\nstartup_timeout = \"5s\"\nidle_timeout = \"1h\"\nenv = {{ MODE = \"x\" }}\n[sessions]\ndurable = false\n",
         GOOD.replace("claude_code", "acp")
             .replace("\"claude\"", "\"./bin/agent\"")
     ));
@@ -168,6 +182,7 @@ fn an_acp_agent_maps_onto_its_backend_config() {
     );
     assert_eq!(agent.interruptible, Some(false));
     assert_eq!(agent.startup_timeout, Duration::from_secs(5));
+    assert_eq!(agent.idle_timeout, Duration::from_secs(60 * 60));
     assert_eq!(agent.env["MODE"], Some("x".to_owned()));
     assert!(matches!(config.sessions, SessionsConfig::Ephemeral));
 }

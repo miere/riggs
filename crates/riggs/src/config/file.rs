@@ -49,6 +49,7 @@ pub struct Agent {
     pub startup_timeout: Option<String>,
     pub cancel_grace_period: Option<String>,
     pub permission_timeout: Option<String>,
+    pub idle_timeout: Option<String>,
 }
 
 /// How the agent is confined while it runs.

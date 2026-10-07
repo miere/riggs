@@ -582,6 +582,86 @@ async fn a_crash_mid_turn_is_an_error_and_the_next_prompt_reloads_in_a_fresh_pro
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_idle_agent_is_stopped_and_the_next_prompt_reloads_it() {
+    let sim = simulator().await;
+    let fixture = Fixture::new();
+    let script = json!({"load_session": true, "turns": {
+        "hi": [{"say": "hello"}],
+        "again": [{"say": "welcome back"}],
+    }});
+    let mut config = fixture.agent(script);
+    config.idle_timeout = Duration::from_millis(300);
+    let node = start(&sim, config, SessionsConfig::Ephemeral).await;
+    let session = node.open().await;
+    let mut turn = node
+        .gateway
+        .prompt(session.clone(), text("hi"))
+        .await
+        .unwrap();
+    assert!(said(&turn.until_end().await.unwrap(), "hello"));
+    let first = fixture.pids("pids")[1];
+    eventually("the idle agent to stop", || gone(first)).await;
+
+    let mut next = node.gateway.prompt(session, text("again")).await.unwrap();
+    assert!(said(&next.until_end().await.unwrap(), "welcome back"));
+    let pids = fixture.pids("pids");
+    assert_eq!(pids.len(), 3, "probe, first agent, reloaded agent");
+    let reloaded = u32::try_from(pids[2]).unwrap();
+    let methods: Vec<String> = fixture
+        .received()
+        .into_iter()
+        .filter(|(pid, _)| *pid == reloaded)
+        .filter_map(|(_, message)| message["method"].as_str().map(str::to_owned))
+        .collect();
+    assert_eq!(methods, ["initialize", "session/load", "session/prompt"]);
+    node.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_idle_agent_that_cannot_reload_is_stopped_and_its_session_ends() {
+    let sim = simulator().await;
+    let fixture = Fixture::new();
+    let script = json!({"turns": {"hi": [{"say": "hello"}]}});
+    let mut config = fixture.agent(script);
+    config.idle_timeout = Duration::from_millis(300);
+    let node = start(&sim, config, SessionsConfig::Ephemeral).await;
+    let session = node.open().await;
+    let mut turn = node
+        .gateway
+        .prompt(session.clone(), text("hi"))
+        .await
+        .unwrap();
+    assert!(said(&turn.until_end().await.unwrap(), "hello"));
+    let first = fixture.pids("pids")[1];
+    eventually("the idle agent to stop", || gone(first)).await;
+
+    let refused = node
+        .gateway
+        .prompt(session, text("hi"))
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(refused.fault().unwrap().kind, ErrorKind::UnknownSession);
+    node.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_zero_idle_timeout_leaves_an_idle_agent_running() {
+    let sim = simulator().await;
+    let fixture = Fixture::new();
+    let script = json!({"load_session": true, "turns": {"hi": [{"say": "hello"}]}});
+    let mut config = fixture.agent(script);
+    config.idle_timeout = Duration::ZERO;
+    let node = start(&sim, config, SessionsConfig::Ephemeral).await;
+    let session = node.open().await;
+    let mut turn = node.gateway.prompt(session, text("hi")).await.unwrap();
+    assert!(said(&turn.until_end().await.unwrap(), "hello"));
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!gone(fixture.pids("pids")[1]));
+    node.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_crashed_agent_that_cannot_reload_leaves_an_unknown_session() {
     let sim = simulator().await;
     let fixture = Fixture::new();

@@ -37,6 +37,8 @@ pub(crate) struct Routes {
     owner: Option<Owner>,
     permission_timeout: Duration,
     state: Mutex<State>,
+    /// When the agent last sent something or was handed a turn.
+    active: Mutex<Instant>,
 }
 
 #[derive(Default)]
@@ -93,11 +95,29 @@ impl Routes {
             owner,
             permission_timeout,
             state: Mutex::default(),
+            active: Mutex::new(Instant::now()),
         }
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn touch(&self) {
+        *self.active.lock().unwrap_or_else(PoisonError::into_inner) = Instant::now();
+    }
+
+    /// How long the agent has had nothing to do, or `None` while a turn, a reload or a held
+    /// permission keeps it busy.
+    pub(crate) fn idle_for(&self) -> Option<Duration> {
+        let state = self.state();
+        let busy = state.turn.is_some() || state.restoring || !state.held.is_empty();
+        (!busy).then(|| {
+            self.active
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .elapsed()
+        })
     }
 
     pub(crate) fn set_session(&self, session: &str, restoring: bool) {
@@ -125,6 +145,7 @@ impl Routes {
         if state.turn.is_some() {
             return Err(AcpError::Busy);
         }
+        self.touch();
         state.generation += 1;
         let generation = state.generation;
         let interrupt = CancellationToken::new();
@@ -143,6 +164,7 @@ impl Routes {
     }
 
     pub(crate) fn close_turn(&self, generation: u64) -> Option<TurnRoute> {
+        self.touch();
         let mut state = self.state();
         if state
             .turn
@@ -182,6 +204,7 @@ impl Routes {
     }
 
     pub(crate) async fn notification(&self, message: UntypedMessage) {
+        self.touch();
         if message.method != UPDATE_METHOD {
             tracing::debug!(method = %message.method, "ignoring a notification riggs does not handle");
             return;
@@ -235,6 +258,7 @@ impl Routes {
         responder: Responder<Value>,
         cx: &ConnectionTo<acp::Agent>,
     ) -> Handled<(UntypedMessage, Responder<Value>)> {
+        self.touch();
         if message.method != PERMISSION_METHOD {
             return Handled::No {
                 message: (message, responder),

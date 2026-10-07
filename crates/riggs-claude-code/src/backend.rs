@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use rax::content::ContentBlock;
@@ -103,8 +104,13 @@ impl ClaudeCode {
         lock(&slot.proc).clone().filter(|proc| proc.is_alive())
     }
 
-    async fn running(&self, key: &SessionKey, slot: &Slot) -> Result<Arc<Proc>, ClaudeCodeError> {
-        let _spawning = slot.spawning.lock().await;
+    /// The caller holds `slot.spawning` until the process has its turn, so the idle watch cannot
+    /// stop it in between.
+    async fn running(
+        &self,
+        key: &SessionKey,
+        slot: &Arc<Slot>,
+    ) -> Result<Arc<Proc>, ClaudeCodeError> {
         if let Some(proc) = Self::live(slot) {
             return Ok(proc);
         }
@@ -115,6 +121,10 @@ impl ClaudeCode {
         };
         let proc = process::spawn(self.ctx.clone(), *key, launch, slot.groups.clone()).await?;
         *lock(&slot.proc) = Some(proc.clone());
+        let idle = self.ctx.config.idle_timeout;
+        if !idle.is_zero() {
+            tokio::spawn(stop_when_idle(slot.clone(), proc.clone(), idle));
+        }
         Ok(proc)
     }
 
@@ -208,6 +218,7 @@ impl Backend for ClaudeCode {
             ..Slot::default()
         });
         lock(&self.slots).insert(*key, slot.clone());
+        let _spawning = slot.spawning.lock().await;
         match self.running(key, &slot).await {
             Ok(_) => Ok(Restore::Restored),
             Err(ClaudeCodeError::ResumeMiss(_)) => {
@@ -230,6 +241,7 @@ impl Backend for ClaudeCode {
         let slot = self
             .slot(key)
             .ok_or_else(|| ClaudeCodeError::UnknownSession(key.to_string()))?;
+        let _spawning = slot.spawning.lock().await;
         let proc = self
             .running(key, &slot)
             .await
@@ -295,6 +307,40 @@ impl Backend for ClaudeCode {
         for proc in procs {
             proc.terminate().await;
         }
+    }
+}
+
+/// Stops a process that has had nothing to do for `idle`. The slot stays, so the session's next
+/// prompt resumes the conversation in a fresh process.
+async fn stop_when_idle(slot: Arc<Slot>, proc: Arc<Proc>, idle: Duration) {
+    let mut wait = idle;
+    loop {
+        tokio::select! {
+            () = tokio::time::sleep(wait) => {}
+            () = proc.exited() => return,
+        }
+        let _spawning = slot.spawning.lock().await;
+        match proc.idle_for() {
+            Some(quiet) if quiet >= idle => {}
+            Some(quiet) => {
+                wait = idle - quiet;
+                continue;
+            }
+            None => {
+                wait = idle;
+                continue;
+            }
+        }
+        {
+            let mut held = lock(&slot.proc);
+            if !held.as_ref().is_some_and(|held| Arc::ptr_eq(held, &proc)) {
+                return;
+            }
+            held.take();
+        }
+        tracing::info!(session_id = %proc.key(), idle_secs = idle.as_secs(), "Claude Code was idle; stopping it until the session's next prompt");
+        proc.terminate().await;
+        return;
     }
 }
 

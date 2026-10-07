@@ -14,5 +14,7 @@ mod turn;
 mod wire;
 
 pub use backend::AcpBackend;
-pub use config::{AcpConfig, CANCEL_GRACE_PERIOD, PERMISSION_TIMEOUT, STARTUP_TIMEOUT};
+pub use config::{
+    AcpConfig, CANCEL_GRACE_PERIOD, IDLE_TIMEOUT, PERMISSION_TIMEOUT, STARTUP_TIMEOUT,
+};
 pub use error::AcpError;
