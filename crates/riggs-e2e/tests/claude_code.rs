@@ -771,6 +771,55 @@ async fn a_file_is_attached_to_the_reply_and_one_outside_the_workdir_is_refused(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_file_attached_after_the_turn_ended_is_sent_in_the_background() {
+    let mut world = World::new("background-attach").await;
+    let node = world.start_node().await;
+    std::fs::write(world.work().join("report.md"), "# Report\n").unwrap();
+    let session = node.new_session(vec![]).await.unwrap().session_id;
+    let mut turn = node
+        .prompt(session.clone(), text("run the tests"))
+        .await
+        .unwrap();
+    turn.until_end().await.unwrap();
+
+    let (_, event) = node.next_background().await.unwrap();
+    let Open::Known(BackgroundEvent::ToolCall { tool_call }) = event else {
+        panic!("expected a background tool call, got {event:?}")
+    };
+    node.verdict(tool_call.id, Decision::Allow).await.unwrap();
+
+    let mut background = Vec::new();
+    loop {
+        let (_, event) = node.next_background().await.unwrap();
+        let done = matches!(event, Open::Known(BackgroundEvent::Complete { .. }));
+        background.push(event);
+        if done {
+            break;
+        }
+    }
+    let attachment = background
+        .iter()
+        .find_map(|event| match event {
+            Open::Known(BackgroundEvent::Attachment { attachment }) => Some(attachment.clone()),
+            _ => None,
+        })
+        .expect("expected a background attachment");
+    assert_eq!(attachment.filename.as_deref(), Some("report.md"));
+    let received = node.transfer(&attachment.transfer_id).await.unwrap();
+    assert!(
+        received == Transfer::Complete(b"# Report\n".to_vec()),
+        "{received:?}"
+    );
+    assert!(background.iter().any(|event| matches!(
+        event,
+        Open::Known(BackgroundEvent::Message {
+            content: Open::Known(ContentBlock::Text { text }),
+        }) if text == "Attached report.md (9 bytes) to your reply."
+    )));
+    world.stop_node().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_attachment_that_fails_mid_read_is_an_error_and_the_turn_completes() {
     let mut world = World::new("attach-truncated").await;
     let node = world.start_node().await;

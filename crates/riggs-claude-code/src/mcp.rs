@@ -265,11 +265,9 @@ async fn attach(proc: &Proc, args: &Value, turn: Option<TurnCtl>) -> ToolResult 
     let Some(path) = text_of(args, "path").filter(|path| !path.trim().is_empty()) else {
         return ToolResult::error("Error: a path is required");
     };
-    let Some(turn) = turn else {
-        return ToolResult::error(format!(
-            "error: there is no conversation in progress to attach {path:?} to"
-        ));
-    };
+    // Claude Code carries on by itself when a background task finishes, after the turn has ended.
+    // What it attaches then goes out with the rest of that background work.
+    let route = turn.map_or(Route::Background, |turn| Route::Turn(turn.stream));
     let workdir = match tokio::fs::canonicalize(proc.workdir()).await {
         Ok(workdir) => workdir,
         Err(err) => {
@@ -329,7 +327,7 @@ async fn attach(proc: &Proc, args: &Value, turn: Option<TurnCtl>) -> ToolResult 
         size,
         reader: Box::new(file),
     };
-    proc.emit(Route::Turn(turn.stream), BackendEvent::Attachment(source));
+    proc.emit(route, BackendEvent::Attachment(source));
     ToolResult::text(format!("Attached {name} ({size} bytes) to your reply."))
 }
 
