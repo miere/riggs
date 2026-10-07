@@ -23,9 +23,6 @@
               }
             },
             {
-              "truncate": "big.bin"
-            },
-            {
               "say": "{{attached}}"
             }
           ]

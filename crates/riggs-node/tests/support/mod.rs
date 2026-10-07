@@ -448,6 +448,7 @@ pub fn all_caps() -> GatewayCapabilities {
         resource_schemes: vec![],
         readable_schemes: vec![],
         tools: None,
+        attachment_receipts: true,
     }
 }
 

@@ -305,6 +305,12 @@ impl NodeServer {
                                 tracing::debug!(%gateway, prompt = %id, "answer for a prompt this link did not show");
                             }
                         }
+                        NodeEvent::Receipt(receipt) => {
+                            let id = receipt.transfer_id.clone();
+                            if !inner.shared.receipt(gateway, receipt) {
+                                tracing::debug!(%gateway, transfer_id = %id, "receipt for an attachment nobody is waiting on");
+                            }
+                        }
                         NodeEvent::Unhandled { stream, body } => {
                             tracing::warn!(%gateway, stream = ?stream, subject = ?body.subject, reason = ?body.reason, "the gateway could not handle something this node sent");
                         }
@@ -518,6 +524,7 @@ impl Inner {
                 tool_gate: info.tool_gate,
                 sessions: self.sessions.durability(&info),
                 tool_groups: true,
+                attachment_receipts: true,
             },
             metadata: self.shared.metadata_for(gateway),
         })

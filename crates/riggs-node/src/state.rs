@@ -4,8 +4,9 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use rax::Metadata;
+use rax::attachment::{AttachmentReceipt, ReceiptOutcome};
 use rax::credential::CredentialHealth;
-use rax::id::{PromptId, RequestId, ToolCallId};
+use rax::id::{PromptId, RequestId, ToolCallId, TransferId};
 use rax::interaction::{DisplayAnswer, DisplayOutcome};
 use rax::session::GatewayCapabilities;
 use rax::tool::{Decision, DeniedBy, ToolVerdict};
@@ -13,7 +14,7 @@ use rax_tokio::node::NodeHandle;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use crate::backend::SessionKey;
+use crate::backend::{Delivery, SessionKey};
 
 pub(crate) const INTERRUPTED: &str =
     "Skipped: the turn was interrupted before the approval was answered. The action was not run.";
@@ -113,6 +114,8 @@ struct State {
     turns: HashMap<SessionKey, TurnEntry>,
     held: HashMap<ToolCallId, Held>,
     prompts: HashMap<PromptId, Pending>,
+    /// Attachments sent on a link whose gateway acknowledges them, by epoch and transfer.
+    receipts: HashMap<(u64, TransferId), oneshot::Sender<Delivery>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -205,6 +208,7 @@ impl Shared {
                 turns: HashMap::new(),
                 held: HashMap::new(),
                 prompts: HashMap::new(),
+                receipts: HashMap::new(),
             }),
             next_serial: AtomicU64::new(1),
             next_epoch: AtomicU64::new(1),
@@ -372,6 +376,10 @@ impl Shared {
         }
         let calls_denied = state.deny_where(|held| held.epoch == epoch.id, LINK_ENDED);
         state.dismiss_where(|pending| pending.epoch == epoch.id);
+        // Unanswered, so whoever waits on one learns the attachment's fate is unknown.
+        state
+            .receipts
+            .retain(|(sent_on, _), _| *sent_on != epoch.id);
         if reason == ResetReason::GraceExpired {
             state.phases.insert(
                 gateway.to_owned(),
@@ -616,6 +624,52 @@ impl Shared {
     }
 
     /// Only the link that showed the prompt may answer it.
+    /// Whether the gateway on this epoch sends a receipt for each attachment.
+    pub(crate) fn acknowledges(&self, epoch: u64) -> bool {
+        self.state()
+            .epoch(epoch)
+            .and_then(|live| live.caps.as_ref())
+            .is_some_and(|caps| caps.attachment_receipts)
+    }
+
+    pub(crate) fn expect_receipt(
+        &self,
+        epoch: u64,
+        transfer_id: TransferId,
+        delivery: oneshot::Sender<Delivery>,
+    ) {
+        self.state().receipts.insert((epoch, transfer_id), delivery);
+    }
+
+    /// Takes back a receipt that will not come, such as when the attachment event was not sent.
+    pub(crate) fn forget_receipt(
+        &self,
+        epoch: u64,
+        transfer_id: &TransferId,
+    ) -> Option<oneshot::Sender<Delivery>> {
+        self.state().receipts.remove(&(epoch, transfer_id.clone()))
+    }
+
+    pub(crate) fn receipt(&self, from: &str, receipt: AttachmentReceipt) -> bool {
+        let mut state = self.state();
+        let Some(epoch) = state.live(from).map(|live| live.id) else {
+            return false;
+        };
+        let Some(delivery) = state.receipts.remove(&(epoch, receipt.transfer_id)) else {
+            return false;
+        };
+        let _ = delivery.send(match receipt.outcome {
+            ReceiptOutcome::Delivered => Delivery::Delivered,
+            ReceiptOutcome::Failed => Delivery::Failed(
+                receipt
+                    .reason
+                    .unwrap_or_else(|| "the gateway could not deliver it".to_owned()),
+            ),
+            ReceiptOutcome::Unknown => Delivery::Unconfirmed,
+        });
+        true
+    }
+
     pub(crate) fn answer(&self, from: &str, answer: DisplayAnswer) -> bool {
         let mut state = self.state();
         let from = state.live(from).map(|live| live.id);
