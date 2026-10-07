@@ -72,7 +72,7 @@ fn tools() -> Value {
     json!([
         {
             "name": "auth",
-            "description": "Ask for credentials you do not have and WAIT until they are granted. Use it when a call failed for missing or expired authentication — never guess, retry blindly, or ask the person to run auth commands themselves. Pass `tool` as the capability DIRECTLY affected, as the person knows it (e.g. `gcp-mcp`, `postgres-mcp`), not the binary it shells out to (e.g. `gcloud`); name the binary only when you are running it yourself. The sign-in runs on this machine, and this machine's owner is sent a direct message to complete it — not whoever you are talking to. It returns an error if they decline, it times out, or it fails: treat any error as a hard stop and do not retry the original call.",
+            "description": "Ask for credentials you do not have and WAIT until they are granted. Use it when a call failed for missing or expired authentication — never guess, retry blindly, or ask the person to run auth commands themselves. Pass `tool` as the capability DIRECTLY affected, as the person knows it (e.g. `gcp-mcp`, `postgres-mcp`), not the binary it shells out to (e.g. `gcloud`); name the binary only when you are running it yourself. The sign-in runs on this machine, and this machine's owner is asked to complete it — not whoever you are talking to. It returns an error if they decline, it times out, or it fails: treat any error as a hard stop and do not retry the original call.",
             "inputSchema": {
                 "type": "object",
                 "required": ["tool", "profile"],
