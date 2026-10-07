@@ -40,6 +40,7 @@ pub fn all_caps() -> GatewayCapabilities {
         resource_schemes: vec![],
         readable_schemes: vec![],
         tools: None,
+        attachment_receipts: true,
     }
 }
 
@@ -169,6 +170,10 @@ impl World {
     }
 
     pub async fn start_node_initialized(&mut self) -> (SimNode, Initialized) {
+        self.start_node_with(all_caps()).await
+    }
+
+    pub async fn start_node_with(&mut self, caps: GatewayCapabilities) -> (SimNode, Initialized) {
         assert!(self.node.is_none(), "a node is already running");
         let backend = Arc::new(ClaudeCode::new(self.config.clone()));
         let mut config = ServerConfig::new(SessionsConfig::Durable {
@@ -198,7 +203,7 @@ impl World {
         });
         self.node = Some(Running { server, serving });
         let node = self.sim.next_node().await.unwrap();
-        let initialized = node.initialize(all_caps()).await.unwrap();
+        let initialized = node.initialize(caps).await.unwrap();
         (node, initialized)
     }
 

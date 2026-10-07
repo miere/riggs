@@ -8,9 +8,11 @@ use rax::tool::{CallTool, Decision, ToolOutcome};
 use rax::{NodeCall, NodeReply, ToolCall, UpdateMetadata};
 use rax_tokio::{CallError, SendError, TransferError};
 use serde_json::Value;
+use tokio::io::AsyncRead;
+use tokio::sync::oneshot;
 use tokio::time::{Instant, timeout};
 
-use crate::backend::{AttachmentSource, SessionKey};
+use crate::backend::{AttachmentMeta, AttachmentSource, Delivery, SessionKey};
 use crate::state::{self, Epoch, PromptKind, PromptRoute, PromptStart, Shared, Unreached, lock};
 use crate::turn::{SignInPrompt, hold_background};
 
@@ -160,22 +162,69 @@ impl BackgroundSink {
         session: &SessionKey,
         source: AttachmentSource,
     ) -> Result<(), NotDelivered> {
+        let AttachmentSource {
+            meta,
+            size,
+            reader,
+            mut delivery,
+        } = source;
+        let sent = self
+            .send_attachment(session, meta, size, reader, &mut delivery)
+            .await;
+        if let (Err(err), Some(delivery)) = (&sent, delivery) {
+            let _ = delivery.send(Delivery::Failed(err.to_string()));
+        }
+        sent
+    }
+
+    /// Hands `delivery` to the receipt it waits on when the gateway sends one, and otherwise
+    /// leaves it for the caller to settle.
+    async fn send_attachment(
+        &self,
+        session: &SessionKey,
+        meta: AttachmentMeta,
+        size: u64,
+        reader: Box<dyn AsyncRead + Send + Unpin>,
+        delivery: &mut Option<oneshot::Sender<Delivery>>,
+    ) -> Result<(), NotDelivered> {
         let epoch = self.epoch(session)?;
-        let AttachmentSource { meta, size, reader } = source;
         let transfer_id = tokio::select! {
             sent = epoch.handle.send_attachment_from(reader, size) => sent?,
             () = epoch.ended.cancelled() => return Err(NotDelivered::LinkEnded),
         };
+        if self.shared.acknowledges(epoch.id)
+            && let Some(waiting) = delivery.take()
+        {
+            self.shared
+                .expect_receipt(epoch.id, transfer_id.clone(), waiting);
+        }
         let attachment = Attachment {
-            transfer_id,
+            transfer_id: transfer_id.clone(),
             size,
             filename: meta.filename,
             title: meta.title,
             comment: meta.comment,
             mimetype: meta.mimetype,
         };
-        self.send(session, BackgroundEvent::Attachment { attachment })
-            .await
+        let event = BackgroundEvent::Attachment { attachment };
+        let sent = tokio::select! {
+            sent = epoch.handle.background(session.session_id(), event) => sent.map_err(NotDelivered::from),
+            () = epoch.ended.cancelled() => Err(NotDelivered::LinkEnded),
+        };
+        match sent {
+            Ok(()) => {
+                if let Some(unacknowledged) = delivery.take() {
+                    let _ = unacknowledged.send(Delivery::Unconfirmed);
+                }
+                Ok(())
+            }
+            Err(err) => {
+                if delivery.is_none() {
+                    *delivery = self.shared.forget_receipt(epoch.id, &transfer_id);
+                }
+                Err(err)
+            }
+        }
     }
 
     fn epoch(&self, session: &SessionKey) -> Result<Epoch, NotDelivered> {

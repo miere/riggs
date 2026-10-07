@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use nix::sys::signal::Signal;
+use rax::attachment::{AttachmentReceipt, ReceiptOutcome};
 use rax::interaction::{DisplayAnswer, DisplayOutcome};
 use rax::{Decision, Event};
 use rax_sim::{
@@ -319,6 +320,12 @@ async fn attachment_turns(agent: Agent, prompt: &str, runs: usize, on_disk: bool
         };
         assert_eq!(attachment.size, ATTACHMENT_BYTES as u64);
         node.transfer(&attachment.transfer_id).await.unwrap();
+        let receipt = AttachmentReceipt {
+            transfer_id: attachment.transfer_id,
+            outcome: ReceiptOutcome::Delivered,
+            reason: None,
+        };
+        node.receipt(receipt).await.unwrap();
         turn.until_end().await.unwrap();
     }
     outcome.absorb(&rig);

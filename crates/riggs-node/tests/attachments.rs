@@ -31,6 +31,7 @@ fn source(size: u64, reader: impl AsyncRead + Send + Unpin + 'static) -> Attachm
         },
         size,
         reader: Box::new(reader),
+        delivery: None,
     }
 }
 

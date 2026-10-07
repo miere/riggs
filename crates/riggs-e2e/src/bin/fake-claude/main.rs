@@ -763,6 +763,7 @@ impl Fake {
             },
             "jsonrpc": "2.0", "id": number,
         });
+        self.log(json!({"event": "tool_calling", "name": name}));
         let answer = self.mcp_call_to(server, message).await;
         let result = answer
             .pointer("/response/mcp_response/result")

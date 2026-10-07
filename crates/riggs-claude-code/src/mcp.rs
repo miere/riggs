@@ -1,10 +1,13 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use rax::attachment::MAX_ATTACHMENT_BYTES;
 use rax::tool::ToolGroup;
-use riggs_node::{AttachmentMeta, AttachmentSource, BackendEvent};
+use riggs_node::{AttachmentMeta, AttachmentSource, BackendEvent, Delivery};
 use serde_json::{Value, json};
+use tokio::sync::oneshot;
+use tokio::time::timeout;
 
 use crate::emit::Route;
 use crate::interaction::{self, ToolResult};
@@ -12,6 +15,9 @@ use crate::process::{Proc, TurnCtl};
 use crate::wire::{self, MCP_SERVER, text_of};
 
 const PROTOCOL_VERSION: &str = "2025-11-25";
+
+/// Long enough for a gateway to take the bytes and upload them, which can retry.
+const RECEIPT_WAIT: Duration = Duration::from_secs(180);
 
 pub(crate) async fn serve(
     proc: Arc<Proc>,
@@ -322,13 +328,35 @@ async fn attach(proc: &Proc, args: &Value, turn: Option<TurnCtl>) -> ToolResult 
         title: text_of(args, "title").map(str::to_owned),
         comment: text_of(args, "comment").map(str::to_owned),
     };
+    let (delivery, delivered) = oneshot::channel();
     let source = AttachmentSource {
         meta,
         size,
         reader: Box::new(file),
+        delivery: Some(delivery),
     };
     proc.emit(route, BackendEvent::Attachment(source));
-    ToolResult::text(format!("Attached {name} ({size} bytes) to your reply."))
+    match timeout(RECEIPT_WAIT, delivered).await {
+        Ok(Ok(Delivery::Delivered)) => {
+            ToolResult::text(format!("Attached {name} ({size} bytes) to your reply."))
+        }
+        Ok(Ok(Delivery::Unconfirmed)) => ToolResult::text(format!(
+            "Sent {name} ({size} bytes) with your reply. This gateway does not confirm delivery, \
+             so if the person says it is missing, believe them."
+        )),
+        Ok(Ok(Delivery::Failed(reason))) => ToolResult::error(format!(
+            "Error: {name} was not delivered: {reason}. Tell the person it did not arrive."
+        )),
+        Ok(Err(_)) => ToolResult::error(format!(
+            "Error: {name} was not delivered: the conversation lost its gateway before it was \
+             sent. Tell the person it did not arrive."
+        )),
+        Err(_) => ToolResult::error(format!(
+            "Error: the gateway did not confirm {name} within {} seconds, so it may not have \
+             arrived. Tell the person rather than sending it again.",
+            RECEIPT_WAIT.as_secs()
+        )),
+    }
 }
 
 fn mimetype(path: &Path) -> Option<&'static str> {
