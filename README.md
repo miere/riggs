@@ -44,6 +44,7 @@ command = "claude"
 args = []
 workdir = "~/work"          # defaults to the config folder
 env = { ANTHROPIC_MODEL = "claude-opus-4-1" }
+idle_timeout = "15m"        # the default; stops an agent with nothing to do, see below
 
 [agent.sandbox]
 mode = "seatbelt"           # or "off" (the default); macOS only
@@ -64,6 +65,13 @@ format = "text"             # or "json"
 policy = "allow_list"       # or "always_allow"
 people = ["U0ABC1234"]
 ```
+
+Each session runs its own agent process, and Riggs stops one that has had nothing to do for
+`idle_timeout`. Nothing to do means no turn open, no permission or tool call waiting, and no
+background task Claude Code is still running. The session itself stays: its next prompt starts a
+fresh process that resumes the conversation, at the cost of a few seconds' start-up. An ACP agent
+that cannot reload sessions loses the conversation when it is stopped, so its next prompt is
+refused as an unknown session. `idle_timeout = "0"` never stops an agent, for a harness like that.
 
 Files a person shares in the conversation are fetched from the gateway when the prompt arrives and
 saved under `files/` beside the config, one folder per session. The agent gets the local path.

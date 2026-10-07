@@ -435,6 +435,9 @@ fn agent(
                 duration(field, raw, problems);
             }
         }
+        if let Some(raw) = &section.idle_timeout {
+            idle_timeout(raw, problems);
+        }
         return None;
     };
     let mut durations = Durations { problems };
@@ -475,6 +478,10 @@ fn agent(
                 &section.interrupt_grace,
                 &mut config.interrupt_grace,
             );
+            if let Some(idle) = section.idle_timeout.as_deref() {
+                config.idle_timeout =
+                    idle_timeout(idle, durations.problems).unwrap_or(config.idle_timeout);
+            }
             config.command = command?;
             config.sandbox = sandbox(dir, section.sandbox, token_file, problems);
             AgentConfig::ClaudeCode(Box::new(config))
@@ -516,6 +523,10 @@ fn agent(
                 &section.permission_timeout,
                 &mut config.permission_timeout,
             );
+            if let Some(idle) = section.idle_timeout.as_deref() {
+                config.idle_timeout =
+                    idle_timeout(idle, durations.problems).unwrap_or(config.idle_timeout);
+            }
             AgentConfig::Acp(config)
         }
     };
@@ -548,6 +559,22 @@ fn duration(field: &str, raw: &str, problems: &mut Problems) -> Option<Duration>
             problems.add(
                 field,
                 format!("{raw:?} is not a duration ({err}); write it like \"30s\" or \"1h\""),
+            );
+            None
+        }
+    }
+}
+
+/// The one duration where zero means something: never stop an idle agent, for a harness whose
+/// sessions cannot outlive their process.
+fn idle_timeout(raw: &str, problems: &mut Problems) -> Option<Duration> {
+    match humantime::parse_duration(raw.trim()) {
+        Ok(parsed) => Some(parsed),
+        Err(_) if raw.trim() == "0" => Some(Duration::ZERO),
+        Err(err) => {
+            problems.add(
+                "agent.idle_timeout",
+                format!("{raw:?} is not a duration ({err}); write it like \"15m\", or \"0\" to never stop an idle agent"),
             );
             None
         }

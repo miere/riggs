@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use rax::content::ContentBlock;
@@ -86,13 +87,22 @@ impl AcpBackend {
     }
 
     fn insert(&self, key: SessionKey, record: Record, context: Vec<Value>, agent: AgentProcess) {
-        let session = Session {
+        let agent = Arc::new(agent);
+        let session = Arc::new(Session {
             record,
             context: Mutex::new(context),
-            live: Mutex::new(Some(Arc::new(agent))),
+            live: Mutex::new(Some(agent.clone())),
             relaunching: tokio::sync::Mutex::new(()),
-        };
-        lock(&self.sessions).insert(key, Arc::new(session));
+        });
+        lock(&self.sessions).insert(key, session.clone());
+        self.watch_idle(key, session, agent);
+    }
+
+    fn watch_idle(&self, key: SessionKey, session: Arc<Session>, agent: Arc<AgentProcess>) {
+        let idle = self.config.idle_timeout;
+        if !idle.is_zero() {
+            tokio::spawn(stop_when_idle(key, session, agent, idle));
+        }
     }
 
     async fn reload(&self, key: &SessionKey, record: &Record) -> Result<AgentProcess, AcpError> {
@@ -116,13 +126,14 @@ impl AcpBackend {
         .await
     }
 
+    /// The caller holds `session.relaunching` until the agent has its turn, so the idle watch
+    /// cannot stop it in between.
     async fn agent_for_turn(
         &self,
         key: &SessionKey,
-        session: &Session,
+        session: &Arc<Session>,
         cancelled: &CancellationToken,
     ) -> Result<Arc<AgentProcess>, AcpError> {
-        let _one_at_a_time = session.relaunching.lock().await;
         if let Some(agent) = lock(&session.live)
             .as_ref()
             .filter(|agent| agent.is_alive())
@@ -140,6 +151,7 @@ impl AcpBackend {
             () = cancelled.cancelled() => return Err(AcpError::Cancelled),
         };
         *lock(&session.live) = Some(agent.clone());
+        self.watch_idle(*key, session.clone(), agent.clone());
         Ok(agent)
     }
 
@@ -238,6 +250,7 @@ impl Backend for AcpBackend {
         let session = self
             .session(key)
             .ok_or_else(|| BackendError::new(AcpError::UnknownSession(key.to_string())))?;
+        let _one_at_a_time = session.relaunching.lock().await;
         let agent = match self.agent_for_turn(key, &session, &turn.cancelled).await {
             Ok(agent) => agent,
             Err(err @ AcpError::SessionLost { .. }) => {
@@ -294,5 +307,44 @@ fn unpublished(group: &ToolGroup) -> Unhandled {
         },
         reason: UnhandledReason::UnsupportedType,
         message: Some("this node's ACP agent cannot be lent gateway tools".to_owned()),
+    }
+}
+
+/// Stops an agent that has had nothing to do for `idle`. The session stays, so its next prompt
+/// reloads the conversation in a fresh process, or ends it when the agent cannot reload.
+async fn stop_when_idle(
+    key: SessionKey,
+    session: Arc<Session>,
+    agent: Arc<AgentProcess>,
+    idle: Duration,
+) {
+    let mut wait = idle;
+    loop {
+        tokio::select! {
+            () = tokio::time::sleep(wait) => {}
+            _ = agent.life.died() => return,
+        }
+        let _one_at_a_time = session.relaunching.lock().await;
+        match agent.routes.idle_for() {
+            Some(quiet) if quiet >= idle => {}
+            Some(quiet) => {
+                wait = idle - quiet;
+                continue;
+            }
+            None => {
+                wait = idle;
+                continue;
+            }
+        }
+        {
+            let mut live = lock(&session.live);
+            if !live.as_ref().is_some_and(|live| Arc::ptr_eq(live, &agent)) {
+                return;
+            }
+            live.take();
+        }
+        tracing::info!(session_id = %key, idle_secs = idle.as_secs(), "the agent was idle; stopping it until the session's next prompt");
+        agent.close().await;
+        return;
     }
 }

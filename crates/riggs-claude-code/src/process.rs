@@ -108,6 +108,8 @@ pub(crate) struct Proc {
     exited: CancellationToken,
     status: Mutex<Option<String>>,
     stderr: Tail,
+    /// When Claude Code last wrote a frame or was handed a turn.
+    active: Mutex<Instant>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -167,6 +169,7 @@ pub(crate) async fn spawn(
         exited: CancellationToken::new(),
         status: Mutex::new(None),
         stderr,
+        active: Mutex::new(Instant::now()),
     });
     tracing::debug!(session_id = %key, pid = leader.pid(), ?launch, "Claude Code started");
     tokio::spawn(write(stdin, lines));
@@ -359,6 +362,24 @@ impl Proc {
         }
     }
 
+    /// How long Claude Code has had nothing to do, or `None` while a turn, a backgrounded task or
+    /// a call either side is waiting on keeps it busy.
+    pub(crate) fn idle_for(&self) -> Option<Duration> {
+        let state = self.lock();
+        let busy = state.turn.is_some()
+            || !state.ours.is_empty()
+            || !state.theirs.is_empty()
+            || state
+                .tools
+                .values()
+                .any(|tool| !matches!(tool, Tool::Denied));
+        (!busy).then(|| lock(&self.active).elapsed())
+    }
+
+    pub(crate) async fn exited(&self) {
+        self.exited.cancelled().await;
+    }
+
     pub(crate) fn kill(&self) {
         let _ = self.kill.try_send(());
     }
@@ -389,6 +410,7 @@ impl Proc {
         if state.turn.is_some() {
             return Err(ClaudeCodeError::Busy(self.key.to_string()));
         }
+        *lock(&self.active) = Instant::now();
         state.turn = Some(TurnCtl {
             stream: stream.clone(),
             prompts,
@@ -531,6 +553,7 @@ impl Proc {
     }
 
     fn dispatch(self: &Arc<Self>, frame: Value) {
+        *lock(&self.active) = Instant::now();
         match text_of(&frame, "type") {
             Some("control_response") => self.control_response(&frame),
             Some("control_request") => self.control_request(frame),
