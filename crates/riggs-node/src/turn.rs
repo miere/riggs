@@ -299,6 +299,9 @@ impl Pump {
         while let Some(item) = items.recv().await {
             if healthy && !self.turn.orphaned.is_cancelled() {
                 healthy = self.forward(item).await;
+            } else if let Item::Backend(BackendEvent::Attachment(source)) = &item {
+                let file = source.meta.filename.as_deref().unwrap_or("attachment");
+                tracing::warn!(stream = %self.turn.stream, %file, "the turn can no longer reach its gateway; an attachment was dropped");
             }
         }
         self.shared.finish_turn(&self.key, &self.turn.stream);
