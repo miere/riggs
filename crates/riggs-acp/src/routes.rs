@@ -506,7 +506,6 @@ fn attachment(meta: AttachmentMeta, bytes: Vec<u8>) -> AttachmentSource {
         meta,
         size: bytes.len() as u64,
         reader: Box::new(Cursor::new(bytes)),
-        delivery: None,
     }
 }
 

@@ -7,18 +7,19 @@
       {
         "hook": {
           "id": "toolu_01ATTACHaaaaaaaaaaaaaaaa",
-          "name": "mcp__riggs__attach",
+          "name": "mcp__slack__attach",
           "input": {
-            "path": "report.bin",
+            "file": "report.bin",
             "title": "Report"
           },
           "allow": [
             {
               "call_tool": {
                 "id": "toolu_01ATTACHaaaaaaaaaaaaaaaa",
+                "server": "slack",
                 "name": "attach",
                 "arguments": {
-                  "path": "report.bin",
+                  "file": "report.bin",
                   "title": "Report"
                 },
                 "as": "attached"
@@ -41,17 +42,18 @@
       {
         "hook": {
           "id": "toolu_01ATTACHbbbbbbbbbbbbbbbb",
-          "name": "mcp__riggs__attach",
+          "name": "mcp__slack__attach",
           "input": {
-            "path": "../outside.txt"
+            "file": "../outside.txt"
           },
           "allow": [
             {
               "call_tool": {
                 "id": "toolu_01ATTACHbbbbbbbbbbbbbbbb",
+                "server": "slack",
                 "name": "attach",
                 "arguments": {
-                  "path": "../outside.txt"
+                  "file": "../outside.txt"
                 },
                 "as": "refused"
               }

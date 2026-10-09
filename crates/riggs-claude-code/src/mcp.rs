@@ -1,23 +1,14 @@
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
-use rax::attachment::MAX_ATTACHMENT_BYTES;
 use rax::tool::ToolGroup;
-use riggs_node::{AttachmentMeta, AttachmentSource, BackendEvent, Delivery};
+use riggs_node::ToolUnreachable;
 use serde_json::{Value, json};
-use tokio::sync::oneshot;
-use tokio::time::timeout;
 
-use crate::emit::Route;
 use crate::interaction::{self, ToolResult};
 use crate::process::{Proc, TurnCtl};
 use crate::wire::{self, MCP_SERVER, text_of};
 
 const PROTOCOL_VERSION: &str = "2025-11-25";
-
-/// Long enough for a gateway to take the bytes and upload them, which can retry.
-const RECEIPT_WAIT: Duration = Duration::from_secs(180);
 
 pub(crate) async fn serve(
     proc: Arc<Proc>,
@@ -49,7 +40,7 @@ pub(crate) async fn serve(
         match method.as_str() {
             "initialize" => Ok(initialize(&params, &group.namespace)),
             "tools/list" => Ok(json!({"tools": published(group)})),
-            "tools/call" => Ok(render(relay(&proc, &group.namespace, &params).await)),
+            "tools/call" => Ok(render(relay(&proc, group, &params).await)),
             "ping" => Ok(json!({})),
             _ => Err((-32601, "method not found".to_owned())),
         }
@@ -137,19 +128,6 @@ fn tools() -> Value {
                 },
             },
         },
-        {
-            "name": "attach",
-            "description": "Attach a file from the working directory to your reply, so the person receives the file itself. It must be inside the working directory and at most 100 MiB.",
-            "inputSchema": {
-                "type": "object",
-                "required": ["path"],
-                "properties": {
-                    "path": {"type": "string", "description": "Relative to the working directory, or absolute inside it."},
-                    "title": {"type": "string"},
-                    "comment": {"type": "string"},
-                },
-            },
-        },
     ])
 }
 
@@ -172,8 +150,11 @@ fn published(group: &ToolGroup) -> Value {
 
 /// Hands one call to the gateway and waits. Every way this can fail is a refusal the agent reads,
 /// never silence: a turn must not hang on a gateway that is not coming back.
-async fn relay(proc: &Arc<Proc>, namespace: &str, params: &Value) -> ToolResult {
-    let name = text_of(params, "name").unwrap_or_default().to_owned();
+async fn relay(proc: &Arc<Proc>, group: &ToolGroup, params: &Value) -> ToolResult {
+    let name = text_of(params, "name").unwrap_or_default();
+    let Some(tool) = group.tools.iter().find(|tool| tool.name == name) else {
+        return ToolResult::error(format!("Error: there is no tool named {name}"));
+    };
     let arguments = params
         .get("arguments")
         .cloned()
@@ -184,13 +165,20 @@ async fn relay(proc: &Arc<Proc>, namespace: &str, params: &Value) -> ToolResult 
              Do not retry it; say so and ask how to proceed.",
         );
     };
-    match host
+    let called = host
         .tools
-        .call(proc.key(), namespace, &name, arguments)
-        .await
-    {
+        .call(
+            proc.key(),
+            &group.namespace,
+            tool,
+            arguments,
+            proc.workdir(),
+        )
+        .await;
+    match called {
         Ok(outcome) if outcome.is_error => ToolResult::error(outcome.content),
         Ok(outcome) => ToolResult::text(outcome.content),
+        Err(ToolUnreachable::File(refused)) => ToolResult::error(format!("Error: {refused}")),
         Err(unreachable) => ToolResult::error(format!(
             "{name} did not run: {unreachable}. Do not retry it blindly — say so and ask how to \
              proceed."
@@ -213,7 +201,6 @@ async fn call(proc: &Proc, params: &Value, turn: Option<TurnCtl>) -> ToolResult 
         Some("auth") => auth(proc, &args).await,
         Some("ask") => ask(&args, turn).await,
         Some("present_plan") => plan(&args, turn).await,
-        Some("attach") => attach(proc, &args, turn).await,
         Some(other) => ToolResult::error(format!("Error: there is no tool named {other}")),
         None => ToolResult::error("Error: a tool name is required"),
     }
@@ -265,117 +252,6 @@ async fn plan(args: &Value, turn: Option<TurnCtl>) -> ToolResult {
     };
     let request = interaction::plan_request(interaction::prompt_id(), title, plan);
     interaction::plan_result(turn.prompts.plan(request).await)
-}
-
-async fn attach(proc: &Proc, args: &Value, turn: Option<TurnCtl>) -> ToolResult {
-    let Some(path) = text_of(args, "path").filter(|path| !path.trim().is_empty()) else {
-        return ToolResult::error("Error: a path is required");
-    };
-    // Claude Code carries on by itself when a background task finishes, after the turn has ended.
-    // What it attaches then goes out with the rest of that background work.
-    let route = turn.map_or(Route::Background, |turn| Route::Turn(turn.stream));
-    let workdir = match tokio::fs::canonicalize(proc.workdir()).await {
-        Ok(workdir) => workdir,
-        Err(err) => {
-            return ToolResult::error(format!(
-                "Error: the working directory cannot be read: {err}"
-            ));
-        }
-    };
-    let candidate = if Path::new(path).is_absolute() {
-        PathBuf::from(path)
-    } else {
-        workdir.join(path)
-    };
-    let resolved = match tokio::fs::canonicalize(&candidate).await {
-        Ok(resolved) => resolved,
-        Err(err) => return ToolResult::error(format!("Error: {path} cannot be opened: {err}")),
-    };
-    if !resolved.starts_with(&workdir) {
-        return ToolResult::error(format!(
-            "Error: {path} is outside the working directory, so it cannot be attached"
-        ));
-    }
-    let size = match tokio::fs::metadata(&resolved).await {
-        Ok(meta) if meta.is_dir() => {
-            return ToolResult::error(format!("Error: {path} is a directory"));
-        }
-        Ok(meta) if !meta.is_file() => {
-            return ToolResult::error(format!("Error: {path} is not a regular file"));
-        }
-        Ok(meta) if meta.len() == 0 => {
-            return ToolResult::error(format!("Error: {path} is empty"));
-        }
-        Ok(meta) if meta.len() > MAX_ATTACHMENT_BYTES => {
-            return ToolResult::error(format!(
-                "Error: {path} is larger than the 100 MiB attachment limit"
-            ));
-        }
-        Ok(meta) => meta.len(),
-        Err(err) => return ToolResult::error(format!("Error: {path} cannot be read: {err}")),
-    };
-    let file = match tokio::fs::File::open(&resolved).await {
-        Ok(file) => file,
-        Err(err) => return ToolResult::error(format!("Error: {path} cannot be opened: {err}")),
-    };
-    let filename = resolved
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned());
-    let name = filename.clone().unwrap_or_else(|| path.to_owned());
-    let meta = AttachmentMeta {
-        mimetype: mimetype(&resolved).map(str::to_owned),
-        filename,
-        title: text_of(args, "title").map(str::to_owned),
-        comment: text_of(args, "comment").map(str::to_owned),
-    };
-    let (delivery, delivered) = oneshot::channel();
-    let source = AttachmentSource {
-        meta,
-        size,
-        reader: Box::new(file),
-        delivery: Some(delivery),
-    };
-    proc.emit(route, BackendEvent::Attachment(source));
-    match timeout(RECEIPT_WAIT, delivered).await {
-        Ok(Ok(Delivery::Delivered)) => {
-            ToolResult::text(format!("Attached {name} ({size} bytes) to your reply."))
-        }
-        Ok(Ok(Delivery::Unconfirmed)) => ToolResult::text(format!(
-            "Sent {name} ({size} bytes) with your reply. This gateway does not confirm delivery, \
-             so if the person says it is missing, believe them."
-        )),
-        Ok(Ok(Delivery::Failed(reason))) => ToolResult::error(format!(
-            "Error: {name} was not delivered: {reason}. Tell the person it did not arrive."
-        )),
-        Ok(Err(_)) => ToolResult::error(format!(
-            "Error: {name} was not delivered: the conversation lost its gateway before it was \
-             sent. Tell the person it did not arrive."
-        )),
-        Err(_) => ToolResult::error(format!(
-            "Error: the gateway did not confirm {name} within {} seconds, so it may not have \
-             arrived. Tell the person rather than sending it again.",
-            RECEIPT_WAIT.as_secs()
-        )),
-    }
-}
-
-fn mimetype(path: &Path) -> Option<&'static str> {
-    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
-    Some(match extension.as_str() {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "svg" => "image/svg+xml",
-        "pdf" => "application/pdf",
-        "json" => "application/json",
-        "zip" => "application/zip",
-        "csv" => "text/csv",
-        "html" | "htm" => "text/html",
-        "md" => "text/markdown",
-        "txt" | "log" => "text/plain",
-        _ => return None,
-    })
 }
 
 #[cfg(test)]

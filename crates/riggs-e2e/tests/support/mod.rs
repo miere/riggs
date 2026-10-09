@@ -8,14 +8,16 @@ use std::time::Duration;
 use nix::sys::signal::kill;
 use nix::unistd::Pid;
 use rax::content::ContentBlock;
-use rax::session::{GatewayCapabilities, Initialized};
-use rax::{Event, Open};
-use rax_sim::{NodeOptions, SimConfig, SimError, SimNode, Simulator};
+use rax::id::SessionId;
+use rax::session::{GatewayCapabilities, Initialized, NewSession};
+use rax::tool::{CallTool, ToolDef, ToolGroup, ToolKind};
+use rax::{Event, NodeCall, Open};
+use rax_sim::{NodeCallRequest, NodeOptions, SimConfig, SimError, SimNode, Simulator};
 use rax_tokio::gateway::GatewayConfig;
 use rax_tokio::node::{NodeConfig, NodeLink};
 use riggs_claude_code::{ClaudeCode, ClaudeCodeConfig};
 use riggs_node::{NodeServer, SESSION_RETENTION, ServerConfig, SessionsConfig, Stopped};
-use serde_json::Value;
+use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::task::JoinHandle;
 
@@ -40,7 +42,46 @@ pub fn all_caps() -> GatewayCapabilities {
         resource_schemes: vec![],
         readable_schemes: vec![],
         tools: None,
-        attachment_receipts: true,
+    }
+}
+
+/// A gateway's `slack` group with one tool that takes a file from the node. Riggs knows it only
+/// by this schema.
+pub fn slack_attach() -> ToolGroup {
+    ToolGroup {
+        namespace: "slack".to_owned(),
+        tools: vec![ToolDef {
+            name: "attach".to_owned(),
+            description: "Post a file to the conversation.".to_owned(),
+            input_schema: Some(
+                json!({"type": "object", "required": ["file"], "properties": {
+                "file": {"type": "string", "format": "local-file"},
+                "title": {"type": "string"}}}),
+            ),
+            kind: ToolKind::Edit,
+        }],
+    }
+}
+
+/// Opens a session lent [`slack_attach`].
+pub async fn attach_session(node: &SimNode) -> SessionId {
+    let request = NewSession {
+        tool_groups: vec![slack_attach()],
+        ..Default::default()
+    };
+    node.open_session(request).await.unwrap().session_id
+}
+
+/// The next `tool.call`. Credential health reports may arrive first; they are answered and set
+/// aside.
+pub async fn next_tool_call(node: &SimNode) -> (NodeCallRequest, CallTool) {
+    loop {
+        let request = node.next_node_call().await.unwrap();
+        if let NodeCall::CallTool(call) = &request.call {
+            let call = call.clone();
+            return (request, call);
+        }
+        request.reply().await.unwrap();
     }
 }
 
