@@ -95,7 +95,7 @@ mod tests {
         let ask = call("toolu_2", "mcp__riggs__ask", json!({"questions": []}), &[]);
         assert_eq!(ask.kind, ToolKind::Think);
         assert_eq!(ask.title.as_deref(), Some(r#"{"questions":[]}"#));
-        assert_eq!(kind("mcp__riggs__attach", &[]), ToolKind::Other);
+        assert_eq!(kind("mcp__riggs__auth", &[]), ToolKind::Other);
         assert_eq!(kind("Grep", &[]), ToolKind::Search);
     }
 

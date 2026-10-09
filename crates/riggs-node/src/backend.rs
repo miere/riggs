@@ -11,7 +11,6 @@ use rax::tool::{PlanEntry, ToolCallUpdate, ToolGroup};
 use rax::{ErrorKind, Open, Unhandled};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncRead;
-use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -137,19 +136,6 @@ pub struct AttachmentSource {
     pub meta: AttachmentMeta,
     pub size: u64,
     pub reader: Box<dyn AsyncRead + Send + Unpin>,
-    /// Told what became of the attachment. Dropped unanswered if it never reached a gateway.
-    pub delivery: Option<oneshot::Sender<Delivery>>,
-}
-
-/// What became of an attachment, as far as the node can tell.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Delivery {
-    /// The gateway confirmed the person can see it.
-    Delivered,
-    /// The gateway has it but does not confirm delivery, or named an outcome this node does not
-    /// know.
-    Unconfirmed,
-    Failed(String),
 }
 
 /// Everything one turn may reach. The gate and prompts stop routing to the turn once it ends.

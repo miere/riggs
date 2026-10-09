@@ -28,6 +28,10 @@ async fn initialize_declares_every_capability_the_backend_resolved() {
         caps.tool_groups,
         "the node takes its gateway tools per session"
     );
+    assert!(
+        caps.local_files,
+        "the node hands a gateway tool its files by identifier"
+    );
     assert_eq!(
         caps.sessions,
         SessionDurability::Ephemeral,

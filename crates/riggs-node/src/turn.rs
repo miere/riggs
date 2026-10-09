@@ -15,7 +15,7 @@ use rax_tokio::node::NodeHandle;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, sleep_until};
 
-use crate::backend::{AttachmentSource, Backend, BackendError, BackendEvent, Delivery, SessionKey};
+use crate::backend::{AttachmentSource, Backend, BackendError, BackendEvent, SessionKey};
 use crate::state::{
     self, HoldStart, NOBODY, PromptKind, PromptRoute, PromptStart, Shared, TIMED_OUT, TurnEntry,
     UNSENT, WITHDRAWN, deny, outcome,
@@ -344,19 +344,22 @@ impl Pump {
     }
 
     async fn attach(&self, source: AttachmentSource) -> bool {
-        let AttachmentSource {
-            meta,
-            size,
-            reader,
-            mut delivery,
-        } = source;
+        let AttachmentSource { meta, size, reader } = source;
         let sent = tokio::select! {
             sent = self.handle.send_attachment_from(reader, size) => sent,
             () = self.turn.orphaned.cancelled() => return false,
         };
-        let epoch = self.turn.epoch;
-        let transfer_id = match sent {
-            Ok(transfer_id) => transfer_id,
+        let event = match sent {
+            Ok(transfer_id) => Event::Attachment {
+                attachment: Attachment {
+                    transfer_id,
+                    size,
+                    filename: meta.filename,
+                    title: meta.title,
+                    comment: meta.comment,
+                    mimetype: meta.mimetype,
+                },
+            },
             Err(TransferError::Send(err)) => {
                 tracing::warn!(stream = %self.turn.stream, error = %err, "could not forward an attachment");
                 return false;
@@ -364,51 +367,14 @@ impl Pump {
             Err(err) => {
                 let name = meta.filename.as_deref().unwrap_or("attachment");
                 tracing::warn!(stream = %self.turn.stream, error = %err, "an attachment could not be transferred");
-                if let Some(delivery) = delivery {
-                    let _ = delivery.send(Delivery::Failed(format!(
-                        "it could not be transferred: {err}"
-                    )));
-                }
                 let message = format!("attachment {name:?} could not be transferred: {err}");
-                let event = Event::Error {
+                Event::Error {
                     error: rax::Error::new(ErrorKind::Unknown, message),
-                };
-                return self
-                    .deliver(self.handle.event(self.turn.stream.clone(), event))
-                    .await;
+                }
             }
         };
-        // Registered before the event goes, so a receipt can never arrive ahead of its waiter.
-        if self.shared.acknowledges(epoch)
-            && let Some(delivery) = delivery.take()
-        {
-            self.shared
-                .expect_receipt(epoch, transfer_id.clone(), delivery);
-        }
-        let event = Event::Attachment {
-            attachment: Attachment {
-                transfer_id: transfer_id.clone(),
-                size,
-                filename: meta.filename,
-                title: meta.title,
-                comment: meta.comment,
-                mimetype: meta.mimetype,
-            },
-        };
-        let delivered = self
-            .deliver(self.handle.event(self.turn.stream.clone(), event))
-            .await;
-        if !delivered {
-            delivery = delivery.or_else(|| self.shared.forget_receipt(epoch, &transfer_id));
-        }
-        if let Some(delivery) = delivery {
-            let _ = delivery.send(if delivered {
-                Delivery::Unconfirmed
-            } else {
-                Delivery::Failed("the gateway could not be reached".to_owned())
-            });
-        }
-        delivered
+        self.deliver(self.handle.event(self.turn.stream.clone(), event))
+            .await
     }
 
     async fn deliver<E: std::fmt::Display>(

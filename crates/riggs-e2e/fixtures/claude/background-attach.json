@@ -30,18 +30,19 @@
       {
         "hook": {
           "id": "toolu_01ATTACHcccccccccccccccc",
-          "name": "mcp__riggs__attach",
+          "name": "mcp__slack__attach",
           "input": {
-            "path": "report.md",
+            "file": "report.md",
             "title": "Report"
           },
           "allow": [
             {
               "call_tool": {
                 "id": "toolu_01ATTACHcccccccccccccccc",
+                "server": "slack",
                 "name": "attach",
                 "arguments": {
-                  "path": "report.md",
+                  "file": "report.md",
                   "title": "Report"
                 },
                 "as": "attached"

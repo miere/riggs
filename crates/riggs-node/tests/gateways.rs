@@ -4,10 +4,12 @@
 
 mod support;
 
+use std::path::Path;
+
 use rax::content::ContentBlock;
 use rax::event::BackgroundEvent;
 use rax::session::{GatewayCapabilities, SessionRef};
-use rax::tool::{CallTool, ToolOutcome};
+use rax::tool::{CallTool, ToolDef, ToolKind, ToolOutcome};
 use rax::{ErrorKind, GatewayCall, GatewayReply, NodeCall, NodeReply, Open, Rejection};
 use rax_tokio::gateway::LinkEvent;
 use riggs_node::{NotDelivered, SessionKey, Stopped};
@@ -90,7 +92,17 @@ async fn tool_calls_and_background_events_reach_the_sessions_own_gateway() {
 
     let calling = tokio::spawn({
         let host = host.clone();
-        async move { host.tools.call(&key, "editor", "read", json!({})).await }
+        async move {
+            let read = ToolDef {
+                name: "read".into(),
+                description: "Read the open file.".into(),
+                input_schema: None,
+                kind: ToolKind::Read,
+            };
+            host.tools
+                .call(&key, "editor", &read, json!({}), Path::new("."))
+                .await
+        }
     });
     let LinkEvent::Request {
         id,

@@ -4,6 +4,7 @@
 mod backend;
 mod files;
 mod host;
+mod local_files;
 mod server;
 mod sessions;
 mod state;
@@ -12,12 +13,13 @@ mod turn;
 
 pub use backend::{
     AttachmentMeta, AttachmentSource, Backend, BackendError, BackendEvent, BackendInfo,
-    BackendRecord, Delivery, NewSession, Opened, Restore, SessionKey, TurnHandle,
+    BackendRecord, NewSession, Opened, Restore, SessionKey, TurnHandle,
 };
 pub use host::{
     BackgroundGate, BackgroundSink, CredentialReporter, GatewayTools, HostHandles, NotDelivered,
     SignInRefused, SignIns, ToolUnreachable,
 };
+pub use local_files::FileRefused;
 pub use server::{
     CALL_TIMEOUT, DEFAULT_GATEWAY, LINK_GRACE, NodeServer, SESSION_RETENTION, SHUTDOWN_GRACE,
     ServerConfig, ServerError, SessionsConfig, Stopped,

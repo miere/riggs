@@ -5,26 +5,16 @@ mod support;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use rax::attachment::{AttachmentReceipt, ReceiptOutcome};
 use rax::content::ContentBlock;
 use rax::event::{BackgroundEvent, StopReason};
-use rax::id::TransferId;
 use rax::interaction::{DisplayAnswer, DisplayOutcome, PlanChoice};
 use rax::open::Subject;
-use rax::session::{GatewayCapabilities, NewSession, SessionDurability, ToolGate};
+use rax::session::{NewSession, SessionDurability, ToolGate};
 use rax::tool::{DeniedBy, ToolCallStatus, ToolDef, ToolGroup, ToolKind, ToolOutcome};
 use rax::{Decision, ErrorKind, Event, NodeCall, Open};
-use rax_sim::{LinkChange, Match, SimNode, Transfer, VerdictPolicy};
+use rax_sim::{LinkChange, Match, NodeMethod, SimNode, VerdictPolicy};
 use serde_json::{Value, json};
 use support::*;
-
-fn delivered(transfer_id: &TransferId) -> AttachmentReceipt {
-    AttachmentReceipt {
-        transfer_id: transfer_id.clone(),
-        outcome: ReceiptOutcome::Delivered,
-        reason: None,
-    }
-}
 
 /// The text a session says with no turn open, up to the end of that background work.
 async fn background_texts(node: &SimNode) -> Vec<String> {
@@ -165,7 +155,7 @@ async fn a_prompt_is_accepted_before_its_events_and_completes() {
     assert_eq!(initialize["request"]["sdkMcpServers"], json!(["riggs"]));
     assert_eq!(
         world.events("mcp_tools")[0]["tools"],
-        json!(["auth", "ask", "present_plan", "attach"])
+        json!(["auth", "ask", "present_plan"])
     );
     assert_eq!(
         world.user_frames()[0]["message"]["content"],
@@ -751,59 +741,75 @@ async fn a_background_subagent_reports_after_the_turn_and_its_tool_waits_for_a_v
     world.stop_node().await;
 }
 
+/// Riggs has no attach tool of its own. The gateway lends one whose schema marks `file`, and that
+/// mark is all Riggs acts on: the path becomes an identifier the gateway reads the file with.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_file_is_attached_to_the_reply_and_one_outside_the_workdir_is_refused() {
+async fn a_gateway_tool_gets_a_file_by_identifier_and_one_outside_the_workdir_is_refused() {
     let mut world = World::new("attach").await;
     let node = world.start_node().await;
     node.set_verdicts(VerdictPolicy::AllowAll);
     let bytes: Vec<u8> = (0..300u32 << 10).map(|i| (i % 251) as u8).collect();
     std::fs::write(world.work().join("report.bin"), &bytes).unwrap();
     std::fs::write(world.root().join("outside.txt"), "secret").unwrap();
-    let session = node.new_session(vec![]).await.unwrap().session_id;
+    let session = attach_session(&node).await;
 
     let mut turn = node
         .prompt(session.clone(), text("send the report"))
         .await
         .unwrap();
-    let Event::Attachment { attachment } = turn.expect(Match::attachment()).await.unwrap() else {
-        panic!("expected an attachment")
-    };
-    assert_eq!(attachment.size, bytes.len() as u64);
-    assert_eq!(attachment.filename.as_deref(), Some("report.bin"));
-    assert_eq!(attachment.title.as_deref(), Some("Report"));
-    let received = node.transfer(&attachment.transfer_id).await.unwrap();
-    assert!(received == Transfer::Complete(bytes), "{received:?}");
-    node.receipt(delivered(&attachment.transfer_id))
+    let (request, call) = next_tool_call(&node).await;
+    assert_eq!(call.namespace.as_deref(), Some("slack"));
+    assert_eq!(call.name, "attach");
+    let arguments = call.arguments.unwrap();
+    assert_eq!(arguments["title"], "Report");
+    let id = arguments["file"].as_str().unwrap();
+    assert!(id.starts_with("lf_"), "the path travelled upstream: {id}");
+
+    let file = node.read_local_file(id, None).await.unwrap();
+    assert_eq!(file.name.as_deref(), Some("report.bin"));
+    assert!(file.bytes == bytes, "the file was altered in transit");
+    assert_eq!(
+        fault(node.read_local_file(id, None).await).kind,
+        ErrorKind::NotFound
+    );
+    request
+        .answer_tool(ToolOutcome {
+            content: "Posted report.bin to the thread.".into(),
+            is_error: false,
+        })
         .await
         .unwrap();
-    turn.expect(Match::message_contains(
-        "Attached report.bin (307200 bytes) to your reply.",
-    ))
-    .await
-    .unwrap();
+    turn.expect(Match::message_contains("Posted report.bin to the thread."))
+        .await
+        .unwrap();
     turn.until_end().await.unwrap();
 
     let mut refused = node.prompt(session, text("send the secret")).await.unwrap();
     refused
-        .expect(Match::message_contains("is outside the working directory"))
+        .expect(Match::message_contains(
+            "Error: ../outside.txt is outside the working directory",
+        ))
         .await
         .unwrap();
     refused.until_end().await.unwrap();
-    assert!(
-        !refused
-            .seen()
-            .iter()
-            .any(|event| matches!(event, Open::Known(Event::Attachment { .. })))
-    );
+    let tool_calls = node
+        .call_log()
+        .iter()
+        .filter(|record| record.method == NodeMethod::CallTool)
+        .count();
+    assert_eq!(tool_calls, 1, "the refused path reached the gateway");
+    assert!(world.events("violation").is_empty());
     world.stop_node().await;
 }
 
+/// Claude Code carries on by itself when a background task finishes, after the turn has ended.
+/// A file it sends then still reaches the session's gateway.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_file_attached_after_the_turn_ended_is_sent_in_the_background() {
+async fn a_file_sent_after_the_turn_ended_is_read_by_the_gateway() {
     let mut world = World::new("background-attach").await;
     let node = world.start_node().await;
     std::fs::write(world.work().join("report.md"), "# Report\n").unwrap();
-    let session = node.new_session(vec![]).await.unwrap().session_id;
+    let session = attach_session(&node).await;
     let mut turn = node
         .prompt(session.clone(), text("run the tests"))
         .await
@@ -814,135 +820,29 @@ async fn a_file_attached_after_the_turn_ended_is_sent_in_the_background() {
     let Open::Known(BackgroundEvent::ToolCall { tool_call }) = event else {
         panic!("expected a background tool call, got {event:?}")
     };
+    assert_eq!(tool_call.name, "mcp__slack__attach");
     node.verdict(tool_call.id, Decision::Allow).await.unwrap();
 
-    let attachment = loop {
-        let (_, event) = node.next_background().await.unwrap();
-        if let Open::Known(BackgroundEvent::Attachment { attachment }) = event {
-            break attachment;
-        }
-    };
-    assert_eq!(attachment.filename.as_deref(), Some("report.md"));
-    let received = node.transfer(&attachment.transfer_id).await.unwrap();
-    assert!(
-        received == Transfer::Complete(b"# Report\n".to_vec()),
-        "{received:?}"
-    );
-    node.receipt(delivered(&attachment.transfer_id))
+    let (request, call) = next_tool_call(&node).await;
+    assert_eq!(call.session_id, session);
+    let arguments = call.arguments.unwrap();
+    let file = node
+        .read_local_file(arguments["file"].as_str().unwrap(), None)
+        .await
+        .unwrap();
+    assert_eq!(file.name.as_deref(), Some("report.md"));
+    assert_eq!(file.bytes, b"# Report\n");
+    request
+        .answer_tool(ToolOutcome {
+            content: "Slack refused the upload. Tell the person it did not arrive.".into(),
+            is_error: true,
+        })
         .await
         .unwrap();
     assert_eq!(
         background_texts(&node).await,
-        ["Attached report.md (9 bytes) to your reply."]
+        ["Slack refused the upload. Tell the person it did not arrive."]
     );
-    world.stop_node().await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_file_the_gateway_could_not_deliver_is_reported_as_not_delivered() {
-    let mut world = World::new("background-attach").await;
-    let node = world.start_node().await;
-    node.set_verdicts(VerdictPolicy::AllowAll);
-    std::fs::write(world.work().join("report.md"), "# Report\n").unwrap();
-    let session = node.new_session(vec![]).await.unwrap().session_id;
-    let mut turn = node.prompt(session, text("run the tests")).await.unwrap();
-    turn.until_end().await.unwrap();
-
-    let attachment = loop {
-        let (_, event) = node.next_background().await.unwrap();
-        if let Open::Known(BackgroundEvent::Attachment { attachment }) = event {
-            break attachment;
-        }
-    };
-    node.transfer(&attachment.transfer_id).await.unwrap();
-    node.receipt(AttachmentReceipt {
-        transfer_id: attachment.transfer_id,
-        outcome: ReceiptOutcome::Failed,
-        reason: Some("Slack refused the upload".into()),
-    })
-    .await
-    .unwrap();
-    assert_eq!(
-        background_texts(&node).await,
-        [
-            "Error: report.md was not delivered: Slack refused the upload. Tell the person it did \
-             not arrive."
-        ]
-    );
-    world.stop_node().await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_gateway_without_receipts_gets_the_file_but_no_promise_it_arrived() {
-    let mut world = World::new("background-attach").await;
-    let (node, _) = world
-        .start_node_with(GatewayCapabilities {
-            attachment_receipts: false,
-            ..all_caps()
-        })
-        .await;
-    node.set_verdicts(VerdictPolicy::AllowAll);
-    std::fs::write(world.work().join("report.md"), "# Report\n").unwrap();
-    let session = node.new_session(vec![]).await.unwrap().session_id;
-    let mut turn = node.prompt(session, text("run the tests")).await.unwrap();
-    turn.until_end().await.unwrap();
-
-    let texts = background_texts(&node).await;
-    assert_eq!(texts.len(), 1, "{texts:?}");
-    assert!(
-        texts[0].starts_with(
-            "Sent report.md (9 bytes) with your reply. This gateway does not confirm delivery"
-        ),
-        "{texts:?}"
-    );
-    world.stop_node().await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn an_attachment_that_fails_mid_read_is_an_error_and_the_turn_completes() {
-    let mut world = World::new("attach-truncated").await;
-    let node = world.start_node().await;
-    std::fs::write(world.work().join("big.bin"), vec![7u8; 40 << 20]).unwrap();
-    let session = node.new_session(vec![]).await.unwrap().session_id;
-    let mut turn = node.prompt(session, text("send it")).await.unwrap();
-    let Event::ToolCall { tool_call } = turn
-        .expect(Match::tool_call("mcp__riggs__attach"))
-        .await
-        .unwrap()
-    else {
-        panic!("expected a tool call")
-    };
-
-    world.sim.pause_reading();
-    turn.verdict(tool_call.id, Decision::Allow).await.unwrap();
-    world
-        .eventually("fake-claude to call attach", |world| {
-            world.has_event("tool_calling")
-        })
-        .await;
-    // The tool now waits for the transfer to settle, so the file is cut from here once Riggs has
-    // had ample time to open it and start reading.
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    std::fs::OpenOptions::new()
-        .write(true)
-        .open(world.work().join("big.bin"))
-        .unwrap()
-        .set_len(0)
-        .unwrap();
-    world.sim.resume_reading();
-
-    let (_, transfer) = node.next_transfer().await.unwrap();
-    assert!(matches!(transfer, Transfer::Failed(_)), "{transfer:?}");
-    turn.expect(Match::error(ErrorKind::Unknown)).await.unwrap();
-    turn.expect(Match::message_contains(
-        "Error: big.bin was not delivered: it could not be transferred",
-    ))
-    .await
-    .unwrap();
-    turn.expect(Match::complete(StopReason::EndTurn))
-        .await
-        .unwrap();
-    turn.until_end().await.unwrap();
     world.stop_node().await;
 }
 

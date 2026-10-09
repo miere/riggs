@@ -16,8 +16,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use nix::sys::signal::Signal;
-use rax::attachment::{AttachmentReceipt, ReceiptOutcome};
 use rax::interaction::{DisplayAnswer, DisplayOutcome};
+use rax::tool::ToolOutcome;
 use rax::{Decision, Event};
 use rax_sim::{
     AnswerPolicy, LinkChange, Match, ResumeCounts, SimNode, ToolCallReport, TurnReport,
@@ -27,7 +27,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use harness::{Agent, Rig, Riggs};
-use support::{TOKEN, all_caps, text};
+use support::{TOKEN, all_caps, attach_session, next_tool_call, text};
 
 const DEFAULT_RUNS: usize = 20;
 const ATTACHMENT_BYTES: usize = 10 << 20;
@@ -300,14 +300,16 @@ async fn allowed_tool_turns(agent: Agent, prompt: &str, runs: usize) -> Outcome 
     outcome
 }
 
-async fn attachment_turns(agent: Agent, prompt: &str, runs: usize, on_disk: bool) -> Outcome {
+fn report_on_disk(rig: &Rig) {
+    let bytes: Vec<u8> = (0..ATTACHMENT_BYTES)
+        .map(|byte| (byte % 251) as u8)
+        .collect();
+    std::fs::write(rig.work().join("report.bin"), &bytes).unwrap();
+}
+
+/// A file the agent pushes with its reply, which is how an ACP agent's binary content travels.
+async fn attachment_turns(agent: Agent, prompt: &str, runs: usize) -> Outcome {
     let rig = rig_for(agent).await;
-    if on_disk {
-        let bytes: Vec<u8> = (0..ATTACHMENT_BYTES)
-            .map(|byte| (byte % 251) as u8)
-            .collect();
-        std::fs::write(rig.work().join("report.bin"), &bytes).unwrap();
-    }
     let mut outcome = Outcome::default();
     let (_riggs, node) = attached(&rig, &mut outcome).await;
     node.set_verdicts(VerdictPolicy::AllowAll);
@@ -320,12 +322,32 @@ async fn attachment_turns(agent: Agent, prompt: &str, runs: usize, on_disk: bool
         };
         assert_eq!(attachment.size, ATTACHMENT_BYTES as u64);
         node.transfer(&attachment.transfer_id).await.unwrap();
-        let receipt = AttachmentReceipt {
-            transfer_id: attachment.transfer_id,
-            outcome: ReceiptOutcome::Delivered,
-            reason: None,
+        turn.until_end().await.unwrap();
+    }
+    outcome.absorb(&rig);
+    outcome
+}
+
+/// A file the gateway pulls for a tool it lent, which is how Claude Code attaches one.
+async fn local_file_turns(agent: Agent, prompt: &str, runs: usize) -> Outcome {
+    let rig = rig_for(agent).await;
+    report_on_disk(&rig);
+    let mut outcome = Outcome::default();
+    let (_riggs, node) = attached(&rig, &mut outcome).await;
+    node.set_verdicts(VerdictPolicy::AllowAll);
+    for _ in 0..runs {
+        let session = attach_session(&node).await;
+        let mut turn = node.prompt(session, text(prompt)).await.unwrap();
+        let (request, call) = next_tool_call(&node).await;
+        let arguments = call.arguments.unwrap();
+        let id = arguments["file"].as_str().unwrap();
+        let file = node.read_local_file(id, None).await.unwrap();
+        assert_eq!(file.bytes.len(), ATTACHMENT_BYTES);
+        let posted = ToolOutcome {
+            content: "Posted.".into(),
+            is_error: false,
         };
-        node.receipt(receipt).await.unwrap();
+        request.answer_tool(posted).await.unwrap();
         turn.until_end().await.unwrap();
     }
     outcome.absorb(&rig);
@@ -431,7 +453,7 @@ async fn claude_code(runs: usize) -> BackendBenchmark {
         ("ask", ask_turns(runs).await),
         (
             "attachment",
-            attachment_turns(Agent::Claude("attach"), "send the report", runs, true).await,
+            local_file_turns(Agent::Claude("attach"), "send the report", runs).await,
         ),
         (
             "severed",
@@ -484,7 +506,6 @@ async fn acp(runs: usize) -> BackendBenchmark {
                 )),
                 "send the report",
                 runs,
-                false,
             )
             .await,
         ),

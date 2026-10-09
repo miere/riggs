@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use rax::content::ContentBlock;
 use rax::id::{RequestId, SessionId};
+use rax::local_file::ReadLocalFile;
 use rax::open::{Subject, UnhandledReason};
 use rax::session::{
     Initialize, Initialized, NewSession, NodeCapabilities, PROTOCOL_VERSION, Prompt,
@@ -14,7 +15,7 @@ use rax::session::{
 };
 use rax::tool::{MAX_NAMESPACE_LEN, ToolGroup};
 use rax::{ErrorKind, GatewayCall, GatewayReply, Metadata, Open, Rejection, Unhandled};
-use rax_tokio::node::{NodeEvent, NodeEvents, NodeHandle};
+use rax_tokio::node::{LocalFile, NodeEvent, NodeEvents, NodeHandle};
 use tokio::sync::{OnceCell, mpsc};
 use tokio::time::{Instant, Sleep, interval_at, sleep, timeout};
 use tokio_util::sync::CancellationToken;
@@ -305,12 +306,6 @@ impl NodeServer {
                                 tracing::debug!(%gateway, prompt = %id, "answer for a prompt this link did not show");
                             }
                         }
-                        NodeEvent::Receipt(receipt) => {
-                            let id = receipt.transfer_id.clone();
-                            if !inner.shared.receipt(gateway, receipt) {
-                                tracing::debug!(%gateway, transfer_id = %id, "receipt for an attachment nobody is waiting on");
-                            }
-                        }
                         NodeEvent::Unhandled { stream, body } => {
                             tracing::warn!(%gateway, stream = ?stream, subject = ?body.subject, reason = ?body.reason, "the gateway could not handle something this node sent");
                         }
@@ -464,6 +459,9 @@ impl Inner {
             GatewayCall::RenewCredential => Ok(GatewayReply::RenewCredential(
                 self.backend.renew_credential().await,
             )),
+            GatewayCall::ReadLocalFile(read) => {
+                return self.read_local_file(&gateway, &handle, id, read).await;
+            }
             GatewayCall::Close => {
                 self.answer(&handle, epoch, id, Ok(GatewayReply::Close))
                     .await;
@@ -475,6 +473,37 @@ impl Inner {
         self.answer(&handle, epoch, id, answer).await;
         if initialized {
             push_health_snapshot(&self.shared, epoch).await;
+        }
+    }
+
+    /// Serves a file a tool call in flight offered this gateway. Anything else is `not_found`,
+    /// whether it was read already, withdrawn with its call, offered to another gateway or never
+    /// minted, so a gateway learns nothing by guessing.
+    async fn read_local_file(
+        &self,
+        gateway: &str,
+        handle: &NodeHandle,
+        id: RequestId,
+        read: ReadLocalFile,
+    ) {
+        let Some(offered) = self.shared.local_files.redeem(&read.id, gateway) else {
+            tracing::debug!(%gateway, local_file = %read.id, "a gateway asked for a file this node is not offering it");
+            let error = rax::Error::new(ErrorKind::NotFound, "this node holds no such file");
+            if let Err(err) = handle.fault(id, error).await {
+                tracing::debug!(%gateway, error = %err, "could not refuse a file read");
+            }
+            return;
+        };
+        let described = LocalFile {
+            name: offered.name,
+            mimetype: offered.mimetype.map(str::to_owned),
+        };
+        let file = tokio::fs::File::from_std(offered.file);
+        let served = handle
+            .serve_local_file_from(id, &read, file, offered.size, described)
+            .await;
+        if let Err(err) = served {
+            tracing::warn!(%gateway, local_file = %read.id, error = %err, "a file was not handed to the gateway");
         }
     }
 
@@ -524,7 +553,7 @@ impl Inner {
                 tool_gate: info.tool_gate,
                 sessions: self.sessions.durability(&info),
                 tool_groups: true,
-                attachment_receipts: true,
+                local_files: true,
             },
             metadata: self.shared.metadata_for(gateway),
         })

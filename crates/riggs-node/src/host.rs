@@ -1,20 +1,26 @@
+use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use rax::attachment::Attachment;
 use rax::credential::CredentialHealth;
 use rax::event::BackgroundEvent;
 use rax::interaction::{DisplayOutcome, SignInRequest, SignInSettled, SignInState};
-use rax::tool::{CallTool, Decision, ToolOutcome};
+use rax::local_file::takes_local_files;
+use rax::tool::{CallTool, Decision, ToolDef, ToolOutcome};
 use rax::{NodeCall, NodeReply, ToolCall, UpdateMetadata};
 use rax_tokio::{CallError, SendError, TransferError};
 use serde_json::Value;
-use tokio::io::AsyncRead;
-use tokio::sync::oneshot;
 use tokio::time::{Instant, timeout};
 
-use crate::backend::{AttachmentMeta, AttachmentSource, Delivery, SessionKey};
+use crate::backend::{AttachmentSource, SessionKey};
+use crate::local_files::{self, FileRefused};
 use crate::state::{self, Epoch, PromptKind, PromptRoute, PromptStart, Shared, Unreached, lock};
 use crate::turn::{SignInPrompt, hold_background};
+
+/// How long a tool call that offered files may take: long enough for a gateway to read the bytes
+/// and pass them on, which can retry.
+const LOCAL_FILE_CALL_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// Everything a backend may reach with no turn open. It outlives every socket and link.
 #[derive(Clone)]
@@ -67,31 +73,51 @@ pub enum ToolUnreachable {
     TimedOut,
     #[error("the gateway refused it: {0}")]
     Refused(String),
+    /// A file the call named cannot be handed to the gateway. Unlike the rest, the agent can
+    /// often put this right itself.
+    #[error(transparent)]
+    File(#[from] FileRefused),
 }
 
 impl GatewayTools {
-    /// Runs `name` from the group `namespace` the session was opened with. The groups themselves
+    /// Runs `tool` from the group `namespace` the session was opened with. The groups themselves
     /// travel with `session.new`, never through here: this node declares `tool_groups`, so it
     /// ignores any catalogue a gateway still sends at `initialize`.
+    ///
+    /// The node never learns what a tool does, only what its schema says of its arguments. One
+    /// marked as a local file must name a file inside `root`; the gateway gets an identifier in
+    /// its place, which it can redeem only until this call returns.
     pub async fn call(
         &self,
         session: &SessionKey,
         namespace: &str,
-        name: &str,
-        arguments: Value,
+        tool: &ToolDef,
+        mut arguments: Value,
+        root: &Path,
     ) -> Result<ToolOutcome, ToolUnreachable> {
         let epoch = self
             .shared
             .owner_link(session)
             .map_err(|_| ToolUnreachable::NoGateway)?;
+        let offered = match &tool.input_schema {
+            Some(schema) if takes_local_files(schema) => {
+                let gateway = &epoch.gateway;
+                Some(local_files::offer(&self.shared, gateway, schema, &mut arguments, root).await?)
+            }
+            _ => None,
+        };
         let call = NodeCall::CallTool(CallTool {
             session_id: session.session_id(),
             namespace: Some(namespace.to_owned()),
-            name: name.to_owned(),
+            name: tool.name.clone(),
             arguments: Some(arguments),
         });
+        let patience = match &offered {
+            Some(_) => self.shared.call_timeout.max(LOCAL_FILE_CALL_TIMEOUT),
+            None => self.shared.call_timeout,
+        };
         let answered = tokio::select! {
-            answered = timeout(self.shared.call_timeout, epoch.handle.call(call)) => answered,
+            answered = timeout(patience, epoch.handle.call(call)) => answered,
             () = epoch.ended.cancelled() => return Err(ToolUnreachable::LinkEnded),
         };
         match answered {
@@ -162,69 +188,22 @@ impl BackgroundSink {
         session: &SessionKey,
         source: AttachmentSource,
     ) -> Result<(), NotDelivered> {
-        let AttachmentSource {
-            meta,
-            size,
-            reader,
-            mut delivery,
-        } = source;
-        let sent = self
-            .send_attachment(session, meta, size, reader, &mut delivery)
-            .await;
-        if let (Err(err), Some(delivery)) = (&sent, delivery) {
-            let _ = delivery.send(Delivery::Failed(err.to_string()));
-        }
-        sent
-    }
-
-    /// Hands `delivery` to the receipt it waits on when the gateway sends one, and otherwise
-    /// leaves it for the caller to settle.
-    async fn send_attachment(
-        &self,
-        session: &SessionKey,
-        meta: AttachmentMeta,
-        size: u64,
-        reader: Box<dyn AsyncRead + Send + Unpin>,
-        delivery: &mut Option<oneshot::Sender<Delivery>>,
-    ) -> Result<(), NotDelivered> {
         let epoch = self.epoch(session)?;
+        let AttachmentSource { meta, size, reader } = source;
         let transfer_id = tokio::select! {
             sent = epoch.handle.send_attachment_from(reader, size) => sent?,
             () = epoch.ended.cancelled() => return Err(NotDelivered::LinkEnded),
         };
-        if self.shared.acknowledges(epoch.id)
-            && let Some(waiting) = delivery.take()
-        {
-            self.shared
-                .expect_receipt(epoch.id, transfer_id.clone(), waiting);
-        }
         let attachment = Attachment {
-            transfer_id: transfer_id.clone(),
+            transfer_id,
             size,
             filename: meta.filename,
             title: meta.title,
             comment: meta.comment,
             mimetype: meta.mimetype,
         };
-        let event = BackgroundEvent::Attachment { attachment };
-        let sent = tokio::select! {
-            sent = epoch.handle.background(session.session_id(), event) => sent.map_err(NotDelivered::from),
-            () = epoch.ended.cancelled() => Err(NotDelivered::LinkEnded),
-        };
-        match sent {
-            Ok(()) => {
-                if let Some(unacknowledged) = delivery.take() {
-                    let _ = unacknowledged.send(Delivery::Unconfirmed);
-                }
-                Ok(())
-            }
-            Err(err) => {
-                if delivery.is_none() {
-                    *delivery = self.shared.forget_receipt(epoch.id, &transfer_id);
-                }
-                Err(err)
-            }
-        }
+        self.send(session, BackgroundEvent::Attachment { attachment })
+            .await
     }
 
     fn epoch(&self, session: &SessionKey) -> Result<Epoch, NotDelivered> {
