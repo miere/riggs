@@ -129,7 +129,10 @@ pub(crate) async fn spawn(
     };
     // Only the agent is boxed. The credential warden and the sign-in commands run outside it.
     let mut command = if config.sandbox.wraps() {
-        let wrapper = config.sandbox.wrap(&config.command, &config.workdir);
+        let credential = config.credential_path();
+        let wrapper = config
+            .sandbox
+            .wrap(&config.command, &config.workdir, credential.as_deref());
         let (first, rest) = wrapper
             .split_first()
             .unwrap_or_else(|| unreachable!("a wrapper always names its command"));
