@@ -199,16 +199,8 @@ fn lock_path(config: &ClaudeCodeConfig) -> Result<PathBuf, String> {
         let dir = file.parent().unwrap_or_else(|| Path::new("."));
         return Ok(dir.join(LOCK_FILE));
     }
-    let var = |name: &str| {
-        config
-            .env
-            .get(name)
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os(name).map(PathBuf::from))
-            .filter(|path| !path.as_os_str().is_empty())
-    };
-    let dir = var("CLAUDE_CONFIG_DIR")
-        .or_else(|| var("HOME").map(|home| home.join(".claude")))
+    let dir = config
+        .claude_dir()
         .ok_or("HOME is not set, so there is nowhere to keep the refresh lock")?;
     Ok(dir.join(LOCK_FILE))
 }
@@ -319,13 +311,10 @@ async fn from_keychain(config: &ClaudeCodeConfig) -> Result<OffsetDateTime, Expi
 }
 
 async fn from_file(config: &ClaudeCodeConfig) -> Result<OffsetDateTime, ExpiryError> {
-    let home = config
-        .env
-        .get("HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+    let path = config
+        .credential_path()
         .ok_or_else(|| ExpiryError::Unreadable("HOME is not set".to_owned()))?;
-    let raw = tokio::fs::read(home.join(".claude/.credentials.json"))
+    let raw = tokio::fs::read(path)
         .await
         .map_err(|err| ExpiryError::Unreadable(err.to_string()))?;
     parse_expiry(&raw)
@@ -398,6 +387,25 @@ mod tests {
 
         config.credential_file = Some(dir.path().join("missing.json"));
         assert!(read_expiry(&config).await.is_err());
+    }
+
+    /// Claude Code moves its credential with its configuration directory, so the expiry is read
+    /// from there rather than from a file an earlier login left in the home.
+    #[tokio::test]
+    async fn the_expiry_follows_a_moved_configuration_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".credentials.json"),
+            br#"{"claudeAiOauth":{"expiresAt":1789000000000}}"#,
+        )
+        .unwrap();
+        let mut config = ClaudeCodeConfig::new("/tmp");
+        config.env.insert("HOME".into(), "/nowhere".into());
+        config
+            .env
+            .insert("CLAUDE_CONFIG_DIR".into(), dir.path().display().to_string());
+        let expiry = from_file(&config).await.unwrap();
+        assert_eq!(expiry.unix_timestamp(), 1_789_000_000);
     }
 
     /// Two nodes on one credential, both aimed at the same expiry: the second waits out the first
