@@ -183,9 +183,12 @@ impl Backend for ClaudeCode {
 
     async fn new_session(&self, request: NewSession<'_>) -> Result<Opened, BackendError> {
         let (context, mut unhandled) = content::context(request.context);
+        let (groups, refused) = servers::publishable(request.tool_groups);
+        unhandled.extend(refused);
         let taken = servers::configured(&self.ctx.config).await;
-        let (groups, clashing) = servers::publishable(request.tool_groups, &taken);
-        unhandled.extend(clashing);
+        for namespace in servers::replacing(&groups, &taken) {
+            tracing::info!(session_id = %request.key, %namespace, "a gateway tool group replaces this machine's tool server of the same name for the session");
+        }
         let record = self.record(request.key, &groups);
         let slot = Slot {
             unused: AtomicBool::new(true),

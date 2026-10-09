@@ -1294,8 +1294,8 @@ async fn live_claude_answers_a_trivial_prompt() {
     world.stop_node().await;
 }
 
-/// A session announces one tool server per group it was opened with, leaves out a group named like
-/// a server the machine already has, and relays a call to the gateway under the group's namespace.
+/// A session announces one tool server per group it was opened with, one named like a server the
+/// machine already has included, and relays a call to the gateway under the group's namespace.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_session_publishes_and_calls_the_tool_groups_it_was_opened_with() {
     let mut world = World::build(
@@ -1335,14 +1335,9 @@ async fn a_session_publishes_and_calls_the_tool_groups_it_was_opened_with() {
     let refused: Vec<_> = created.unhandled.iter().map(|u| &u.subject).collect();
     assert_eq!(
         refused,
-        [
-            &Subject::ToolGroup {
-                namespace: "github".into()
-            },
-            &Subject::ToolGroup {
-                namespace: "riggs".into()
-            },
-        ]
+        [&Subject::ToolGroup {
+            namespace: "riggs".into()
+        }]
     );
     let session = created.session_id;
     let mut turn = node.prompt(session.clone(), text("read it")).await.unwrap();
@@ -1388,9 +1383,10 @@ async fn a_session_publishes_and_calls_the_tool_groups_it_was_opened_with() {
         .into_iter()
         .find(|frame| frame["request"]["subtype"] == "initialize")
         .unwrap();
+    // Claude Code keeps an announced server over a configured one of the same name.
     assert_eq!(
         initialize["request"]["sdkMcpServers"],
-        json!(["riggs", "slack"])
+        json!(["riggs", "slack", "github"])
     );
     let lent: Vec<Value> = world
         .events("mcp_tools")

@@ -1,6 +1,8 @@
-//! Which gateway tool groups a session can publish without shadowing a tool server this machine's
-//! Claude Code already has. Claude Code names every tool `mcp__<server>__<name>`, so a group named
-//! like one of the owner's servers would hand the agent two tools under one name.
+//! Which gateway tool groups a session can publish, and which of them replace a tool server this
+//! machine's Claude Code already has. Claude Code names every tool `mcp__<server>__<name>` and
+//! keeps the server a session announces over a configured one of the same name, so a gateway's
+//! group is what the agent gets: its tools act in the conversation the session belongs to, which a
+//! server the owner set up for themselves does not.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -38,34 +40,35 @@ pub(crate) async fn configured(config: &ClaudeCodeConfig) -> BTreeSet<String> {
 }
 
 /// Splits the session's groups into those it can publish and those it cannot, each refused with a
-/// reason the gateway can pass on to the person.
-pub(crate) fn publishable(
-    groups: &[ToolGroup],
-    taken: &BTreeSet<String>,
-) -> (Vec<ToolGroup>, Vec<Unhandled>) {
+/// reason the gateway can pass on to the person. Only this node's own server name is out of reach.
+pub(crate) fn publishable(groups: &[ToolGroup]) -> (Vec<ToolGroup>, Vec<Unhandled>) {
     let mut kept = Vec::with_capacity(groups.len());
     let mut refused = Vec::new();
     for group in groups {
-        let message = if group.namespace == MCP_SERVER {
-            format!("`{MCP_SERVER}` is this node's own tool server")
-        } else if taken.contains(&group.namespace) {
-            format!(
-                "this machine's Claude Code already has a tool server named `{}`",
-                group.namespace
-            )
-        } else {
+        if group.namespace != MCP_SERVER {
             kept.push(group.clone());
             continue;
-        };
+        }
         refused.push(Unhandled {
             subject: Subject::ToolGroup {
                 namespace: group.namespace.clone(),
             },
             reason: UnhandledReason::Other,
-            message: Some(message),
+            message: Some(format!("`{MCP_SERVER}` is this node's own tool server")),
         });
     }
     (kept, refused)
+}
+
+/// The groups that take the place of one of the machine's own servers for the session.
+pub(crate) fn replacing<'a>(
+    groups: &'a [ToolGroup],
+    taken: &'a BTreeSet<String>,
+) -> impl Iterator<Item = &'a str> {
+    groups
+        .iter()
+        .map(|group| group.namespace.as_str())
+        .filter(|namespace| taken.contains(*namespace))
 }
 
 /// `CLAUDE_CONFIG_DIR`, from the agent's own environment first, moves `.claude.json` with it.
@@ -127,23 +130,24 @@ mod tests {
     }
 
     #[test]
-    fn a_group_named_like_a_configured_server_or_riggs_is_not_published() {
-        let taken = BTreeSet::from(["github".to_owned()]);
+    fn only_a_group_named_riggs_is_not_published() {
         let groups = [group("slack"), group("github"), group("riggs")];
-        let (kept, refused) = publishable(&groups, &taken);
-        assert_eq!(kept, vec![group("slack")]);
+        let (kept, refused) = publishable(&groups);
+        assert_eq!(kept, vec![group("slack"), group("github")]);
         let refused: Vec<_> = refused.into_iter().map(|u| u.subject).collect();
         assert_eq!(
             refused,
-            vec![
-                Subject::ToolGroup {
-                    namespace: "github".into()
-                },
-                Subject::ToolGroup {
-                    namespace: "riggs".into()
-                },
-            ]
+            vec![Subject::ToolGroup {
+                namespace: "riggs".into()
+            }]
         );
+    }
+
+    #[test]
+    fn a_group_named_like_a_configured_server_replaces_it() {
+        let taken = BTreeSet::from(["github".to_owned()]);
+        let groups = [group("slack"), group("github")];
+        assert_eq!(replacing(&groups, &taken).collect::<Vec<_>>(), ["github"]);
     }
 
     #[tokio::test]
