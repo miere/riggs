@@ -82,6 +82,10 @@ outside it on purpose: a boxed `claude` can read its credential but cannot write
 back, and because Anthropic rotates refresh tokens, a refresh that cannot be saved destroys the
 credential. The node's own token is always denied to the agent, whatever `deny_read` lists.
 
+Where there is no keychain, that credential is a file in Claude Code's own directory, which the box
+has to leave writable. Riggs denies the agent writes to that one file, so the rule above holds for
+it too: the agent can read its login, and only the refresh and the sign-ins can change it.
+
 Rotation is also why several nodes run by one user take turns refreshing: they share one
 credential, and two refreshes at once would present the same refresh token twice. The refresh
 holds a lock at `.riggs-refresh.lock` in Claude Code's configuration directory (`CLAUDE_CONFIG_DIR`,

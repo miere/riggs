@@ -10,6 +10,7 @@ pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
 pub const INTERRUPT_GRACE: Duration = Duration::from_secs(30);
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 pub const MAX_LINE_BYTES: usize = 64 << 20;
+const CREDENTIAL_FILE: &str = ".credentials.json";
 pub const SIGN_IN_LINK_WAIT: Duration = Duration::from_secs(60);
 /// Longer than a sign-in someone asked for: the owner is not expecting this one and has to notice it.
 pub const SIGN_IN_EXPIRY: Duration = Duration::from_secs(20 * 60);
@@ -105,5 +106,58 @@ impl ClaudeCodeConfig {
             credential_file: None,
             sandbox: SandboxConfig::default(),
         }
+    }
+
+    /// A variable as the agent will see it: its own environment wins over the node's.
+    fn var(&self, name: &str) -> Option<PathBuf> {
+        self.env
+            .get(name)
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os(name).map(PathBuf::from))
+            .filter(|path| !path.as_os_str().is_empty())
+    }
+
+    /// Claude Code's configuration directory: `CLAUDE_CONFIG_DIR`, or `.claude` in the home.
+    pub(crate) fn claude_dir(&self) -> Option<PathBuf> {
+        self.var("CLAUDE_CONFIG_DIR")
+            .or_else(|| self.var("HOME").map(|home| home.join(".claude")))
+    }
+
+    /// Where Claude Code's credential is when it is a file rather than a keychain entry.
+    pub(crate) fn credential_path(&self) -> Option<PathBuf> {
+        self.credential_file
+            .clone()
+            .or_else(|| self.claude_dir().map(|dir| dir.join(CREDENTIAL_FILE)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    #[test]
+    fn the_credential_follows_claude_codes_own_directory() {
+        let mut config = ClaudeCodeConfig::new("/tmp");
+        config.env.insert("HOME".into(), "/home/me".into());
+        assert_eq!(
+            config.credential_path().unwrap(),
+            PathBuf::from("/home/me/.claude/.credentials.json")
+        );
+
+        config
+            .env
+            .insert("CLAUDE_CONFIG_DIR".into(), "/home/me/work".into());
+        assert_eq!(
+            config.credential_path().unwrap(),
+            PathBuf::from("/home/me/work/.credentials.json")
+        );
+
+        config.credential_file = Some(PathBuf::from("/creds/one.json"));
+        assert_eq!(
+            config.credential_path().unwrap(),
+            PathBuf::from("/creds/one.json")
+        );
     }
 }
