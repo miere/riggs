@@ -12,7 +12,7 @@ use rax::id::SessionId;
 use rax::session::{GatewayCapabilities, Initialized, NewSession};
 use rax::tool::{CallTool, ToolDef, ToolGroup, ToolKind};
 use rax::{Event, NodeCall, Open};
-use rax_sim::{NodeCallRequest, NodeOptions, SimConfig, SimError, SimNode, Simulator};
+use rax_sim::{NodeCallRequest, NodeMethod, NodeOptions, SimConfig, SimError, SimNode, Simulator};
 use rax_tokio::gateway::GatewayConfig;
 use rax_tokio::node::{NodeConfig, NodeLink};
 use riggs_claude_code::{ClaudeCode, ClaudeCodeConfig};
@@ -140,8 +140,10 @@ impl World {
     pub async fn build(
         script: &str,
         tweak: impl FnOnce(&mut ClaudeCodeConfig),
-        node: NodeOptions,
+        mut node: NodeOptions,
     ) -> Self {
+        // Activity follows every turn, so no test waiting on another call has to step over it.
+        node.auto_reply.insert(NodeMethod::Activity);
         let dir = tempfile::Builder::new()
             .prefix("claude-code-")
             .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
