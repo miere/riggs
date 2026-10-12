@@ -4,13 +4,14 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use rax::Metadata;
+use rax::activity::Activity;
 use rax::credential::CredentialHealth;
 use rax::id::{PromptId, RequestId, ToolCallId};
 use rax::interaction::{DisplayAnswer, DisplayOutcome};
 use rax::session::GatewayCapabilities;
 use rax::tool::{Decision, DeniedBy, ToolVerdict};
 use rax_tokio::node::NodeHandle;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Notify, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::backend::SessionKey;
@@ -196,6 +197,13 @@ pub(crate) struct Shared {
     pub(crate) metadata: Mutex<Metadata>,
     /// Per gateway, merged over `metadata` for that gateway's link only.
     pub(crate) gateway_metadata: Mutex<HashMap<GatewayName, Metadata>>,
+    /// Work each session's agent has running outside any turn, as its backend last counted it.
+    background: Mutex<HashMap<SessionKey, u32>>,
+    /// What each link was last told, by epoch, so a count goes out once. `None` is a gateway too
+    /// old to read it.
+    pub(crate) activity_sent: Mutex<HashMap<u64, Option<Activity>>>,
+    /// Woken when a count may have changed, and when a gateway has yet to hear the first.
+    pub(crate) activity_changed: Notify,
 }
 
 impl Shared {
@@ -220,6 +228,9 @@ impl Shared {
             local_files: LocalFiles::default(),
             metadata: Mutex::new(Metadata::new()),
             gateway_metadata: Mutex::new(HashMap::new()),
+            background: Mutex::new(HashMap::new()),
+            activity_sent: Mutex::new(HashMap::new()),
+            activity_changed: Notify::new(),
         }
     }
 
@@ -230,6 +241,32 @@ impl Shared {
             metadata.extend(own.iter().map(|(key, value)| (key.clone(), value.clone())));
         }
         metadata
+    }
+
+    /// What the whole node is doing, for every gateway alike.
+    pub(crate) fn activity(&self) -> Activity {
+        let turns = self.state().turns.len();
+        let background_tasks: u32 = lock(&self.background).values().sum();
+        Activity {
+            turns: u32::try_from(turns).unwrap_or(u32::MAX),
+            background_tasks,
+        }
+    }
+
+    /// Replaces what `session` last counted. Zero forgets it, so a closed session leaves nothing.
+    pub(crate) fn set_background(&self, session: &SessionKey, tasks: u32) {
+        let changed = {
+            let mut background = lock(&self.background);
+            let before = if tasks == 0 {
+                background.remove(session)
+            } else {
+                background.insert(*session, tasks)
+            };
+            before.unwrap_or(0) != tasks
+        };
+        if changed {
+            self.activity_changed.notify_one();
+        }
     }
 
     /// `None` once the node is stopping: a queue that orders calls must not outlast the calls.
@@ -429,6 +466,7 @@ impl Shared {
             finished: CancellationToken::new(),
         };
         state.turns.insert(*key, turn.clone());
+        self.activity_changed.notify_one();
         Reserve::Reserved(turn)
     }
 
@@ -453,6 +491,7 @@ impl Shared {
             && let Some(turn) = state.turns.remove(key)
         {
             turn.finished.cancel();
+            self.activity_changed.notify_one();
         }
         let stream = Some(stream.clone());
         for held in state.held.values_mut().filter(|held| held.stream == stream) {

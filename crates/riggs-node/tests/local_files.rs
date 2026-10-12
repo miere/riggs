@@ -10,7 +10,7 @@ use rax::session::GatewayCapabilities;
 use rax::tool::{CallTool, ToolDef, ToolKind, ToolOutcome};
 use rax::{ErrorKind, NodeCall, NodeReply};
 use rax_tokio::CallError;
-use rax_tokio::gateway::{GatewayLink, LinkEvent, LinkEvents};
+use rax_tokio::gateway::{GatewayLink, LinkEvent};
 use riggs_node::{HostHandles, SessionKey, ToolUnreachable};
 use serde_json::{Value, json};
 use support::*;
@@ -42,7 +42,7 @@ fn calling(
     })
 }
 
-async fn next_call(events: &mut LinkEvents) -> (rax::id::RequestId, Value) {
+async fn next_call(events: &mut support::Events) -> (rax::id::RequestId, Value) {
     let LinkEvent::Request {
         id,
         call: NodeCall::CallTool(CallTool { arguments, .. }),

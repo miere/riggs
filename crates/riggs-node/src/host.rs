@@ -8,7 +8,7 @@ use rax::event::BackgroundEvent;
 use rax::interaction::{DisplayOutcome, SignInRequest, SignInSettled, SignInState};
 use rax::local_file::takes_local_files;
 use rax::tool::{CallTool, Decision, ToolDef, ToolOutcome};
-use rax::{NodeCall, NodeReply, ToolCall, UpdateMetadata};
+use rax::{ErrorKind, NodeCall, NodeReply, ToolCall, UpdateMetadata};
 use rax_tokio::{CallError, SendError, TransferError};
 use serde_json::Value;
 use tokio::time::{Instant, timeout};
@@ -30,6 +30,7 @@ pub struct HostHandles {
     pub sign_ins: SignIns,
     pub credentials: CredentialReporter,
     pub tools: GatewayTools,
+    pub activity: ActivityReporter,
 }
 
 impl HostHandles {
@@ -47,7 +48,10 @@ impl HostHandles {
             credentials: CredentialReporter {
                 shared: shared.clone(),
             },
-            tools: GatewayTools { shared },
+            tools: GatewayTools {
+                shared: shared.clone(),
+            },
+            activity: ActivityReporter { shared },
         }
     }
 }
@@ -353,6 +357,60 @@ impl CredentialReporter {
     }
 }
 
+/// Where a backend says how much work a session has running outside any turn: work a restart of
+/// the node would lose, which only the agent knows about. The node counts the turns itself.
+#[derive(Clone)]
+pub struct ActivityReporter {
+    shared: Arc<Shared>,
+}
+
+impl ActivityReporter {
+    /// The session's whole count, replacing its last. Never blocks, so a backend may call it
+    /// while it holds its own state.
+    pub fn set_background(&self, session: &SessionKey, tasks: u32) {
+        self.shared.set_background(session, tasks);
+    }
+}
+
+/// Tells every attached gateway what the node is doing, each time that changes. One task sends
+/// them all, so a report never overtakes a later one, and a burst of changes collapses into
+/// whatever is true when its turn comes.
+pub(crate) async fn report_activity(shared: Arc<Shared>) {
+    loop {
+        tokio::select! {
+            () = shared.activity_changed.notified() => {}
+            () = shared.stopping.cancelled() => return,
+        }
+        let lives = shared.lives();
+        lock(&shared.activity_sent).retain(|epoch, _| lives.iter().any(|live| live.id == *epoch));
+        for epoch in lives {
+            if epoch.caps.is_none() {
+                continue;
+            }
+            let activity = shared.activity();
+            match lock(&shared.activity_sent).get(&epoch.id) {
+                Some(None) => continue,
+                Some(Some(sent)) if *sent == activity => continue,
+                _ => {}
+            }
+            match push(&shared, &epoch, NodeCall::Activity(activity)).await {
+                Pushed::Taken => {
+                    lock(&shared.activity_sent).insert(epoch.id, Some(activity));
+                    // Whatever changed while this one was on the wire still has to go out.
+                    if shared.activity() != activity {
+                        shared.activity_changed.notify_one();
+                    }
+                }
+                Pushed::Unsupported => {
+                    tracing::info!(gateway = %epoch.gateway, "the gateway does not read activity; not reporting it on this link");
+                    lock(&shared.activity_sent).insert(epoch.id, None);
+                }
+                Pushed::Lost => {}
+            }
+        }
+    }
+}
+
 /// One update at a time, each carrying whatever is latest when its turn comes, so a burst of
 /// edits ends with each gateway holding the last one. Each link gets its own merge. A gateway that
 /// is not attached has nothing to do: its next `initialize` declares the latest anyway.
@@ -387,7 +445,14 @@ pub(crate) async fn push_health_snapshot(shared: &Shared, epoch: u64) {
     }
 }
 
-async fn push(shared: &Shared, epoch: &Epoch, call: NodeCall) {
+enum Pushed {
+    Taken,
+    /// The gateway is older than the call.
+    Unsupported,
+    Lost,
+}
+
+async fn push(shared: &Shared, epoch: &Epoch, call: NodeCall) -> Pushed {
     let what = match &call {
         NodeCall::SignIn(_) => "sign_in",
         NodeCall::SignInSettled(_) => "sign_in.settled",
@@ -395,17 +460,23 @@ async fn push(shared: &Shared, epoch: &Epoch, call: NodeCall) {
         NodeCall::ReadResource(_) => "resource.read",
         NodeCall::CallTool(_) => "tool.call",
         NodeCall::UpdateMetadata(_) => "metadata.update",
+        NodeCall::Activity(_) => "activity",
     };
     let answered = tokio::select! {
         answered = timeout(shared.call_timeout, epoch.handle.call(call)) => answered,
-        () = epoch.ended.cancelled() => return,
-        () = shared.stopping.cancelled() => return,
+        () = epoch.ended.cancelled() => return Pushed::Lost,
+        () = shared.stopping.cancelled() => return Pushed::Lost,
     };
     let gateway = &epoch.gateway;
     match answered {
-        Ok(Ok(_)) | Ok(Err(CallError::LinkReset | CallError::Closed)) => {}
+        Ok(Ok(_)) => Pushed::Taken,
+        Ok(Err(CallError::LinkReset | CallError::Closed)) => Pushed::Lost,
+        Ok(Err(CallError::Fault(fault))) if fault.kind == ErrorKind::Unsupported => {
+            Pushed::Unsupported
+        }
         Ok(Err(err)) => {
             tracing::warn!(%gateway, method = what, error = %err, "the gateway did not accept an update");
+            Pushed::Lost
         }
         Err(_) => {
             tracing::warn!(
@@ -413,6 +484,7 @@ async fn push(shared: &Shared, epoch: &Epoch, call: NodeCall) {
                 method = what,
                 "the gateway did not answer an update in time"
             );
+            Pushed::Lost
         }
     }
 }

@@ -16,8 +16,8 @@ pub use backend::{
     BackendRecord, NewSession, Opened, Restore, SessionKey, TurnHandle,
 };
 pub use host::{
-    BackgroundGate, BackgroundSink, CredentialReporter, GatewayTools, HostHandles, NotDelivered,
-    SignInRefused, SignIns, ToolUnreachable,
+    ActivityReporter, BackgroundGate, BackgroundSink, CredentialReporter, GatewayTools,
+    HostHandles, NotDelivered, SignInRefused, SignIns, ToolUnreachable,
 };
 pub use local_files::FileRefused;
 pub use server::{

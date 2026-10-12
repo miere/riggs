@@ -11,7 +11,7 @@ use rax::interaction::{DisplayAnswer, DisplayOutcome, PlanChoice};
 use rax::open::Subject;
 use rax::session::{NewSession, SessionDurability, ToolGate};
 use rax::tool::{DeniedBy, ToolCallStatus, ToolDef, ToolGroup, ToolKind, ToolOutcome};
-use rax::{Decision, ErrorKind, Event, NodeCall, Open};
+use rax::{Activity, Decision, ErrorKind, Event, NodeCall, Open};
 use rax_sim::{LinkChange, Match, NodeMethod, SimNode, VerdictPolicy};
 use serde_json::{Value, json};
 use support::*;
@@ -738,6 +738,68 @@ async fn a_background_subagent_reports_after_the_turn_and_its_tool_waits_for_a_v
         }))
     ));
     assert!(sub.exists());
+    world.stop_node().await;
+}
+
+/// Waits for the node's latest report to be `wanted`.
+async fn reports(node: &SimNode, wanted: Activity) {
+    let waited = tokio::time::timeout(Duration::from_secs(10), async {
+        while node.activity_log().last() != Some(&wanted) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    });
+    assert!(
+        waited.await.is_ok(),
+        "the node never reported {wanted:?}: {:?}",
+        node.activity_log()
+    );
+}
+
+/// A restart would lose the sub-agent, so the node may not look idle between the turn that
+/// launched it and the answer Claude Code writes when it ends.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_background_task_keeps_the_node_busy_after_its_turn_ends() {
+    let mut world = World::new("background-subagent").await;
+    let node = world.start_node().await;
+    let session = node.new_session(vec![]).await.unwrap().session_id;
+    reports(&node, Activity::default()).await;
+    let mut turn = node
+        .prompt(session.clone(), text("work in the background"))
+        .await
+        .unwrap();
+    let Event::ToolCall { tool_call } = turn.expect(Match::tool_call("Agent")).await.unwrap()
+    else {
+        panic!("expected a tool call")
+    };
+    turn.verdict(tool_call.id, Decision::Allow).await.unwrap();
+    turn.until_end().await.unwrap();
+    let task_only = Activity {
+        turns: 0,
+        background_tasks: 1,
+    };
+    reports(&node, task_only).await;
+
+    let (_, event) = node.next_background().await.unwrap();
+    let Open::Known(BackgroundEvent::ToolCall { tool_call }) = event else {
+        panic!("expected a background tool call, got {event:?}")
+    };
+    node.verdict(tool_call.id, Decision::Allow).await.unwrap();
+    loop {
+        let (_, event) = node.next_background().await.unwrap();
+        if matches!(event, Open::Known(BackgroundEvent::Complete { .. })) {
+            break;
+        }
+    }
+    reports(&node, Activity::default()).await;
+
+    let log = node.activity_log();
+    let busy_from = log.iter().position(|activity| !activity.is_idle()).unwrap();
+    assert!(
+        log[busy_from..log.len() - 1]
+            .iter()
+            .all(|activity| !activity.is_idle()),
+        "the node looked idle while its background task ran: {log:?}"
+    );
     world.stop_node().await;
 }
 

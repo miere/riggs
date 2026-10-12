@@ -15,7 +15,9 @@ use rax::session::{
     GatewayCapabilities, Initialize, NewSession as NewSessionCall, Prompt, PromptCapabilities,
     SessionDurability, SessionRef, ToolGate as GateMode,
 };
-use rax::{ErrorKind, Event, GatewayCall, GatewayReply, Open, Unhandled};
+use rax::{
+    Activity, ErrorKind, Event, GatewayCall, GatewayReply, NodeCall, NodeReply, Open, Unhandled,
+};
 use rax_tokio::CallError;
 use rax_tokio::gateway::{
     GatewayConfig, GatewayLink, GatewayServer, LinkEvent, LinkEvents, NewLink, NewLinks,
@@ -374,14 +376,65 @@ impl Node {
     }
 }
 
+/// A link's events with the node's activity reports answered and taken out, so a test waiting on
+/// anything else never has to step over one.
+pub struct Events {
+    receiver: mpsc::UnboundedReceiver<LinkEvent>,
+}
+
+impl Events {
+    pub async fn recv(&mut self) -> Option<LinkEvent> {
+        self.receiver.recv().await
+    }
+}
+
 pub struct Gateway {
     pub link: GatewayLink,
-    pub events: LinkEvents,
+    pub events: Events,
+    /// The node's latest report, or `None` until the first.
+    pub activity: watch::Receiver<Option<Activity>>,
+}
+
+impl Gateway {
+    pub async fn activity(&mut self, wanted: Activity) {
+        within(self.activity.wait_for(|activity| *activity == Some(wanted)))
+            .await
+            .unwrap_or_else(|_| panic!("the link ended before the node reported {wanted:?}"));
+    }
 }
 
 pub async fn accept(new_links: &mut NewLinks) -> Gateway {
     let NewLink { link, events } = within(new_links.recv()).await.unwrap();
-    Gateway { link, events }
+    serving(link, events)
+}
+
+pub fn serving(link: GatewayLink, mut events: LinkEvents) -> Gateway {
+    let (sender, receiver) = mpsc::unbounded_channel();
+    let (reports, activity) = watch::channel(None);
+    let answering = link.clone();
+    tokio::spawn(async move {
+        while let Some(event) = events.recv().await {
+            match event {
+                LinkEvent::Request {
+                    id,
+                    call: NodeCall::Activity(activity),
+                } => {
+                    let _ = reports.send(Some(activity));
+                    let _ = answering.reply(id, NodeReply::Activity).await;
+                }
+                event => {
+                    if sender.send(event).is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+    });
+    Gateway {
+        link,
+        events: Events { receiver },
+        activity,
+    }
 }
 
 pub struct Harness {
@@ -526,7 +579,7 @@ pub async fn ended(events: &mut StreamEvents) {
     );
 }
 
-pub async fn next_link(events: &mut LinkEvents) -> LinkEvent {
+pub async fn next_link(events: &mut Events) -> LinkEvent {
     within(events.recv()).await.expect("link events ended")
 }
 

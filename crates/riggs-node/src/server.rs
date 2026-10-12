@@ -23,7 +23,7 @@ use tokio_util::task::TaskTracker;
 
 use crate::backend::{self, Backend, BackendInfo, HostHandles, SessionKey, TurnHandle};
 use crate::files::Files;
-use crate::host::{push_health_snapshot, push_metadata};
+use crate::host::{push_health_snapshot, push_metadata, report_activity};
 use crate::sessions::{OpenError, Sessions, Slot};
 use crate::state::{GatewayName, Reserve, Reset, ResetReason, Shared, lock};
 use crate::store::{Record, SessionStore, StoreError};
@@ -353,6 +353,7 @@ impl Inner {
                     )
                 })?;
                 tracing::info!(agent = %info.name, interruptible = info.interruptible, "node serving one agent");
+                self.tasks.spawn(report_activity(self.shared.clone()));
                 Ok(info)
             })
             .await
@@ -473,6 +474,7 @@ impl Inner {
         self.answer(&handle, epoch, id, answer).await;
         if initialized {
             push_health_snapshot(&self.shared, epoch).await;
+            self.shared.activity_changed.notify_one();
         }
     }
 

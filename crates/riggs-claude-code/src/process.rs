@@ -85,6 +85,8 @@ struct State {
     tools: HashMap<String, Tool>,
     api_error: Option<String>,
     dead: bool,
+    /// Claude Code is answering with no turn open, as it does when a backgrounded task ends.
+    waking: bool,
 }
 
 enum Ended {
@@ -379,6 +381,24 @@ impl Proc {
         (!busy).then(|| lock(&self.active).elapsed())
     }
 
+    /// Tells the node what this session has running that no turn covers: its backgrounded tasks,
+    /// and the answer Claude Code writes when one of them ends after the turn has.
+    fn report_background(&self, state: &State) {
+        let Some(host) = self.ctx.host.get() else {
+            return;
+        };
+        let tasks = state
+            .tools
+            .values()
+            .filter(|tool| matches!(tool, Tool::Backgrounded))
+            .count();
+        let waking = state.turn.is_none() && state.waking;
+        let tasks = u32::try_from(tasks)
+            .unwrap_or(u32::MAX)
+            .saturating_add(u32::from(waking));
+        host.activity.set_background(&self.key, tasks);
+    }
+
     pub(crate) async fn exited(&self) {
         self.exited.cancelled().await;
     }
@@ -423,6 +443,8 @@ impl Proc {
             interrupt_sent: CancellationToken::new(),
             closed: CancellationToken::new(),
         });
+        state.waking = false;
+        self.report_background(&state);
         let _ = self.emits.send(Emit::Begin {
             stream: stream.clone(),
             sink: events,
@@ -514,6 +536,8 @@ impl Proc {
                 self.emit(route.clone(), update(&id, ToolCallStatus::Failed, None));
             }
         }
+        state.waking = false;
+        self.report_background(&state);
         let turn = state.turn.take();
         let inflight: Vec<Inflight> = state.theirs.drain().map(|(_, inflight)| inflight).collect();
         for Inflight { task, gated } in inflight {
@@ -736,6 +760,8 @@ impl Proc {
         let parsed: ResultFrame = serde_json::from_value(frame).unwrap_or_default();
         let outcome = outcome::of(parsed);
         let mut state = self.lock();
+        state.waking = false;
+        self.report_background(&state);
         let api_error = state.api_error.take();
         match &outcome {
             Outcome::Stray => {
@@ -797,6 +823,10 @@ impl Proc {
             .is_some_and(|parent| !parent.is_null())
         {
             return;
+        }
+        if state.turn.is_none() && !state.waking {
+            state.waking = true;
+            self.report_background(&state);
         }
         let route = Self::route(&state);
         let blocks = frame
@@ -864,6 +894,7 @@ impl Proc {
         let mut state = self.lock();
         if let Some(tool @ Tool::Running(_)) = state.tools.get_mut(id) {
             *tool = Tool::Backgrounded;
+            self.report_background(&state);
         }
     }
 
@@ -878,6 +909,9 @@ impl Proc {
             return;
         }
         state.tools.remove(id);
+        // Claude Code answers a task that ends with no turn open, and that answer is work too.
+        state.waking = state.turn.is_none();
+        self.report_background(&state);
         let status = match text_of(frame, "status") {
             Some("completed") => ToolCallStatus::Completed,
             _ => ToolCallStatus::Failed,
