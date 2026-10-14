@@ -60,10 +60,50 @@ pub(crate) fn context(context: &[Open<ContentBlock>]) -> (Option<String>, Vec<Un
     ((!text.trim().is_empty()).then_some(text), unhandled)
 }
 
+/// A gateway tool's answer, with what the node fetched for it on lines of their own: a local file
+/// as its path, and a file it could not fetch as the note saying why.
+pub(crate) fn tool_outcome(content: String, resources: &[Open<ContentBlock>]) -> String {
+    let mut text = content;
+    for resource in resources {
+        let line = match resource {
+            Open::Known(ContentBlock::Text { text }) => text.clone(),
+            Open::Known(ContentBlock::ResourceLink { uri, name, .. }) => link(name, uri),
+            _ => continue,
+        };
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&line);
+    }
+    text
+}
+
 pub(crate) fn text_block(text: &str) -> Value {
     json!({"type": "text", "text": text})
 }
 
 fn link(name: &str, uri: &str) -> String {
     format!("[{name}: {uri}]")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_tool_outcome_lists_its_files_after_the_answer() {
+        let resources = [
+            ContentBlock::link("file:///tmp/s1/x-q3.pdf", "Q3 report.pdf").into(),
+            ContentBlock::text("[secret.pdf: the file could not be fetched: not yours]").into(),
+        ];
+        assert_eq!(
+            tool_outcome("Here it is.".to_owned(), &resources),
+            "Here it is.\n[Q3 report.pdf: file:///tmp/s1/x-q3.pdf]\n\
+             [secret.pdf: the file could not be fetched: not yours]"
+        );
+        assert_eq!(
+            tool_outcome("Nothing lent.".to_owned(), &[]),
+            "Nothing lent."
+        );
+    }
 }

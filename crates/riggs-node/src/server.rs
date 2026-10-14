@@ -124,7 +124,7 @@ struct Inner {
     backend: Arc<dyn Backend>,
     shared: Arc<Shared>,
     sessions: Sessions,
-    files: Files,
+    files: Arc<Files>,
     config: ServerConfig,
     failures: Failures,
     info: OnceCell<BackendInfo>,
@@ -144,7 +144,7 @@ impl NodeServer {
                 std::env::temp_dir().join(format!("riggs-files-{}", uuid::Uuid::new_v4()))
             });
             let ephemeral = matches!(config.sessions, SessionsConfig::Ephemeral);
-            Files::new(dir, ephemeral)
+            Arc::new(Files::new(dir, ephemeral))
         };
         let failures = Failures {
             backend: backend.clone(),
@@ -345,7 +345,7 @@ impl Inner {
     async fn started(&self) -> Result<BackendInfo, rax::Error> {
         self.info
             .get_or_try_init(|| async {
-                let host = HostHandles::new(self.shared.clone());
+                let host = HostHandles::new(self.shared.clone(), self.files.clone());
                 let info = self.backend.start(host).await.map_err(|err| {
                     rax::Error::new(
                         self.backend.classify(&err),
@@ -556,6 +556,7 @@ impl Inner {
                 sessions: self.sessions.durability(&info),
                 tool_groups: true,
                 local_files: true,
+                tool_resources: true,
             },
             metadata: self.shared.metadata_for(gateway),
         })
