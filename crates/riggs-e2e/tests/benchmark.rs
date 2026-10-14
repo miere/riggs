@@ -346,6 +346,7 @@ async fn local_file_turns(agent: Agent, prompt: &str, runs: usize) -> Outcome {
         let posted = ToolOutcome {
             content: "Posted.".into(),
             is_error: false,
+            resources: Vec::new(),
         };
         request.answer_tool(posted).await.unwrap();
         turn.until_end().await.unwrap();

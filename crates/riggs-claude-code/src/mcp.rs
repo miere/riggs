@@ -4,6 +4,7 @@ use rax::tool::ToolGroup;
 use riggs_node::ToolUnreachable;
 use serde_json::{Value, json};
 
+use crate::content;
 use crate::interaction::{self, ToolResult};
 use crate::process::{Proc, TurnCtl};
 use crate::wire::{self, MCP_SERVER, text_of};
@@ -177,7 +178,7 @@ async fn relay(proc: &Arc<Proc>, group: &ToolGroup, params: &Value) -> ToolResul
         .await;
     match called {
         Ok(outcome) if outcome.is_error => ToolResult::error(outcome.content),
-        Ok(outcome) => ToolResult::text(outcome.content),
+        Ok(outcome) => ToolResult::text(content::tool_outcome(outcome.content, &outcome.resources)),
         Err(ToolUnreachable::File(refused)) => ToolResult::error(format!("Error: {refused}")),
         Err(unreachable) => ToolResult::error(format!(
             "{name} did not run: {unreachable}. Do not retry it blindly — say so and ask how to \

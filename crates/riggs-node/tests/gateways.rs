@@ -115,6 +115,7 @@ async fn tool_calls_and_background_events_reach_the_sessions_own_gateway() {
     let outcome = ToolOutcome {
         content: "contents".into(),
         is_error: false,
+        resources: Vec::new(),
     };
     work.gateway
         .link

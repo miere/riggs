@@ -14,6 +14,7 @@ use serde_json::Value;
 use tokio::time::{Instant, timeout};
 
 use crate::backend::{AttachmentSource, SessionKey};
+use crate::files::Files;
 use crate::local_files::{self, FileRefused};
 use crate::state::{self, Epoch, PromptKind, PromptRoute, PromptStart, Shared, Unreached, lock};
 use crate::turn::{SignInPrompt, hold_background};
@@ -34,7 +35,7 @@ pub struct HostHandles {
 }
 
 impl HostHandles {
-    pub(crate) fn new(shared: Arc<Shared>) -> Self {
+    pub(crate) fn new(shared: Arc<Shared>, files: Arc<Files>) -> Self {
         Self {
             gate: BackgroundGate {
                 shared: shared.clone(),
@@ -50,6 +51,7 @@ impl HostHandles {
             },
             tools: GatewayTools {
                 shared: shared.clone(),
+                files,
             },
             activity: ActivityReporter { shared },
         }
@@ -61,6 +63,7 @@ impl HostHandles {
 #[derive(Clone)]
 pub struct GatewayTools {
     shared: Arc<Shared>,
+    files: Arc<Files>,
 }
 
 /// Every variant is a reason the tool never ran, so each must reach the agent as a refusal it can
@@ -91,6 +94,9 @@ impl GatewayTools {
     /// The node never learns what a tool does, only what its schema says of its arguments. One
     /// marked as a local file must name a file inside `root`; the gateway gets an identifier in
     /// its place, which it can redeem only until this call returns.
+    ///
+    /// The gateway may answer with `resources` it lends instead of bytes. They are fetched here,
+    /// as a prompt's links are, so the agent gets local files or a note saying why it did not.
     pub async fn call(
         &self,
         session: &SessionKey,
@@ -125,7 +131,22 @@ impl GatewayTools {
             () = epoch.ended.cancelled() => return Err(ToolUnreachable::LinkEnded),
         };
         match answered {
-            Ok(Ok(NodeReply::CallTool(outcome))) => Ok(outcome),
+            Ok(Ok(NodeReply::CallTool(mut outcome))) => {
+                if !outcome.resources.is_empty() {
+                    let readable = epoch
+                        .caps
+                        .as_ref()
+                        .map(|caps| caps.readable_schemes.clone())
+                        .unwrap_or_default();
+                    let lent = std::mem::take(&mut outcome.resources);
+                    let fetched = self
+                        .files
+                        .fetch(&epoch.handle, &readable, session, lent, &epoch.ended)
+                        .await;
+                    outcome.resources = fetched.content;
+                }
+                Ok(outcome)
+            }
             // A reply to another method cannot happen without a broken gateway, but the agent still
             // has to be told something rather than wait.
             Ok(Ok(_)) => Err(ToolUnreachable::Refused(

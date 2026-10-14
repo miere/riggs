@@ -150,3 +150,81 @@ async fn a_node_offers_to_follow_the_schemes_its_gateway_serves() {
     );
     harness.node.shut_down().await;
 }
+
+/// A gateway tool can answer with a link instead of the bytes; the agent gets the local copy, or a
+/// note when the gateway will not hand it over.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tool_answers_with_files_the_node_fetches_first() {
+    let (mut harness, files, session) = with_files(serving_files()).await;
+    let key = riggs_node::SessionKey::parse(&session).unwrap();
+    let host = harness.fake.host().await;
+    let calling = tokio::spawn(async move {
+        let read = rax::tool::ToolDef {
+            name: "read_file".into(),
+            description: "Read a Slack file.".into(),
+            input_schema: None,
+            kind: rax::tool::ToolKind::Read,
+        };
+        host.tools
+            .call(
+                &key,
+                "slack",
+                &read,
+                serde_json::json!({}),
+                std::path::Path::new("."),
+            )
+            .await
+    });
+    let id = loop {
+        if let LinkEvent::Request {
+            id,
+            call: NodeCall::CallTool(_),
+        } = next_link(&mut harness.gateway.events).await
+        {
+            break id;
+        }
+    };
+    let outcome = rax::tool::ToolOutcome {
+        content: "Here it is.".into(),
+        is_error: false,
+        resources: vec![
+            ContentBlock::link("gateway://files/F1", "Q3 report.pdf").into(),
+            ContentBlock::link("gateway://files/F2", "secret.pdf").into(),
+        ],
+    };
+    harness
+        .gateway
+        .link
+        .reply(id, rax::NodeReply::CallTool(outcome))
+        .await
+        .unwrap();
+
+    let (id, read) = next_read(&mut harness).await;
+    assert_eq!(read.uri, "gateway://files/F1");
+    harness
+        .gateway
+        .link
+        .serve_resource(id, &read, PDF, Some("application/pdf".into()))
+        .await
+        .unwrap();
+    let (id, read) = next_read(&mut harness).await;
+    assert_eq!(read.uri, "gateway://files/F2");
+    let refusal = Error::new(ErrorKind::Forbidden, "not yours");
+    harness.gateway.link.fault(id, refusal).await.unwrap();
+
+    let answered = within(calling).await.unwrap().unwrap();
+    assert_eq!(answered.content, "Here it is.");
+    let Open::Known(ContentBlock::ResourceLink { uri, .. }) = &answered.resources[0] else {
+        panic!("expected a local link, got {:?}", answered.resources)
+    };
+    let path = Url::parse(uri).unwrap().to_file_path().unwrap();
+    assert!(path.starts_with(files.path()), "{}", path.display());
+    assert_eq!(std::fs::read(&path).unwrap(), PDF);
+    let Open::Known(ContentBlock::Text { text }) = &answered.resources[1] else {
+        panic!("expected a note, got {:?}", answered.resources)
+    };
+    assert!(
+        text.contains("secret.pdf") && text.contains("not yours"),
+        "{text}"
+    );
+}

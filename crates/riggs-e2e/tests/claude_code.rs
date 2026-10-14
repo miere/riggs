@@ -838,6 +838,7 @@ async fn a_gateway_tool_gets_a_file_by_identifier_and_one_outside_the_workdir_is
         .answer_tool(ToolOutcome {
             content: "Posted report.bin to the thread.".into(),
             is_error: false,
+            resources: Vec::new(),
         })
         .await
         .unwrap();
@@ -898,6 +899,7 @@ async fn a_file_sent_after_the_turn_ended_is_read_by_the_gateway() {
         .answer_tool(ToolOutcome {
             content: "Slack refused the upload. Tell the person it did not arrive.".into(),
             is_error: true,
+            resources: Vec::new(),
         })
         .await
         .unwrap();
@@ -1332,6 +1334,7 @@ async fn a_session_publishes_and_calls_the_tool_groups_it_was_opened_with() {
         .answer_tool(ToolOutcome {
             content: "Alice said the build is green.".into(),
             is_error: false,
+            resources: Vec::new(),
         })
         .await
         .unwrap();

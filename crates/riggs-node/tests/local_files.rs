@@ -77,6 +77,7 @@ async fn answer(link: &GatewayLink, id: rax::id::RequestId, content: &str) {
     let outcome = ToolOutcome {
         content: content.into(),
         is_error: false,
+        resources: Vec::new(),
     };
     link.reply(id, NodeReply::CallTool(outcome)).await.unwrap();
 }
