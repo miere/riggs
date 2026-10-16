@@ -121,6 +121,16 @@ gateway does not know is logged as a warning. A key it owns but cannot accept ma
 link, and Riggs then stops dialling that gateway with its reason rather than redial into the same
 refusal. Dates cannot travel this way, so quote one to send it as text.
 
+A Claude subscription may serve nobody but you: Anthropic does not allow its requests to be routed
+on other people's behalf. So when Riggs starts a Claude Code agent, it asks `claude auth status`
+which credential the agent will use, and unless that is an API key (`api_key`) or a cloud
+provider's (`third_party`, such as Bedrock or Vertex), it tells every gateway the node is
+owner-only. The gateway then lets you alone in, whatever `[metadata]` says. A credential Riggs
+cannot name, or a check that fails, counts as owner-only too. A gateway too old to confine a node
+to its owner is refused, and Riggs stops dialling it. The answer holds until Riggs restarts, so
+restart it after giving the agent an API key. An ACP agent does not say which credential it uses,
+so sharing one stays your call in `[metadata]`.
+
 An ACP agent uses `kind = "acp"` and may also set `interruptible`, `startup_timeout`,
 `cancel_grace_period` and `permission_timeout`. An optional top-level `env_file = ".env"` adds
 variables to the agent's environment. A value in `agent.env` may read one back with `${NAME}`,

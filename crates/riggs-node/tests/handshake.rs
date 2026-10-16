@@ -43,6 +43,42 @@ async fn initialize_declares_every_capability_the_backend_resolved() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_agent_that_may_be_shared_does_not_ask_to_be_confined() {
+    let h = harness(Fake::new(), ephemeral()).await;
+    let initialized = initialize(&h.gateway.link, all_caps()).await;
+    assert!(!initialized.capabilities.owner_only);
+    h.node.shut_down().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_owner_only_agent_asks_a_gateway_that_can_confine_it() {
+    let h = harness(Fake::owner_only(), ephemeral()).await;
+    let initialized = initialize(&h.gateway.link, all_caps()).await;
+    assert!(initialized.capabilities.owner_only);
+    h.node.shut_down().await;
+}
+
+/// Served by a gateway that would let anyone in, a subscription would be routed on other people's
+/// behalf, so the node refuses and does not come back.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_owner_only_agent_refuses_a_gateway_that_cannot_confine_it_for_good() {
+    let h = harness(Fake::owner_only(), ephemeral()).await;
+    let offer = rax::session::Initialize {
+        protocol_version: rax::PROTOCOL_VERSION,
+        capabilities: GatewayCapabilities {
+            owner_only: false,
+            ..all_caps()
+        },
+    };
+    match call(&h.gateway.link, rax::GatewayCall::Initialize(offer)).await {
+        Err(CallError::Fault(error)) => assert_eq!(error.kind, ErrorKind::Unsupported),
+        other => panic!("expected an unsupported fault, got {other:?}"),
+    }
+    let stopped = within(h.node.serving).await.unwrap();
+    assert_eq!(stopped, riggs_node::Stopped::Unconfined);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_durable_store_and_a_durable_backend_declare_durable_sessions() {
     let dir = tempfile::tempdir().unwrap();
     let h = harness(Fake::new(), durable(dir.path())).await;

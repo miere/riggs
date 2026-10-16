@@ -186,6 +186,9 @@ impl Backend for AcpBackend {
             },
             prompt: info.prompt,
             resource_schemes: Vec::new(),
+            // ACP does not say which credential an agent signed in with, so whether it may be
+            // shared stays the owner's call, made in the gateway's metadata.
+            owner_only: false,
         })
     }
 
