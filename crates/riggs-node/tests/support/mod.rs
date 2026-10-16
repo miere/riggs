@@ -107,6 +107,7 @@ impl Fake {
                     embedded_resource: false,
                 },
                 resource_schemes: vec!["chat".into()],
+                owner_only: false,
             },
             seen,
             seen_rx: Mutex::new(Some(seen_rx)),
@@ -121,6 +122,13 @@ impl Fake {
             last_prompt: Mutex::new(Vec::new()),
             last_groups: Mutex::new(Vec::new()),
         })
+    }
+
+    /// An agent whose credential may serve the node's owner alone.
+    pub fn owner_only() -> Arc<Self> {
+        let mut fake = Arc::into_inner(Self::new()).expect("nobody else holds a new fake");
+        fake.info.owner_only = true;
+        Arc::new(fake)
     }
 
     pub fn seen(&self) -> Watcher {
@@ -501,6 +509,7 @@ pub fn all_caps() -> GatewayCapabilities {
         resource_schemes: vec![],
         readable_schemes: vec![],
         tools: None,
+        owner_only: true,
     }
 }
 

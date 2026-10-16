@@ -28,6 +28,9 @@ pub struct BackendInfo {
     pub sessions: SessionDurability,
     pub prompt: PromptCapabilities,
     pub resource_schemes: Vec<String>,
+    /// The agent's credential may serve the node's owner alone, such as a Claude subscription, so
+    /// every gateway must confine the node to its owner or go unserved.
+    pub owner_only: bool,
 }
 
 /// A node-minted UUIDv4. Only canonical ids parse, so a gateway-supplied id can never alias a

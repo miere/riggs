@@ -28,10 +28,31 @@ pub(crate) enum ProbeError {
     Unreadable,
 }
 
-#[derive(Deserialize)]
+/// What `claude auth status` says about the credential Claude Code would use.
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct Status {
-    logged_in: bool,
+pub(crate) struct Status {
+    pub(crate) logged_in: bool,
+    /// Absent from older binaries, which then read as a credential that may not be shared.
+    #[serde(default)]
+    auth_method: Option<String>,
+}
+
+/// The credentials Anthropic lets their holder share with the people they authorise: an API key,
+/// and a cloud provider's. Anything else, a Claude subscription above all, serves its owner alone.
+const SHAREABLE: &[&str] = &["api_key", "third_party"];
+
+impl Status {
+    /// Only a credential named as shareable is: a renamed field, a new method or a value never
+    /// seen before all confine the node to its owner, so a change in Claude Code can lock people
+    /// out but never open a subscription to them.
+    pub(crate) fn shareable(&self) -> bool {
+        self.logged_in
+            && self
+                .auth_method
+                .as_deref()
+                .is_some_and(|method| SHAREABLE.contains(&method))
+    }
 }
 
 enum Observed {
@@ -178,7 +199,7 @@ fn clip(text: &str) -> String {
     clipped
 }
 
-pub(crate) async fn probe(config: &ClaudeCodeConfig) -> Result<bool, ProbeError> {
+pub(crate) async fn probe(config: &ClaudeCodeConfig) -> Result<Status, ProbeError> {
     let mut command = Command::new(&config.command);
     command
         .args(STATUS_ARGS)
@@ -194,8 +215,81 @@ pub(crate) async fn probe(config: &ClaudeCodeConfig) -> Result<bool, ProbeError>
     let _ = leader.kill_tree(Descendants::default()).await;
     match read {
         Err(_) => Err(ProbeError::TimedOut(limit.as_secs())),
-        Ok(_) => serde_json::from_slice::<Status>(&output)
-            .map(|status| status.logged_in)
-            .map_err(|_| ProbeError::Unreadable),
+        Ok(_) => serde_json::from_slice::<Status>(&output).map_err(|_| ProbeError::Unreadable),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use serde_json::json;
+
+    use super::Status;
+
+    fn shareable(printed: serde_json::Value) -> bool {
+        serde_json::from_value::<Status>(printed)
+            .unwrap()
+            .shareable()
+    }
+
+    /// The shapes `claude auth status` printed in 2.1.296 for each credential.
+    #[test]
+    fn only_an_api_key_or_a_cloud_provider_may_be_shared() {
+        let subscription = json!({"loggedIn": true, "authMethod": "claude.ai",
+            "apiProvider": "firstParty", "subscriptionType": "max"});
+        assert!(!shareable(subscription));
+        let setup_token =
+            json!({"loggedIn": true, "authMethod": "oauth_token", "apiProvider": "firstParty"});
+        assert!(!shareable(setup_token));
+        let api_key =
+            json!({"loggedIn": true, "authMethod": "api_key", "apiProvider": "firstParty"});
+        assert!(shareable(api_key));
+        let bedrock =
+            json!({"loggedIn": true, "authMethod": "third_party", "apiProvider": "bedrock"});
+        assert!(shareable(bedrock));
+    }
+
+    /// Asks a real `claude`, named by `RIGGS_REAL_CLAUDE`, so a release that renames what
+    /// `auth status` prints fails here instead of quietly confining every node to its owner. None
+    /// of the credentials is real: `auth status` reports which one it would use without calling
+    /// Anthropic.
+    #[tokio::test]
+    #[ignore = "needs a real claude binary in RIGGS_REAL_CLAUDE"]
+    async fn a_real_claude_names_its_credential_as_riggs_expects() {
+        let command =
+            std::env::var("RIGGS_REAL_CLAUDE").expect("RIGGS_REAL_CLAUDE names a claude binary");
+        let home = tempfile::tempdir().unwrap();
+        let cases: &[(&[(&str, &str)], bool)] = &[
+            (&[("ANTHROPIC_API_KEY", "sk-ant-riggs-contract")], true),
+            (&[("CLAUDE_CODE_USE_BEDROCK", "1")], true),
+            (&[("CLAUDE_CODE_USE_VERTEX", "1")], true),
+            (&[("CLAUDE_CODE_OAUTH_TOKEN", "riggs-contract")], false),
+            (&[], false),
+        ];
+        for (env, expected) in cases {
+            let mut config = crate::config::ClaudeCodeConfig::new(home.path());
+            config.command = command.clone().into();
+            config.env.insert(
+                "CLAUDE_CONFIG_DIR".into(),
+                home.path().display().to_string(),
+            );
+            for (name, value) in *env {
+                config.env.insert((*name).into(), (*value).into());
+            }
+            let status = super::probe(&config).await.unwrap();
+            assert_eq!(status.shareable(), *expected, "{env:?} printed {status:?}");
+        }
+    }
+
+    #[test]
+    fn anything_unrecognised_serves_the_owner_alone() {
+        assert!(!shareable(json!({"loggedIn": true})));
+        assert!(!shareable(
+            json!({"loggedIn": true, "authMethod": "api-key"})
+        ));
+        assert!(!shareable(
+            json!({"loggedIn": false, "authMethod": "api_key"})
+        ));
     }
 }

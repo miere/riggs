@@ -54,7 +54,8 @@ pub struct ClaudeCode {
     ctx: Arc<Ctx>,
     slots: Mutex<HashMap<SessionKey, Arc<Slot>>>,
     repair: Arc<Repair>,
-    probe: Mutex<Option<tokio::task::AbortHandle>>,
+    /// Decided by the first probe; until then, and if it fails, the node serves its owner alone.
+    owner_only: AtomicBool,
     /// Cancelled on shutdown, which stops the credential warden.
     stopped: CancellationToken,
 }
@@ -77,7 +78,7 @@ impl ClaudeCode {
             repair,
             ctx,
             slots: Mutex::new(HashMap::new()),
-            probe: Mutex::new(None),
+            owner_only: AtomicBool::new(true),
             stopped: CancellationToken::new(),
         }
     }
@@ -159,12 +160,20 @@ impl Backend for ClaudeCode {
         }
         if self.ctx.host.set(host.clone()).is_ok() {
             self.ctx.health.start(host.credentials);
-            let ctx = self.ctx.clone();
-            let probe = tokio::spawn(async move {
-                let result = health::probe(&ctx.config).await;
-                ctx.health.probed(result);
-            });
-            *lock(&self.probe) = Some(probe.abort_handle());
+            // Awaited, unlike the rest of the health checks: no gateway may hear whether this node
+            // can be shared before the credential has been asked.
+            let probed = tokio::select! {
+                probed = health::probe(&self.ctx.config) => Some(probed),
+                () = self.stopped.cancelled() => None,
+            };
+            if let Some(probed) = probed {
+                let shareable = probed.as_ref().is_ok_and(health::Status::shareable);
+                tracing::info!(shareable, "asked Claude Code which credential it uses");
+                self.owner_only.store(!shareable, Ordering::SeqCst);
+                self.ctx
+                    .health
+                    .probed(probed.map(|status| status.logged_in));
+            }
             tokio::spawn(crate::warden::watch(self.ctx.clone(), self.stopped.clone()));
         }
         Ok(BackendInfo {
@@ -178,6 +187,7 @@ impl Backend for ClaudeCode {
                 embedded_resource: false,
             },
             resource_schemes: Vec::new(),
+            owner_only: self.owner_only.load(Ordering::SeqCst),
         })
     }
 
@@ -295,9 +305,6 @@ impl Backend for ClaudeCode {
 
     async fn shutdown(&self) {
         self.stopped.cancel();
-        if let Some(probe) = lock(&self.probe).take() {
-            probe.abort();
-        }
         self.repair.stop().await;
         let slots: Vec<Arc<Slot>> = lock(&self.slots).drain().map(|(_, slot)| slot).collect();
         let procs: Vec<Arc<Proc>> = slots

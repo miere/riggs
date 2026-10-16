@@ -69,6 +69,9 @@ pub struct ServerConfig {
     pub primary: GatewayName,
 }
 
+/// Why `initialize` is faulted when the gateway cannot confine an owner-only node to its owner.
+const UNCONFINED: &str = "this node's agent uses a credential that may serve its owner alone, such as a Claude subscription, and this gateway cannot confine the node to its owner";
+
 /// The name a node with a single, unnamed gateway gives it.
 pub const DEFAULT_GATEWAY: &str = "default";
 
@@ -103,6 +106,9 @@ pub enum Stopped {
     Closed,
     /// The gateway refused the metadata and will again until its owner changes it.
     Rejected(Rejection),
+    /// The agent's credential may serve this node's owner alone, and the gateway did not offer to
+    /// confine it to them. Dialling again will not change that.
+    Unconfined,
     LinkEnded,
 }
 
@@ -217,7 +223,7 @@ impl NodeServer {
         mut events: NodeEvents,
     ) -> Stopped {
         let inner = &self.inner;
-        let (closing, mut close_requested) = mpsc::channel::<()>(1);
+        let (closing, mut close_requested) = mpsc::channel::<Stopped>(1);
         let mut grace: Option<Pin<Box<Sleep>>> = None;
         let mut prune = interval_at(Instant::now() + PRUNE_INTERVAL, PRUNE_INTERVAL);
         loop {
@@ -229,11 +235,11 @@ impl NodeServer {
                     handle.close().await;
                     return Stopped::Shutdown;
                 }
-                Some(()) = close_requested.recv() => {
+                Some(stopped) = close_requested.recv() => {
                     inner.reset(gateway, ResetReason::Closed);
                     handle.close().await;
                     tracing::info!(%gateway, "gateway connection closed");
-                    return Stopped::Closed;
+                    return stopped;
                 }
                 () = expiry(&mut grace) => {
                     grace = None;
@@ -432,12 +438,19 @@ impl Inner {
         epoch: Option<u64>,
         id: RequestId,
         call: GatewayCall,
-        closing: mpsc::Sender<()>,
+        closing: mpsc::Sender<Stopped>,
     ) {
         let Some(epoch) = epoch else {
             return;
         };
         let answer = match call {
+            GatewayCall::Initialize(offer) if self.unconfined(&offer).await => {
+                tracing::error!(%gateway, "the agent's credential may serve this node's owner alone, and this gateway cannot confine the node to them; not serving it");
+                let refusal = rax::Error::new(ErrorKind::Unsupported, UNCONFINED);
+                self.answer(&handle, epoch, id, Err(refusal)).await;
+                let _ = closing.send(Stopped::Unconfined).await;
+                return;
+            }
             GatewayCall::Initialize(offer) => self
                 .initialize(&gateway, epoch, offer)
                 .await
@@ -466,15 +479,16 @@ impl Inner {
             GatewayCall::Close => {
                 self.answer(&handle, epoch, id, Ok(GatewayReply::Close))
                     .await;
-                let _ = closing.send(()).await;
+                let _ = closing.send(Stopped::Closed).await;
                 return;
             }
         };
         let initialized = matches!(answer, Ok(GatewayReply::Initialize(_)));
         self.answer(&handle, epoch, id, answer).await;
         if initialized {
-            push_health_snapshot(&self.shared, epoch).await;
+            // First, so a gateway slow to take the credential's health still hears the activity.
             self.shared.activity_changed.notify_one();
+            push_health_snapshot(&self.shared, epoch).await;
         }
     }
 
@@ -532,6 +546,14 @@ impl Inner {
         }
     }
 
+    /// Whether this gateway would serve an owner-only agent without confining it to the owner. An
+    /// agent that failed to start is not judged here: `initialize` reports that failure.
+    async fn unconfined(&self, offer: &Initialize) -> bool {
+        self.started()
+            .await
+            .is_ok_and(|info| info.owner_only && !offer.capabilities.owner_only)
+    }
+
     async fn initialize(
         &self,
         gateway: &str,
@@ -557,6 +579,7 @@ impl Inner {
                 tool_groups: true,
                 local_files: true,
                 tool_resources: true,
+                owner_only: info.owner_only,
             },
             metadata: self.shared.metadata_for(gateway),
         })

@@ -25,6 +25,10 @@ pub enum DialError {
         "the gateway rejected this node's metadata: {message}. Fix its metadata in the configuration and start riggs again"
     )]
     Rejected { message: String },
+    #[error(
+        "the gateway cannot confine this node to its owner, which the agent's credential requires. Update the gateway, or give the agent an API key, and start riggs again"
+    )]
+    Unconfined,
     #[error(transparent)]
     Endpoint(#[from] EndpointError),
 }
@@ -87,6 +91,10 @@ impl Dialer {
                     return Err(DialError::Rejected {
                         message: rejection.message,
                     });
+                }
+                Stopped::Unconfined => {
+                    tracing::error!(%gateway, urls = ?self.endpoints, "the gateway cannot confine this node to its owner, which the agent's credential requires; not dialling it again");
+                    return Err(DialError::Unconfined);
                 }
                 Stopped::Closed => {}
                 Stopped::LinkEnded => {

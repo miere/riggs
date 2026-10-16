@@ -30,3 +30,13 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+      # Whether a node may be shared rests on what `claude auth status` prints, so the latest
+      # Claude Code is asked on every run.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Check Riggs still reads the latest Claude Code's credential
+        run: |
+          npm install --global @anthropic-ai/claude-code
+          claude --version
+          RIGGS_REAL_CLAUDE="$(command -v claude)" cargo test --locked -p riggs-claude-code --lib -- --ignored real_claude
