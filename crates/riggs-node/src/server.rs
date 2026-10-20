@@ -576,7 +576,7 @@ impl Inner {
                 resource_schemes,
                 tool_gate: info.tool_gate,
                 sessions: self.sessions.durability(&info),
-                tool_groups: true,
+                tool_groups: info.tool_groups,
                 local_files: true,
                 tool_resources: true,
                 owner_only: info.owner_only,

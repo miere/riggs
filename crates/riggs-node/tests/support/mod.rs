@@ -107,6 +107,7 @@ impl Fake {
                     embedded_resource: false,
                 },
                 resource_schemes: vec!["chat".into()],
+                tool_groups: true,
                 owner_only: false,
             },
             seen,
@@ -128,6 +129,13 @@ impl Fake {
     pub fn owner_only() -> Arc<Self> {
         let mut fake = Arc::into_inner(Self::new()).expect("nobody else holds a new fake");
         fake.info.owner_only = true;
+        Arc::new(fake)
+    }
+
+    /// An agent that cannot be lent a gateway's tool groups, as an ACP agent cannot.
+    pub fn without_tool_groups() -> Arc<Self> {
+        let mut fake = Arc::into_inner(Self::new()).expect("nobody else holds a new fake");
+        fake.info.tool_groups = false;
         Arc::new(fake)
     }
 

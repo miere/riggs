@@ -186,6 +186,8 @@ impl Backend for AcpBackend {
             },
             prompt: info.prompt,
             resource_schemes: Vec::new(),
+            // The ACP agent is started with no MCP servers, so a lent group has nowhere to go.
+            tool_groups: false,
             // ACP does not say which credential an agent signed in with, so whether it may be
             // shared stays the owner's call, made in the gateway's metadata.
             owner_only: false,
