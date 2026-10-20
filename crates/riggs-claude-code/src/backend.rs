@@ -187,6 +187,7 @@ impl Backend for ClaudeCode {
                 embedded_resource: false,
             },
             resource_schemes: Vec::new(),
+            tool_groups: true,
             owner_only: self.owner_only.load(Ordering::SeqCst),
         })
     }

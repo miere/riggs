@@ -43,6 +43,17 @@ async fn initialize_declares_every_capability_the_backend_resolved() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_agent_that_cannot_be_lent_tools_does_not_take_tool_groups() {
+    let h = harness(Fake::without_tool_groups(), ephemeral()).await;
+    let initialized = initialize(&h.gateway.link, all_caps()).await;
+    assert!(
+        !initialized.capabilities.tool_groups,
+        "a gateway must not route sessions that need lent tools to this node"
+    );
+    h.node.shut_down().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_agent_that_may_be_shared_does_not_ask_to_be_confined() {
     let h = harness(Fake::new(), ephemeral()).await;
     let initialized = initialize(&h.gateway.link, all_caps()).await;

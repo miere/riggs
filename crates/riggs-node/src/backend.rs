@@ -28,6 +28,9 @@ pub struct BackendInfo {
     pub sessions: SessionDurability,
     pub prompt: PromptCapabilities,
     pub resource_schemes: Vec<String>,
+    /// The agent can be lent a gateway's tool groups. A node whose agent cannot says so, so a
+    /// gateway that needs its tools sends the session elsewhere instead of losing them here.
+    pub tool_groups: bool,
     /// The agent's credential may serve the node's owner alone, such as a Claude subscription, so
     /// every gateway must confine the node to its owner or go unserved.
     pub owner_only: bool,
