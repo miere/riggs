@@ -1420,8 +1420,8 @@ checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
 
 [[package]]
 name = "rax"
-version = "0.11.0"
-source = "git+https://github.com/miere/rax-rs?rev=d5b0fd27e223593bdcb03a0cc4eaca95684f7070#d5b0fd27e223593bdcb03a0cc4eaca95684f7070"
+version = "0.13.0"
+source = "git+https://github.com/miere/rax-rs?tag=0.13.0#e83c73d0de81e7233801d48cd2c5c720fac3d2ad"
 dependencies = [
  "base64 0.22.1",
  "serde",
@@ -1433,8 +1433,8 @@ dependencies = [
 
 [[package]]
 name = "rax-sim"
-version = "0.11.0"
-source = "git+https://github.com/miere/rax-rs?rev=d5b0fd27e223593bdcb03a0cc4eaca95684f7070#d5b0fd27e223593bdcb03a0cc4eaca95684f7070"
+version = "0.13.0"
+source = "git+https://github.com/miere/rax-rs?tag=0.13.0#e83c73d0de81e7233801d48cd2c5c720fac3d2ad"
 dependencies = [
  "rax",
  "rax-tokio",
@@ -1448,8 +1448,8 @@ dependencies = [
 
 [[package]]
 name = "rax-tokio"
-version = "0.11.0"
-source = "git+https://github.com/miere/rax-rs?rev=d5b0fd27e223593bdcb03a0cc4eaca95684f7070#d5b0fd27e223593bdcb03a0cc4eaca95684f7070"
+version = "0.13.0"
+source = "git+https://github.com/miere/rax-rs?tag=0.13.0#e83c73d0de81e7233801d48cd2c5c720fac3d2ad"
 dependencies = [
  "futures-util",
  "rand",
