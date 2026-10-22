@@ -5,9 +5,12 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-pub const PREFIX: &str = "mrtg_node_";
+/// Every RAX gateway names its node tokens `<gateway>_node_<selector>_<secret>`: Murtaugh's start
+/// `mrtg_node_`, `rax-gateway`'s `rax_node_`, Kepler's `kepler_node_`. Only the shape is checked,
+/// so a token from any of them is read the same way.
+pub const MARKER: &str = "_node_";
 const SELECTOR_LEN: usize = 16;
-pub const MINT_HINT: &str = "mint one on the gateway with `murtaugh-gateway node token mint`, then write it to that path with mode 0600";
+pub const MINT_HINT: &str = "mint one on the gateway (Murtaugh: `murtaugh-gateway node token mint`), then write it to that path with mode 0600";
 
 #[derive(Debug, thiserror::Error)]
 pub enum TokenError {
@@ -97,9 +100,12 @@ pub fn read(path: &Path) -> Result<NodeToken, TokenError> {
 }
 
 fn parse(token: &str) -> Result<(), &'static str> {
-    let rest = token
-        .strip_prefix(PREFIX)
-        .ok_or("it does not start with mrtg_node_")?;
+    let (gateway, rest) = token
+        .split_once(MARKER)
+        .ok_or("it is not shaped `<gateway>_node_<selector>_<secret>`")?;
+    if !is_gateway_name(gateway) {
+        return Err("it does not start with a gateway name such as mrtg_node_");
+    }
     let (selector, secret) = rest
         .split_once('_')
         .ok_or("it has no secret after the selector")?;
@@ -113,6 +119,14 @@ fn parse(token: &str) -> Result<(), &'static str> {
         return Err("it contains whitespace");
     }
     Ok(())
+}
+
+/// Lower-case letters, digits and underscores, starting with a letter, such as `mrtg` or `rax`.
+pub fn is_gateway_name(name: &str) -> bool {
+    name.starts_with(|c: char| c.is_ascii_lowercase())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
 }
 
 #[cfg(test)]
@@ -161,7 +175,10 @@ mod tests {
     #[test]
     fn malformed_tokens_are_refused_without_quoting_them() {
         for bad in [
-            "xrtg_node_0123456789abcdef_secret",
+            "0123456789abcdef_secret",
+            "Mrtg_node_0123456789abcdef_secret",
+            "_node_0123456789abcdef_secret",
+            "mrtg-node-0123456789abcdef_secret",
             "mrtg_node_0123456789abcdef",
             "mrtg_node_0123456789abcde_secret",
             "mrtg_node_0123456789abcdeg_secret",
@@ -172,6 +189,18 @@ mod tests {
             let message = read(&path).unwrap_err().to_string();
             assert!(message.contains("malformed"), "{bad}: {message}");
             assert!(!message.contains("0123456789abcde"), "{message}");
+        }
+    }
+
+    #[test]
+    fn any_gateways_token_is_read_by_its_shape() {
+        for good in [
+            "mrtg_node_0123456789abcdef_secret",
+            "rax_node_0123456789abcdef_secret",
+            "kepler_node_0123456789abcdef_c2Vj_cmV0-x",
+            "my_gw2_node_0123456789abcdef_secret",
+        ] {
+            assert_eq!(parse(good), Ok(()), "{good}");
         }
     }
 

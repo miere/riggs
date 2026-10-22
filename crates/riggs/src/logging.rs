@@ -3,7 +3,7 @@ use std::io::{self, Write};
 use tracing_subscriber::fmt::MakeWriter;
 
 use crate::config::{LogConfig, LogFormat};
-use crate::token::PREFIX;
+use crate::token::{MARKER, is_gateway_name};
 
 const REDACTED: &str = "[redacted]";
 
@@ -42,21 +42,28 @@ impl Write for RedactingWriter {
     }
 }
 
+/// Hides the body of anything shaped like a node token, `<gateway>_node_…`, whichever gateway
+/// minted it.
 pub fn redact(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
-    while let Some(at) = rest.find(PREFIX) {
+    while let Some(at) = rest.find(MARKER) {
         let (before, from) = rest.split_at(at);
-        out.push_str(before);
-        let body = &from[PREFIX.len()..];
+        let name_start = before
+            .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .map_or(0, |i| i + 1);
+        let body = &from[MARKER.len()..];
         let end = body
             .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
             .unwrap_or(body.len());
-        out.push_str(PREFIX);
-        if end > 0 {
+        out.push_str(before);
+        out.push_str(MARKER);
+        if end > 0 && is_gateway_name(&before[name_start..]) {
             out.push_str(REDACTED);
+            rest = &body[end..];
+        } else {
+            rest = body;
         }
-        rest = &body[end..];
     }
     out.push_str(rest);
     out
@@ -74,5 +81,10 @@ mod tests {
         );
         assert_eq!(redact("no token"), "no token");
         assert_eq!(redact("mrtg_node_ alone"), "mrtg_node_ alone");
+        assert_eq!(
+            redact("kepler_node_0123456789abcdef_s3cr-et and rax_node_x"),
+            "kepler_node_[redacted] and rax_node_[redacted]"
+        );
+        assert_eq!(redact("Bad_node_x _node_x"), "Bad_node_x _node_x");
     }
 }
