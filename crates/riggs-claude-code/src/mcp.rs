@@ -119,13 +119,18 @@ fn tools() -> Value {
         },
         {
             "name": "present_plan",
-            "description": "Show the person a plan and wait until they approve it, ask for changes or cancel it. Do not start the work before they approve.",
+            "description": "Show the person a plan and wait until they approve it, ask for changes or cancel it. Do not start the work before they approve. List its steps too, if it has them: where the conversation keeps a progress list, they join it once approved.",
             "inputSchema": {
                 "type": "object",
                 "required": ["plan"],
                 "properties": {
                     "plan": {"type": "string", "description": "The plan, in Markdown."},
                     "title": {"type": "string"},
+                    "steps": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "The plan's steps, one short line each.",
+                    },
                 },
             },
         },
@@ -244,14 +249,14 @@ async fn ask(args: &Value, turn: Option<TurnCtl>) -> ToolResult {
 }
 
 async fn plan(args: &Value, turn: Option<TurnCtl>) -> ToolResult {
-    let (title, plan) = match interaction::parse_plan(args) {
+    let parsed = match interaction::parse_plan(args) {
         Ok(parsed) => parsed,
         Err(refused) => return refused,
     };
     let Some(turn) = turn else {
         return ToolResult::error("Error: there is no conversation to present a plan in");
     };
-    let request = interaction::plan_request(interaction::prompt_id(), title, plan);
+    let request = interaction::plan_request(interaction::prompt_id(), parsed);
     interaction::plan_result(turn.prompts.plan(request).await)
 }
 
