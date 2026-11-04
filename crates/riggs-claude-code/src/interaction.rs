@@ -238,18 +238,35 @@ fn not_answered(note: &str) -> ToolResult {
     ToolResult::ok(json!({"answered": false, "note": note}))
 }
 
-pub(crate) fn parse_plan(args: &Value) -> Result<(String, String), ToolResult> {
+/// A plan to put to a person: its title, its Markdown, and its steps one line each, if listed.
+pub(crate) struct ParsedPlan {
+    pub title: String,
+    pub plan: String,
+    pub steps: Vec<String>,
+}
+
+pub(crate) fn parse_plan(args: &Value) -> Result<ParsedPlan, ToolResult> {
     let plan = blank_to_none(args, "plan")
         .ok_or_else(|| ToolResult::error("Error: a plan is required"))?;
     let title = blank_to_none(args, "title").unwrap_or_else(|| PLAN_TITLE.to_owned());
-    Ok((title, plan))
+    let steps = args
+        .get("steps")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(|step| step.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|step| !step.is_empty())
+        .collect();
+    Ok(ParsedPlan { title, plan, steps })
 }
 
-pub(crate) fn plan_request(id: PromptId, title: String, plan: String) -> PlanRequest {
+pub(crate) fn plan_request(id: PromptId, parsed: ParsedPlan) -> PlanRequest {
     PlanRequest {
         id,
-        title: Some(title),
-        plan,
+        title: Some(parsed.title),
+        plan: parsed.plan,
+        steps: parsed.steps,
     }
 }
 
@@ -257,10 +274,14 @@ pub(crate) fn plan_result(answer: DisplayAnswer) -> ToolResult {
     let not_approved = |note: &str| ToolResult::ok(json!({"approved": false, "note": note}));
     match answer.outcome {
         DisplayOutcome::Answered => match answer.choice {
+            // The gateway may say what it did with the plan, such as listing its steps.
             Some(PlanChoice::Proceed) => ToolResult::ok(json!({
                 "approved": true,
                 "choice": "Proceed",
-                "note": "Approved — proceed with the plan as presented.",
+                "note": match answer.note.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+                    Some(note) => format!("Approved — proceed with the plan as presented. {note}"),
+                    None => "Approved — proceed with the plan as presented.".to_owned(),
+                },
             })),
             Some(PlanChoice::Revise) => ToolResult::ok(json!({
                 "approved": false,
@@ -420,13 +441,42 @@ mod tests {
 
     #[test]
     fn a_plan_defaults_its_title_and_maps_each_choice() {
-        let (title, plan) = parse_plan(&json!({"plan": "do it"})).unwrap();
-        assert_eq!((title.as_str(), plan.as_str()), (PLAN_TITLE, "do it"));
+        let parsed = parse_plan(&json!({"plan": "do it"})).unwrap();
+        assert_eq!(
+            (parsed.title.as_str(), parsed.plan.as_str()),
+            (PLAN_TITLE, "do it")
+        );
+        assert!(parsed.steps.is_empty());
         assert!(parse_plan(&json!({"plan": "  "})).is_err());
         let revise = plan_result(DisplayAnswer {
             choice: Some(PlanChoice::Revise),
             ..answered(&[])
         });
         assert!(revise.text.contains(r#""approved":false"#) && revise.text.contains("Revise"));
+    }
+
+    #[test]
+    fn a_plan_carries_its_steps_and_the_gateways_note() {
+        let parsed =
+            parse_plan(&json!({"plan": "do it", "steps": [" Read\n the code ", "", 3, "Fix"]}))
+                .unwrap();
+        let request = plan_request(PromptId("p1".to_owned()), parsed);
+        assert_eq!(request.steps, ["Read the code", "Fix"]);
+        let approved = |note: Option<&str>| {
+            plan_result(DisplayAnswer {
+                choice: Some(PlanChoice::Proceed),
+                note: note.map(str::to_owned),
+                ..answered(&[])
+            })
+        };
+        let seeded = approved(Some("Its steps are s1 and s2."));
+        assert!(
+            seeded
+                .text
+                .contains("as presented. Its steps are s1 and s2."),
+            "{}",
+            seeded.text
+        );
+        assert!(approved(None).text.contains(r#"as presented.""#));
     }
 }
