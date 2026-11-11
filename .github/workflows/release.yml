@@ -18,11 +18,12 @@ jobs:
       matrix:
         include:
           - target: aarch64-apple-darwin
-            runner: macos-14
+            runner: macos-latest
           - target: x86_64-apple-darwin
-            runner: macos-14
+            runner: macos-latest
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
+    # Floating labels: pinned macOS images get retired (macos-14 was, on 2026-11-02) and the build stops.
     runs-on: ${{ matrix.runner }}
     # The signing certificate's secrets live in this environment.
     environment: release
