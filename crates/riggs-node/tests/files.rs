@@ -164,6 +164,7 @@ async fn a_tool_answers_with_files_the_node_fetches_first() {
             description: "Read a Slack file.".into(),
             input_schema: None,
             kind: rax::tool::ToolKind::Read,
+            meta: None,
         };
         host.tools
             .call(

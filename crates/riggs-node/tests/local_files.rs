@@ -25,6 +25,7 @@ fn attach() -> ToolDef {
             "file": {"type": "string", "format": "local-file"},
             "comment": {"type": "string"}}})),
         kind: ToolKind::Edit,
+        meta: None,
     }
 }
 

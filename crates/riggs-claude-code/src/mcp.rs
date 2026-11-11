@@ -66,11 +66,18 @@ fn initialize(params: &Value, server: &str) -> Value {
     })
 }
 
+/// Claude Code defers every MCP tool behind ToolSearch unless its `tools/list` entry carries this,
+/// so a tool the agent reaches for in most turns would otherwise cost a round-trip to load.
+fn always_load() -> Value {
+    json!({"anthropic/alwaysLoad": true})
+}
+
 fn tools() -> Value {
     json!([
         {
             "name": "auth",
             "description": "Ask for credentials you do not have and WAIT until they are granted. Use it when a call failed for missing or expired authentication — never guess, retry blindly, or ask the person to run auth commands themselves. Pass `tool` as the capability DIRECTLY affected, as the person knows it (e.g. `gcp-mcp`, `postgres-mcp`), not the binary it shells out to (e.g. `gcloud`); name the binary only when you are running it yourself. The sign-in runs on this machine, and this machine's owner is asked to complete it — not whoever you are talking to. It returns an error if they decline, it times out, or it fails: treat any error as a hard stop and do not retry the original call.",
+            "_meta": always_load(),
             "inputSchema": {
                 "type": "object",
                 "required": ["tool", "profile"],
@@ -89,6 +96,7 @@ fn tools() -> Value {
         {
             "name": "ask",
             "description": "Ask the person you are working for one to four multiple-choice questions and wait for their answers. Use it whenever you need a decision from them.",
+            "_meta": always_load(),
             "inputSchema": {
                 "type": "object",
                 "required": ["questions"],
@@ -120,6 +128,7 @@ fn tools() -> Value {
         {
             "name": "present_plan",
             "description": "Show the person a plan and wait until they approve it, ask for changes or cancel it. Do not start the work before they approve. List its steps too, if it has them: where the conversation keeps a progress list, they join it once approved.",
+            "_meta": always_load(),
             "inputSchema": {
                 "type": "object",
                 "required": ["plan"],
@@ -138,17 +147,22 @@ fn tools() -> Value {
 }
 
 /// One group's tools, as the agent sees them. Names stay bare: Claude Code prefixes them with
-/// the server itself, so they arrive as `mcp__<namespace>__<name>`.
+/// the server itself, so they arrive as `mcp__<namespace>__<name>`. A tool's `meta` goes out as
+/// its `_meta` untouched: what the hints mean is between the gateway and the agent.
 fn published(group: &ToolGroup) -> Value {
     let tools: Vec<Value> = group
         .tools
         .iter()
         .map(|tool| {
-            json!({
+            let mut published = json!({
                 "name": tool.name,
                 "description": tool.description,
                 "inputSchema": tool.input_schema.clone().unwrap_or_else(|| json!({"type": "object"})),
-            })
+            });
+            if let Some(meta) = &tool.meta {
+                published["_meta"] = meta.clone();
+            }
+            published
         })
         .collect();
     Value::Array(tools)
@@ -275,14 +289,36 @@ mod tests {
                     description: "Read a Slack message.".to_owned(),
                     input_schema: Some(json!({"type": "object", "required": ["link"]})),
                     kind: ToolKind::Read,
+                    meta: None,
                 },
                 ToolDef {
                     name: "speak".to_owned(),
                     description: "Say it out loud.".to_owned(),
                     input_schema: None,
                     kind: ToolKind::Other,
+                    meta: Some(json!({"anthropic/alwaysLoad": true})),
                 },
             ],
+        }
+    }
+
+    #[test]
+    fn a_tools_meta_is_published_as_its_mcp_meta() {
+        let published = published(&group());
+        assert_eq!(published[1]["_meta"], json!({"anthropic/alwaysLoad": true}));
+    }
+
+    /// Absent rather than null, so an agent that reads `_meta` strictly sees nothing at all.
+    #[test]
+    fn a_tool_without_meta_is_published_without_one() {
+        let published = published(&group());
+        assert!(published[0].get("_meta").is_none());
+    }
+
+    #[test]
+    fn riggs_keeps_its_own_tools_loaded() {
+        for tool in tools().as_array().into_iter().flatten() {
+            assert_eq!(tool["_meta"], always_load(), "{}", tool["name"]);
         }
     }
 

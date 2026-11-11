@@ -60,6 +60,7 @@ pub fn slack_attach() -> ToolGroup {
                 "title": {"type": "string"}}}),
             ),
             kind: ToolKind::Edit,
+            meta: None,
         }],
     }
 }

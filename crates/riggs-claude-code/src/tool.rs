@@ -110,6 +110,7 @@ mod tests {
                 description: String::new(),
                 input_schema: None,
                 kind,
+                meta: None,
             }],
         };
         let groups = [
