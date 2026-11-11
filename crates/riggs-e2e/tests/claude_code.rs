@@ -135,6 +135,8 @@ async fn a_prompt_is_accepted_before_its_events_and_completes() {
             "stdio",
             "--disallowedTools",
             "AskUserQuestion,EnterPlanMode,ExitPlanMode",
+            "--allowedTools",
+            "Grep,Glob",
             "--session-id",
             session.0.as_str(),
         ]

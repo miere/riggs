@@ -3,6 +3,8 @@ use riggs_node::SessionKey;
 use crate::config::ClaudeCodeConfig;
 
 pub(crate) const DISALLOWED_TOOLS: &str = "AskUserQuestion,EnterPlanMode,ExitPlanMode";
+// Claude Code drops Grep and Glob for Bash's built-in ugrep/bfs unless --allowedTools names them.
+pub(crate) const ALLOWED_TOOLS: &str = "Grep,Glob";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Launch {
@@ -26,6 +28,8 @@ pub(crate) fn argv(config: &ClaudeCodeConfig, key: &SessionKey, launch: Launch) 
         "stdio",
         "--disallowedTools",
         DISALLOWED_TOOLS,
+        "--allowedTools",
+        ALLOWED_TOOLS,
     ]
     .into_iter()
     .map(str::to_owned)
