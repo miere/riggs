@@ -1285,6 +1285,7 @@ async fn a_session_publishes_and_calls_the_tool_groups_it_was_opened_with() {
             description: format!("{name} from {namespace}"),
             input_schema: Some(json!({"type": "object"})),
             kind: ToolKind::Read,
+            meta: None,
         }],
     };
     let created = node

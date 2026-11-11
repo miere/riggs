@@ -98,6 +98,7 @@ async fn tool_calls_and_background_events_reach_the_sessions_own_gateway() {
                 description: "Read the open file.".into(),
                 input_schema: None,
                 kind: ToolKind::Read,
+                meta: None,
             };
             host.tools
                 .call(&key, "editor", &read, json!({}), Path::new("."))
